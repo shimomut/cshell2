@@ -38,6 +38,11 @@ _DEFAULT_CONFIG = """\
 # )
 # def hello(name: str = "world"):
 #     print(f"Hello, {name}!")
+#
+# Enable completion recipes for external commands:
+#
+# from cshell2.recipes import enable
+# enable("make")
 """
 
 
@@ -80,11 +85,19 @@ class ShellCompleter(PTKCompleter):
 
             cmd = self._registry.get(command_name)
             completions = []
-            has_completer = cmd and arg_index in cmd.completers
-            if has_completer:
+            has_completer = False
+            if cmd and arg_index in cmd.completers:
+                has_completer = True
                 completer = cmd.completers[arg_index]
                 if completer.should_activate(ctx):
                     completions = completer.complete(ctx)
+            else:
+                ext = self._registry.get_external_completers(command_name)
+                if ext and arg_index in ext:
+                    has_completer = True
+                    completer = ext[arg_index]
+                    if completer.should_activate(ctx):
+                        completions = completer.complete(ctx)
 
             if not completions and not has_completer:
                 completions = self._file_completer.complete(ctx)
@@ -265,7 +278,7 @@ class Shell:
             return
 
         command_name = tokens[0]
-        args = tokens[1:]
+        args = [os.path.expanduser(a) for a in tokens[1:]]
 
         cmd = self.registry.get(command_name)
         if cmd:

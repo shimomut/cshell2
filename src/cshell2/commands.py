@@ -20,6 +20,7 @@ class Command:
 class CommandRegistry:
     def __init__(self):
         self._commands: dict[str, Command] = {}
+        self._external_completers: dict[str, dict[int, Completer]] = {}
 
     def command(
         self,
@@ -54,6 +55,17 @@ class CommandRegistry:
             help_text=inspect.getdoc(func) or "",
         )
         self._commands[cmd_name] = cmd
+
+    def register_external_completers(
+        self,
+        command_name: str,
+        completers: dict[int, Completer],
+    ) -> None:
+        """Register completers for an external (system) command."""
+        self._external_completers[command_name] = completers
+
+    def get_external_completers(self, command_name: str) -> dict[int, Completer] | None:
+        return self._external_completers.get(command_name)
 
     def get(self, name: str) -> Command | None:
         return self._commands.get(name)
