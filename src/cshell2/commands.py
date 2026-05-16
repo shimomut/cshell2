@@ -21,6 +21,7 @@ class CommandRegistry:
     def __init__(self):
         self._commands: dict[str, Command] = {}
         self._external_completers: dict[str, dict[int, Completer]] = {}
+        self._builtin_names: set[str] = set()
 
     def command(
         self,
@@ -75,6 +76,17 @@ class CommandRegistry:
 
     def has(self, name: str) -> bool:
         return name in self._commands
+
+    def mark_builtins(self) -> None:
+        """Snapshot current commands as builtins (won't be removed on reload)."""
+        self._builtin_names = set(self._commands.keys())
+
+    def clear_user_commands(self) -> None:
+        """Remove all non-builtin commands and external completers."""
+        self._commands = {
+            k: v for k, v in self._commands.items() if k in self._builtin_names
+        }
+        self._external_completers.clear()
 
 
 registry = CommandRegistry()

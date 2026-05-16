@@ -117,6 +117,7 @@ class Shell:
         self.registry = registry
         self.context_manager = ContextManager()
         self._register_builtins()
+        self.registry.mark_builtins()
         self._load_user_config()
 
         history_path = Path.home() / ".cshell2" / "history"
@@ -143,6 +144,13 @@ class Shell:
         def exit_shell():
             """Exit the shell."""
             raise SystemExit(0)
+
+        @self.registry.command(name="reload")
+        def reload_config():
+            """Reload ~/.cshell2/config.py."""
+            self.registry.clear_user_commands()
+            self._load_user_config()
+            print("Config reloaded.")
 
         @self.registry.command(name="help")
         def help_cmd(command_name: str = ""):
@@ -256,6 +264,7 @@ class Shell:
             return
 
         import importlib.util
+        sys.modules.pop("cshell2_user_config", None)
         spec = importlib.util.spec_from_file_location("cshell2_user_config", config_path)
         if spec and spec.loader:
             module = importlib.util.module_from_spec(spec)
