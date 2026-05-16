@@ -382,6 +382,7 @@ class Shell:
         old_attrs = termios.tcgetattr(fd)
         old_sigint = signal.getsignal(signal.SIGINT)
         old_sigwinch = signal.getsignal(signal.SIGWINCH)
+        result = "exited"
         try:
             tty.setraw(fd)
             signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -405,16 +406,19 @@ class Shell:
                         idx = data.index(b"\x1d")
                         if idx > 0:
                             slot.write_stdin(data[:idx])
-                        return "switched"
+                        result = "switched"
+                        break
                     slot.write_stdin(data)
-            return "exited"
+            return result
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
             signal.signal(signal.SIGINT, old_sigint)
             signal.signal(signal.SIGWINCH, old_sigwinch)
-            # Reset scroll region to full terminal and move cursor to bottom
-            sys.stdout.write("\x1b[r\x1b[999B")
-            sys.stdout.flush()
+            if result == "switched":
+                suspend_seq = slot.suspend_terminal_modes()
+                if suspend_seq:
+                    sys.stdout.write(suspend_seq)
+                    sys.stdout.flush()
 
     def _show_switch_menu(self) -> str | None:
         """Show context switch menu. Returns context name to switch to, or None."""
@@ -496,8 +500,19 @@ class Shell:
                 ctx = self.context_manager.current()
 
                 if ctx and ctx.process_slot and ctx.process_slot.is_alive():
-                    ctx.process_slot.replay_buffer()
+                    ctx.process_slot.buffer.drain()  # discard stale buffer
+                    # Restore terminal modes the child had active
+                    restore_seq = ctx.process_slot.restore_terminal_modes()
+                    if restore_seq:
+                        sys.stdout.write(restore_seq)
+                        sys.stdout.flush()
                     ctx.process_slot.activate()
+                    # Force child to redraw
+                    try:
+                        rows, cols = os.get_terminal_size()
+                        ctx.process_slot.resize(rows, cols)
+                    except OSError:
+                        pass
                     result = self._enter_forwarding_mode(ctx.process_slot)
                     ctx.process_slot.deactivate()
                     if result == "switched":

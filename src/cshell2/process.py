@@ -31,6 +31,15 @@ class OutputBuffer:
             return chunks
 
 
+_TRACKED_MODES = {
+    b"1049": "alt_screen",   # alternate screen buffer
+    b"1000": "mouse_click",  # mouse click tracking
+    b"1002": "mouse_btn",    # mouse button tracking
+    b"1003": "mouse_all",    # all mouse motion tracking
+    b"1006": "mouse_sgr",    # SGR mouse mode
+}
+
+
 class ProcessSlot:
     """Manages a single PTY subprocess with output buffering for context switching."""
 
@@ -42,6 +51,9 @@ class ProcessSlot:
         self.exit_code: int | None = None
         self._exit_event = threading.Event()
         self._reader_thread: threading.Thread | None = None
+        self.terminal_modes: dict[str, bool] = {
+            name: False for name in _TRACKED_MODES.values()
+        }
 
     def start(self, argv: list[str], env: dict[str, str], cwd: str) -> None:
         master_fd, slave_fd = pty.openpty()
@@ -100,6 +112,7 @@ class ProcessSlot:
                     break
                 if not data:
                     break
+                self._track_terminal_modes(data)
                 self.buffer.append(data)
                 if self.active:
                     sys.stdout.buffer.write(data)
@@ -119,11 +132,57 @@ class ProcessSlot:
             except OSError:
                 pass
 
+    def _track_terminal_modes(self, data: bytes) -> None:
+        """Scan output for DEC private mode set/reset sequences."""
+        # Match \x1b[?<number>h (enable) and \x1b[?<number>l (disable)
+        i = 0
+        while i < len(data):
+            idx = data.find(b"\x1b[?", i)
+            if idx == -1:
+                break
+            # Parse the number after \x1b[?
+            start = idx + 3
+            end = start
+            while end < len(data) and data[end:end + 1].isdigit():
+                end += 1
+            if end < len(data) and end > start:
+                mode_num = data[start:end]
+                action = data[end:end + 1]
+                if mode_num in _TRACKED_MODES:
+                    name = _TRACKED_MODES[mode_num]
+                    if action == b"h":
+                        self.terminal_modes[name] = True
+                    elif action == b"l":
+                        self.terminal_modes[name] = False
+            i = end + 1 if end > idx else idx + 1
+
     def activate(self) -> None:
         self.active = True
 
     def deactivate(self) -> None:
         self.active = False
+
+    def suspend_terminal_modes(self) -> str:
+        """Return escape sequences to undo active terminal modes on switch-away."""
+        _MODE_CODES = {v: k for k, v in _TRACKED_MODES.items()}
+        seq = ""
+        for name, active in self.terminal_modes.items():
+            if active:
+                code = _MODE_CODES[name].decode()
+                seq += f"\x1b[?{code}l"
+        if self.terminal_modes.get("alt_screen"):
+            seq += "\x1b[?25h"  # show cursor
+        return seq
+
+    def restore_terminal_modes(self) -> str:
+        """Return escape sequences to re-enable terminal modes on switch-back."""
+        _MODE_CODES = {v: k for k, v in _TRACKED_MODES.items()}
+        seq = ""
+        for name, active in self.terminal_modes.items():
+            if active:
+                code = _MODE_CODES[name].decode()
+                seq += f"\x1b[?{code}h"
+        return seq
 
     def replay_buffer(self) -> None:
         chunks = self.buffer.drain()
