@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cshell2"
+version = "0.1.0"
+description = "A lightweight but powerful terminal shell environment"
+requires-python = ">=3.12"
+dependencies = [
+    "prompt-toolkit>=3.0",
+]
+
+[project.scripts]
+cshell2 = "cshell2.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
