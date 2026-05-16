@@ -150,6 +150,8 @@ class Shell:
             completer=ShellCompleter(self.registry, self.context_manager),
             history=FileHistory(str(history_path)),
         )
+        self.session.app.ttimeoutlen = 0.1
+        self.session.app.timeoutlen = 0.1
 
     def _register_builtins(self) -> None:
         from .completion import CallbackCompleter, ChoiceCompleter, Completer, Completion
@@ -564,6 +566,10 @@ class Shell:
 
         @bindings.add("c-]")
         def _switch(event):
+            event.app.exit(result=_SWITCH_SENTINEL)
+
+        @bindings.add("escape", "]", eager=True)
+        def _switch_esc(event):
             event.app.exit(result=_SWITCH_SENTINEL)
 
         return bindings
