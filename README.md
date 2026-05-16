@@ -1,1 +1,119 @@
 # cshell2
+
+A lightweight but powerful terminal shell environment with rich tab completion and context switching.
+
+## Features
+
+- **Rich tab completion** — per-argument completers with descriptions, powered by prompt_toolkit
+- **Context switching** — named environments with variables and working directories, with push/pop support
+- **Custom commands** — define Python functions as shell commands with full completion support
+- **System command fallback** — anything not a registered command runs through the system shell
+- **History** — persistent history with Ctrl+R search
+
+## Installation
+
+Requires Python 3.12+.
+
+```bash
+pip install -e .
+```
+
+## Usage
+
+```bash
+cshell2
+```
+
+### Built-in Commands
+
+| Command | Description |
+|---------|-------------|
+| `cd <path>` | Change directory |
+| `help [command]` | Show help for a command or list all commands |
+| `context` | Manage contexts (see below) |
+| `exit` | Exit the shell |
+
+Any command not listed above is passed through to the system shell (e.g., `ls`, `git`, `grep`).
+
+### Contexts
+
+Contexts let you define named environments with variables that are exported to `os.environ` and a remembered working directory.
+
+```
+cshell2> context push prod --account 123456 --region us-east-1
+Pushed context 'prod'
+[prod] cshell2> context push staging --account 789012 --region us-west-2
+Pushed context 'staging'
+[staging] cshell2> context pop
+Popped 'staging', now in 'prod'
+[prod] cshell2> context list
+  * prod {'account': '123456', 'region': 'us-east-1'}
+```
+
+Subcommands:
+- `context push <name> [--key value ...]` — create and switch to a context
+- `context pop` — return to the previous context
+- `context switch <name>` — switch without modifying the stack
+- `context list` — show all contexts
+
+### Tab Completion
+
+Press TAB to complete:
+- Command names (registered commands + system PATH executables)
+- File/directory paths (default fallback)
+- Custom per-argument completions defined by commands
+
+## Customization
+
+Create `~/.cshell2/config.py` to define custom commands and completers. This file is plain Python that imports from cshell2:
+
+```python
+# ~/.cshell2/config.py
+from cshell2.commands import registry
+from cshell2.completion import Completer, Completion, ChoiceCompleter
+
+class InstanceCompleter(Completer):
+    def complete(self, ctx):
+        account = ctx.args[0] if ctx.args else ctx.shell_context.get_variable("account")
+        # fetch instances for account...
+        return [Completion(value="i-abc123", description="web-server-1")]
+
+@registry.command(
+    name="connect",
+    completers={
+        0: ChoiceCompleter(["prod", "staging"]),
+        1: ChoiceCompleter(["us-east-1", "us-west-2"]),
+        2: InstanceCompleter(),
+    }
+)
+def connect(account, region, instance_id):
+    """SSH into an EC2 instance."""
+    import os
+    os.system(f"ssh {instance_id}")
+```
+
+### Available Completers
+
+| Completer | Description |
+|-----------|-------------|
+| `ChoiceCompleter(items)` | Complete from a static list |
+| `CallbackCompleter(func)` | Complete from a function's return value |
+| `FileCompleter()` | Complete filesystem paths |
+| `ConditionalCompleter(mapping)` | Pick a sub-completer based on preceding args |
+
+### Writing a Custom Completer
+
+Subclass `Completer` and implement `complete()`. The `CompletionContext` gives you:
+
+- `command` — the command being completed for
+- `args` — previously completed arguments
+- `arg_index` — which argument position is being completed
+- `prefix` — partial text typed so far
+- `shell_context` — the active context (access variables with `.get_variable()`)
+
+## File Locations
+
+| Path | Purpose |
+|------|---------|
+| `~/.cshell2/config.py` | User configuration |
+| `~/.cshell2/history` | Command history |
