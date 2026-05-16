@@ -3,12 +3,26 @@
 Each context stores:
 - variables: exported to os.environ on switch
 - cwd: saved/restored on switch
+- process_slot: optional running subprocess (for multiplexing)
 """
+
+from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .process import ProcessSlot
 
 _SENTINEL = object()
+
+
+class ContextState(Enum):
+    IDLE = auto()
+    RUNNING = auto()
+    EXITED = auto()
 
 
 @dataclass
@@ -16,6 +30,15 @@ class Context:
     name: str
     variables: dict[str, str] = field(default_factory=dict)
     cwd: str = field(default_factory=os.getcwd)
+    process_slot: ProcessSlot | None = field(default=None, repr=False)
+
+    @property
+    def state(self) -> ContextState:
+        if self.process_slot is None:
+            return ContextState.IDLE
+        if self.process_slot.is_alive():
+            return ContextState.RUNNING
+        return ContextState.EXITED
 
 
 class ContextManager:

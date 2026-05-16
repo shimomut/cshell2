@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import os
+import select
+import signal
 import subprocess
 import sys
+import termios
 import traceback
+import tty
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
@@ -22,9 +26,12 @@ from .completion import (
     FileCompleter,
     Completion,
 )
-from .context import ContextManager
+from .context import ContextManager, ContextState
 from .parsing import split_for_completion
+from .process import ProcessSlot
 from .prompt import get_prompt_func, set_prompt
+
+_SWITCH_SENTINEL = "\x1d__SWITCH__"
 
 _DEFAULT_CONFIG = """\
 # cshell2 user configuration
@@ -185,8 +192,8 @@ class Shell:
                     desc = cmd.help_text.split("\n")[0] if cmd.help_text else ""
                     print(f"  {name:20s} {desc}")
 
-        context_subcommands = ChoiceCompleter(["push", "pop", "switch", "list"])
-        names_after_subcommands = {"switch"}
+        context_subcommands = ChoiceCompleter(["push", "pop", "switch", "list", "kill"])
+        names_after_subcommands = {"switch", "kill"}
 
         class ContextNameCompleter(Completer):
             def __init__(self, cm):
@@ -268,7 +275,24 @@ class Shell:
                     for n in names:
                         marker = "*" if n == self.context_manager.current_name else " "
                         ctx = self.context_manager.contexts[n]
-                        print(f"  {marker} {n} {ctx.variables}")
+                        state = ctx.state.name.lower()
+                        state_str = f" ({state})" if state != "idle" else ""
+                        print(f"  {marker} {n}{state_str} {ctx.variables}")
+
+            elif subcmd == "kill":
+                if not rest:
+                    print("Usage: context kill <name>")
+                    return
+                target_name = rest[0]
+                if target_name not in self.context_manager.contexts:
+                    print(f"No context named '{target_name}'")
+                    return
+                target_ctx = self.context_manager.contexts[target_name]
+                if target_ctx.process_slot and target_ctx.process_slot.is_alive():
+                    target_ctx.process_slot.kill()
+                    print(f"Sent SIGTERM to process in context '{target_name}'")
+                else:
+                    print(f"Context '{target_name}' has no running process.")
 
             else:
                 print(f"Unknown subcommand: {subcmd}")
@@ -314,26 +338,179 @@ class Shell:
                 print(f"{command_name}: error: {e}")
                 traceback.print_exc()
         else:
+            self._execute_external(command_name, args)
+
+    def _execute_external(self, command_name: str, args: list[str]) -> None:
+        ctx = self.context_manager.current()
+        if ctx is None:
+            self.context_manager.create("default")
+            ctx = self.context_manager.current()
+
+        slot = ProcessSlot()
+        try:
+            slot.start(
+                argv=[command_name] + args,
+                env=dict(os.environ),
+                cwd=os.getcwd(),
+            )
+        except FileNotFoundError:
+            print(f"cshell2: command not found: {command_name}")
+            return
+        except OSError as e:
+            print(f"cshell2: {e}")
+            return
+
+        ctx.process_slot = slot
+        slot.activate()
+        result = self._enter_forwarding_mode(slot)
+        if result == "switched":
+            slot.deactivate()
+            self._handle_switch()
+        elif result == "exited":
+            slot.deactivate()
+            ctx.process_slot = None
+            exit_code = slot.exit_code
+            if exit_code and exit_code != 0:
+                print(f"\n[Process exited with code {exit_code}]")
+
+    def _enter_forwarding_mode(self, slot: ProcessSlot) -> str:
+        """Forward I/O between real terminal and subprocess PTY.
+
+        Returns 'exited' if process finished, 'switched' if user pressed Ctrl+].
+        """
+        fd = sys.stdin.fileno()
+        old_attrs = termios.tcgetattr(fd)
+        old_sigint = signal.getsignal(signal.SIGINT)
+        try:
+            tty.setraw(fd)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            while slot.is_alive():
+                rlist, _, _ = select.select([fd], [], [], 0.1)
+                if fd in rlist:
+                    data = os.read(fd, 1024)
+                    if not data:
+                        break
+                    if b"\x1d" in data:
+                        idx = data.index(b"\x1d")
+                        if idx > 0:
+                            slot.write_stdin(data[:idx])
+                        return "switched"
+                    slot.write_stdin(data)
+            return "exited"
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+            signal.signal(signal.SIGINT, old_sigint)
+
+    def _show_switch_menu(self) -> str | None:
+        """Show context switch menu. Returns context name to switch to, or None."""
+        contexts = self.context_manager.list_contexts()
+        current = self.context_manager.current_name
+
+        print("\n--- Context Switch (Ctrl+]) ---")
+        for i, name in enumerate(contexts):
+            ctx = self.context_manager.contexts[name]
+            state = ctx.state.name.lower()
+            marker = "*" if name == current else " "
+            print(f"  {marker} [{i + 1}] {name} ({state})")
+        print("  [n] New context")
+        print("  [q] Cancel")
+
+        try:
+            choice = input("Switch to: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+        if choice == "q" or not choice:
+            return None
+        if choice == "n":
             try:
-                result = subprocess.run(
-                    [command_name] + args,
-                    env=os.environ,
-                )
-            except FileNotFoundError:
-                print(f"cshell2: command not found: {command_name}")
-            except KeyboardInterrupt:
-                print()
+                name = input("Context name: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                return None
+            if name:
+                if name not in self.context_manager.contexts:
+                    self.context_manager.create(name)
+                return name
+            return None
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(contexts):
+                target = contexts[idx]
+                if target == current:
+                    return None
+                return target
+        except ValueError:
+            if choice in self.context_manager.contexts:
+                return choice
+
+        print("Invalid choice.")
+        return None
+
+    def _handle_switch(self) -> None:
+        """Handle Ctrl+] switch request."""
+        ctx = self.context_manager.current()
+        if ctx and ctx.process_slot:
+            ctx.process_slot.deactivate()
+
+        target_name = self._show_switch_menu()
+
+        if target_name is None:
+            if ctx and ctx.process_slot and ctx.process_slot.is_alive():
+                ctx.process_slot.activate()
+            return
+
+        self.context_manager.switch(target_name)
+        new_ctx = self.context_manager.current()
+        if new_ctx and new_ctx.process_slot and new_ctx.process_slot.is_alive():
+            new_ctx.process_slot.activate()
+
+    def _background_count(self) -> int:
+        """Count contexts with running processes (excluding current)."""
+        current = self.context_manager.current_name
+        count = 0
+        for name, ctx in self.context_manager.contexts.items():
+            if name != current and ctx.state == ContextState.RUNNING:
+                count += 1
+        return count
 
     def run(self) -> None:
+        self._install_sigwinch_handler()
         print("cshell2 — type 'help' for available commands, 'exit' to quit.")
         while True:
             try:
+                ctx = self.context_manager.current()
+
+                if ctx and ctx.process_slot and ctx.process_slot.is_alive():
+                    ctx.process_slot.replay_buffer()
+                    ctx.process_slot.activate()
+                    result = self._enter_forwarding_mode(ctx.process_slot)
+                    ctx.process_slot.deactivate()
+                    if result == "switched":
+                        self._handle_switch()
+                        continue
+                    else:
+                        exit_code = ctx.process_slot.exit_code
+                        ctx.process_slot = None
+                        if exit_code and exit_code != 0:
+                            print(f"\n[Process exited with code {exit_code}]")
+                        continue
+
+                if ctx and ctx.process_slot and not ctx.process_slot.is_alive():
+                    ctx.process_slot.replay_buffer()
+                    exit_code = ctx.process_slot.exit_code
+                    ctx.process_slot = None
+                    if exit_code and exit_code != 0:
+                        print(f"\n[Process exited with code {exit_code}]")
+
                 text = self.session.prompt(
                     self._get_prompt(),
                     multiline=True,
                     prompt_continuation="> ",
-                    key_bindings=self._multiline_bindings(),
+                    key_bindings=self._key_bindings(),
                 )
+                if text == _SWITCH_SENTINEL:
+                    self._handle_switch()
+                    continue
                 line = text.replace("\\\n", "")
                 if line.strip():
                     self._execute(line.strip())
@@ -346,9 +523,8 @@ class Shell:
             except SystemExit:
                 break
 
-    @staticmethod
-    def _multiline_bindings() -> KeyBindings:
-        """Enter submits unless the line ends with backslash."""
+    def _key_bindings(self) -> KeyBindings:
+        """Key bindings: Enter for multiline, Ctrl+] for context switch."""
         bindings = KeyBindings()
 
         @bindings.add("enter")
@@ -359,4 +535,20 @@ class Shell:
             else:
                 buf.validate_and_handle()
 
+        @bindings.add("c-]")
+        def _switch(event):
+            event.app.exit(result=_SWITCH_SENTINEL)
+
         return bindings
+
+    def _install_sigwinch_handler(self) -> None:
+        def on_resize(signum, frame):
+            ctx = self.context_manager.current()
+            if ctx and ctx.process_slot and ctx.process_slot.is_alive():
+                try:
+                    rows, cols = os.get_terminal_size()
+                    ctx.process_slot.resize(rows, cols)
+                except OSError:
+                    pass
+
+        signal.signal(signal.SIGWINCH, on_resize)

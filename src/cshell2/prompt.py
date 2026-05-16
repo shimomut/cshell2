@@ -29,10 +29,11 @@ def get_prompt_func() -> PromptFunc:
 
 
 def default_prompt(context_manager: "ContextManager") -> str:
-    """Default prompt: [context] parent/cwd HH:MM:SS> with ANSI colors."""
+    """Default prompt: [context] parent/cwd HH:MM:SS [bg:N]> with ANSI colors."""
     CYAN_BOLD = "\033[1;36m"
     BLUE_BOLD = "\033[1;34m"
     GREEN = "\033[32m"
+    YELLOW = "\033[33m"
     RESET = "\033[0m"
 
     parts = []
@@ -62,5 +63,13 @@ def default_prompt(context_manager: "ContextManager") -> str:
     timestamp = datetime.now().strftime("%H:%M:%S")
     parts.append(f"{BLUE_BOLD}{short_path}{RESET}")
     parts.append(f"{GREEN}{timestamp}{RESET}")
+
+    bg_count = 0
+    current_name = context_manager.current_name
+    for name, c in context_manager.contexts.items():
+        if name != current_name and c.process_slot and c.process_slot.is_alive():
+            bg_count += 1
+    if bg_count:
+        parts.append(f"{YELLOW}[bg:{bg_count}]{RESET}")
 
     return " ".join(parts) + "> "
