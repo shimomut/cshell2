@@ -12,6 +12,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer as PTKCompleter, Completion as PTKCompletion
 from prompt_toolkit.document import Document
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
 
 from .commands import CommandRegistry, registry
 from .completion import (
@@ -315,7 +316,13 @@ class Shell:
         print("cshell2 — type 'help' for available commands, 'exit' to quit.")
         while True:
             try:
-                line = self.session.prompt(self._get_prompt())
+                text = self.session.prompt(
+                    self._get_prompt(),
+                    multiline=True,
+                    prompt_continuation="> ",
+                    key_bindings=self._multiline_bindings(),
+                )
+                line = text.replace("\\\n", "")
                 if line.strip():
                     self._execute(line.strip())
             except KeyboardInterrupt:
@@ -326,3 +333,18 @@ class Shell:
                 break
             except SystemExit:
                 break
+
+    @staticmethod
+    def _multiline_bindings() -> KeyBindings:
+        """Enter submits unless the line ends with backslash."""
+        bindings = KeyBindings()
+
+        @bindings.add("enter")
+        def _(event):
+            buf = event.current_buffer
+            if buf.document.text_before_cursor.endswith("\\"):
+                buf.insert_text("\n")
+            else:
+                buf.validate_and_handle()
+
+        return bindings
