@@ -381,9 +381,20 @@ class Shell:
         fd = sys.stdin.fileno()
         old_attrs = termios.tcgetattr(fd)
         old_sigint = signal.getsignal(signal.SIGINT)
+        old_sigwinch = signal.getsignal(signal.SIGWINCH)
         try:
             tty.setraw(fd)
             signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+            def on_resize(signum, frame):
+                try:
+                    size = os.get_terminal_size(fd)
+                    slot.resize(size.lines, size.columns)
+                except OSError:
+                    pass
+
+            signal.signal(signal.SIGWINCH, on_resize)
+
             while slot.is_alive():
                 rlist, _, _ = select.select([fd], [], [], 0.1)
                 if fd in rlist:
@@ -400,6 +411,10 @@ class Shell:
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
             signal.signal(signal.SIGINT, old_sigint)
+            signal.signal(signal.SIGWINCH, old_sigwinch)
+            # Reset scroll region to full terminal and move cursor to bottom
+            sys.stdout.write("\x1b[r\x1b[999B")
+            sys.stdout.flush()
 
     def _show_switch_menu(self) -> str | None:
         """Show context switch menu. Returns context name to switch to, or None."""
