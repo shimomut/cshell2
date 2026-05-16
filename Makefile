@@ -2,20 +2,20 @@ VENV := .venv
 PYTHON := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 
-.PHONY: venv install test clean run
+.PHONY: install test clean run
 
-venv:
+$(VENV)/bin/activate:
 	python3.14 -m venv $(VENV)
 	$(PIP) install --upgrade pip
 	$(PIP) install -e .
 	$(PIP) install pytest
 
-install: venv
+install: $(VENV)/bin/activate
 
-test: venv
+test: $(VENV)/bin/activate
 	$(VENV)/bin/pytest tests/ -v
 
-run: venv
+run: $(VENV)/bin/activate
 	$(PYTHON) -m cshell2
 
 clean:

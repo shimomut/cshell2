@@ -23,6 +23,23 @@ from .completion import (
 from .context import ContextManager
 from .parsing import split_for_completion
 
+_DEFAULT_CONFIG = """\
+# cshell2 user configuration
+# Define custom commands and completers here.
+#
+# Example:
+#
+# from cshell2.commands import registry
+# from cshell2.completion import Completer, Completion, ChoiceCompleter
+#
+# @registry.command(
+#     name="hello",
+#     completers={0: ChoiceCompleter(["world", "there"])},
+# )
+# def hello(name: str = "world"):
+#     print(f"Hello, {name}!")
+"""
+
 
 class ShellCompleter(PTKCompleter):
     """Bridges cshell2's completion engine to prompt_toolkit."""
@@ -221,6 +238,8 @@ class Shell:
     def _load_user_config(self) -> None:
         config_path = Path.home() / ".cshell2" / "config.py"
         if not config_path.exists():
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(_DEFAULT_CONFIG)
             return
 
         import importlib.util

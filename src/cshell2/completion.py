@@ -44,8 +44,9 @@ class FileCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         prefix = ctx.prefix
         if prefix:
-            directory = os.path.dirname(prefix) or "."
-            partial = os.path.basename(prefix)
+            expanded_prefix = os.path.expanduser(prefix)
+            directory = os.path.dirname(expanded_prefix) or "."
+            partial = os.path.basename(expanded_prefix)
         else:
             directory = "."
             partial = ""
@@ -60,12 +61,11 @@ class FileCompleter(Completer):
             if entry.startswith(".") and not partial.startswith("."):
                 continue
             if entry.lower().startswith(partial.lower()):
-                full_path = os.path.join(directory, entry) if directory != "." else entry
-                if prefix and os.path.dirname(prefix):
-                    full_path = os.path.join(os.path.dirname(prefix), entry)
+                full_path = os.path.join(directory, entry)
+                display_path = os.path.join(os.path.dirname(prefix), entry) if prefix and os.path.dirname(prefix) else entry
                 suffix = "/" if os.path.isdir(full_path) else ""
                 results.append(Completion(
-                    value=full_path + suffix,
+                    value=display_path + suffix,
                     description="dir" if suffix else "",
                 ))
         return results
