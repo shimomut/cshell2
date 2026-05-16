@@ -23,6 +23,7 @@ from .completion import (
 )
 from .context import ContextManager
 from .parsing import split_for_completion
+from .prompt import get_prompt_func
 
 _DEFAULT_CONFIG = """\
 # cshell2 user configuration
@@ -44,6 +45,19 @@ _DEFAULT_CONFIG = """\
 #
 # from cshell2.recipes import enable
 # enable("make")
+#
+# Customize the prompt:
+#
+# import os
+# from cshell2 import set_prompt
+#
+# def my_prompt(context_manager):
+#     ctx = context_manager.current()
+#     prefix = f"({ctx.name}) " if ctx else ""
+#     cwd = os.path.basename(os.getcwd()) or "/"
+#     return f"{prefix}{cwd}$ "
+#
+# set_prompt(my_prompt)
 """
 
 
@@ -276,11 +290,7 @@ class Shell:
                 print(f"Error loading config: {e}", file=sys.stderr)
 
     def _get_prompt(self) -> str:
-        ctx = self.context_manager.current()
-        cwd = os.path.basename(os.getcwd()) or "/"
-        if ctx:
-            return f"[{ctx.name}] {cwd}> "
-        return f"{cwd}> "
+        return get_prompt_func()(self.context_manager)
 
     def _execute(self, line: str) -> None:
         tokens, _ = split_for_completion(line + " ")
