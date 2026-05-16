@@ -373,7 +373,7 @@ class Shell:
             if exit_code and exit_code != 0:
                 print(f"\n[Process exited with code {exit_code}]")
 
-    def _enter_forwarding_mode(self, slot: ProcessSlot) -> str:
+    def _enter_forwarding_mode(self, slot: ProcessSlot, force_redraw: bool = False) -> str:
         """Forward I/O between real terminal and subprocess PTY.
 
         Returns 'exited' if process finished, 'switched' if user pressed Ctrl+].
@@ -395,6 +395,9 @@ class Shell:
                     pass
 
             signal.signal(signal.SIGWINCH, on_resize)
+
+            if force_redraw:
+                on_resize(None, None)
 
             while slot.is_alive():
                 rlist, _, _ = select.select([fd], [], [], 0.1)
@@ -507,13 +510,7 @@ class Shell:
                         sys.stdout.write(restore_seq)
                         sys.stdout.flush()
                     ctx.process_slot.activate()
-                    # Force child to redraw
-                    try:
-                        rows, cols = os.get_terminal_size()
-                        ctx.process_slot.resize(rows, cols)
-                    except OSError:
-                        pass
-                    result = self._enter_forwarding_mode(ctx.process_slot)
+                    result = self._enter_forwarding_mode(ctx.process_slot, force_redraw=True)
                     ctx.process_slot.deactivate()
                     if result == "switched":
                         self._handle_switch()
