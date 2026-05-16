@@ -11,6 +11,7 @@ from pathlib import Path
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer as PTKCompleter, Completion as PTKCompletion
 from prompt_toolkit.document import Document
+from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 
@@ -23,7 +24,7 @@ from .completion import (
 )
 from .context import ContextManager
 from .parsing import split_for_completion
-from .prompt import get_prompt_func
+from .prompt import get_prompt_func, set_prompt
 
 _DEFAULT_CONFIG = """\
 # cshell2 user configuration
@@ -53,9 +54,9 @@ _DEFAULT_CONFIG = """\
 #
 # def my_prompt(context_manager):
 #     ctx = context_manager.current()
-#     prefix = f"({ctx.name}) " if ctx else ""
+#     prefix = f"\033[1;36m({ctx.name})\033[0m " if ctx else ""
 #     cwd = os.path.basename(os.getcwd()) or "/"
-#     return f"{prefix}{cwd}$ "
+#     return f"{prefix}\033[1;34m{cwd}\033[0m$ "
 #
 # set_prompt(my_prompt)
 """
@@ -164,6 +165,7 @@ class Shell:
         def reload_config():
             """Reload ~/.cshell2/config.py."""
             self.registry.clear_user_commands()
+            set_prompt(None)
             self._load_user_config()
             print("Config reloaded.")
 
@@ -289,8 +291,8 @@ class Shell:
             except Exception as e:
                 print(f"Error loading config: {e}", file=sys.stderr)
 
-    def _get_prompt(self) -> str:
-        return get_prompt_func()(self.context_manager)
+    def _get_prompt(self) -> ANSI:
+        return ANSI(get_prompt_func()(self.context_manager))
 
     def _execute(self, line: str) -> None:
         tokens, _ = split_for_completion(line + " ")

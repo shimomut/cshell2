@@ -14,8 +14,8 @@ PromptFunc = Callable[["ContextManager"], str]
 _prompt_func: PromptFunc | None = None
 
 
-def set_prompt(func: PromptFunc) -> None:
-    """Set a custom prompt function.
+def set_prompt(func: PromptFunc | None) -> None:
+    """Set a custom prompt function, or None to reset to default.
 
     The function receives the ContextManager and returns the prompt string.
     """
@@ -29,20 +29,38 @@ def get_prompt_func() -> PromptFunc:
 
 
 def default_prompt(context_manager: "ContextManager") -> str:
-    """Default prompt: [context] parent/cwd HH:MM:SS> """
+    """Default prompt: [context] parent/cwd HH:MM:SS> with ANSI colors."""
+    CYAN_BOLD = "\033[1;36m"
+    BLUE_BOLD = "\033[1;34m"
+    GREEN = "\033[32m"
+    RESET = "\033[0m"
+
     parts = []
 
     ctx = context_manager.current()
     if ctx:
-        parts.append(f"[{ctx.name}]")
+        parts.append(f"{CYAN_BOLD}[{ctx.name}]{RESET}")
 
     cwd = os.getcwd()
-    path = os.path.normpath(cwd)
-    components = path.split(os.sep)
-    short_path = os.sep.join(components[-2:]) if len(components) >= 2 else path
+    home = os.path.expanduser("~")
+    if cwd == home:
+        short_path = "~"
+    elif cwd.startswith(home + os.sep):
+        rel = cwd[len(home) + 1:]
+        rel_parts = rel.split(os.sep)
+        if len(rel_parts) <= 2:
+            short_path = "~/" + rel
+        else:
+            short_path = os.sep.join(rel_parts[-2:])
+    else:
+        abs_parts = cwd.lstrip(os.sep).split(os.sep)
+        if len(abs_parts) <= 2:
+            short_path = "/" + os.sep.join(abs_parts)
+        else:
+            short_path = os.sep.join(abs_parts[-2:])
 
     timestamp = datetime.now().strftime("%H:%M:%S")
-    parts.append(short_path)
-    parts.append(timestamp)
+    parts.append(f"{BLUE_BOLD}{short_path}{RESET}")
+    parts.append(f"{GREEN}{timestamp}{RESET}")
 
     return " ".join(parts) + "> "
