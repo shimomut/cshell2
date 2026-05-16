@@ -118,6 +118,20 @@ class ChoiceCompleter(Completer):
         ]
 
 
+class CallbackCompleter(Completer):
+    """Completer that calls a function to get the current list of choices."""
+
+    def __init__(self, func):
+        self.func = func
+
+    def complete(self, ctx: CompletionContext) -> list[Completion]:
+        return [
+            Completion(value=c)
+            for c in self.func()
+            if c.startswith(ctx.prefix)
+        ]
+
+
 class ConditionalCompleter(Completer):
     """Picks a sub-completer based on preceding args."""
 

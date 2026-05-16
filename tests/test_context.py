@@ -1,3 +1,6 @@
+import os
+import tempfile
+
 import pytest
 from cshell2.context import ContextManager
 
@@ -77,3 +80,101 @@ def test_set_get_variable():
     cm.set_variable("region", "us-west-2")
     assert cm.get_variable("region") == "us-west-2"
     assert cm.get_variable("nonexistent") is None
+
+
+def test_env_exported_on_create():
+    cm = ContextManager()
+    os.environ.pop("CSHELL2_TEST_VAR", None)
+    cm.create("prod", CSHELL2_TEST_VAR="hello")
+    assert os.environ.get("CSHELL2_TEST_VAR") == "hello"
+    # cleanup
+    cm.remove("prod")
+
+
+def test_env_switches_on_context_switch():
+    cm = ContextManager()
+    os.environ.pop("CSHELL2_TEST_VAR", None)
+    cm.create("prod", CSHELL2_TEST_VAR="prod_val")
+    cm.create("staging", CSHELL2_TEST_VAR="staging_val")
+    cm.switch("staging")
+    assert os.environ.get("CSHELL2_TEST_VAR") == "staging_val"
+    cm.switch("prod")
+    assert os.environ.get("CSHELL2_TEST_VAR") == "prod_val"
+    # cleanup
+    cm.remove("prod")
+    os.environ.pop("CSHELL2_TEST_VAR", None)
+
+
+def test_env_restored_on_pop():
+    os.environ.pop("CSHELL2_TEST_VAR", None)
+    cm = ContextManager()
+    cm.create("base")  # no CSHELL2_TEST_VAR
+    cm.create("prod", CSHELL2_TEST_VAR="prod_val")
+    cm.switch("base")
+    assert os.environ.get("CSHELL2_TEST_VAR") is None
+    cm.push("prod")
+    assert os.environ.get("CSHELL2_TEST_VAR") == "prod_val"
+    cm.pop()
+    assert os.environ.get("CSHELL2_TEST_VAR") is None
+    # cleanup
+    cm.remove("base")
+    cm.remove("prod")
+
+
+def test_set_variable_updates_env():
+    cm = ContextManager()
+    os.environ.pop("CSHELL2_TEST_VAR", None)
+    cm.create("prod")
+    cm.set_variable("CSHELL2_TEST_VAR", "new_val")
+    assert os.environ.get("CSHELL2_TEST_VAR") == "new_val"
+    cm.remove("prod")
+    os.environ.pop("CSHELL2_TEST_VAR", None)
+
+
+def test_cwd_saved_and_restored_on_switch():
+    original_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as dir_a, tempfile.TemporaryDirectory() as dir_b:
+        real_a = os.path.realpath(dir_a)
+        real_b = os.path.realpath(dir_b)
+
+        os.chdir(real_a)
+        cm = ContextManager()
+        cm.create("ctx_a")  # current=ctx_a, cwd=real_a
+
+        cm.create("ctx_b")  # ctx_b created with cwd=real_a
+        cm.switch("ctx_b")  # saves ctx_a's cwd as real_a, switches to ctx_b
+        os.chdir(real_b)    # now in ctx_b, move to real_b
+
+        cm.switch("ctx_a")  # saves ctx_b's cwd as real_b, restores ctx_a -> real_a
+        assert os.getcwd() == real_a
+
+        cm.switch("ctx_b")  # saves ctx_a's cwd as real_a, restores ctx_b -> real_b
+        assert os.getcwd() == real_b
+
+    os.chdir(original_cwd)
+
+
+def test_cwd_saved_and_restored_on_push_pop():
+    original_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as dir_a, tempfile.TemporaryDirectory() as dir_b:
+        real_a = os.path.realpath(dir_a)
+        real_b = os.path.realpath(dir_b)
+
+        os.chdir(real_a)
+        cm = ContextManager()
+        cm.create("ctx_a")  # current=ctx_a, cwd=real_a
+
+        cm.create("ctx_b")
+        cm.switch("ctx_b")
+        os.chdir(real_b)    # in ctx_b, move to real_b
+
+        cm.switch("ctx_a")  # back to ctx_a at real_a
+        assert os.getcwd() == real_a
+
+        cm.push("ctx_b")    # push saves ctx_a, restores ctx_b -> real_b
+        assert os.getcwd() == real_b
+
+        cm.pop()            # pop saves ctx_b, restores ctx_a -> real_a
+        assert os.getcwd() == real_a
+
+    os.chdir(original_cwd)

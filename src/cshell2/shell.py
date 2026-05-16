@@ -63,12 +63,13 @@ class ShellCompleter(PTKCompleter):
 
             cmd = self._registry.get(command_name)
             completions = []
-            if cmd and arg_index in cmd.completers:
+            has_completer = cmd and arg_index in cmd.completers
+            if has_completer:
                 completer = cmd.completers[arg_index]
                 if completer.should_activate(ctx):
                     completions = completer.complete(ctx)
 
-            if not completions:
+            if not completions and not has_completer:
                 completions = self._file_completer.complete(ctx)
 
         for c in completions:
@@ -97,7 +98,7 @@ class Shell:
         )
 
     def _register_builtins(self) -> None:
-        from .completion import ChoiceCompleter
+        from .completion import CallbackCompleter, ChoiceCompleter, Completer, Completion
 
         @self.registry.command(name="cd")
         def cd(path: str = "~"):
@@ -129,9 +130,29 @@ class Shell:
                     desc = cmd.help_text.split("\n")[0] if cmd.help_text else ""
                     print(f"  {name:20s} {desc}")
 
-        @self.registry.command(name="context")
+        context_subcommands = ChoiceCompleter(["push", "pop", "switch", "list"])
+        names_after_subcommands = {"switch"}
+
+        class ContextNameCompleter(Completer):
+            def __init__(self, cm):
+                self._cm = cm
+
+            def should_activate(self, ctx: CompletionContext) -> bool:
+                return bool(ctx.args) and ctx.args[0] in names_after_subcommands
+
+            def complete(self, ctx: CompletionContext) -> list[Completion]:
+                return [
+                    Completion(value=n)
+                    for n in self._cm.list_contexts()
+                    if n.startswith(ctx.prefix)
+                ]
+
+        @self.registry.command(
+            name="context",
+            completers={0: context_subcommands, 1: ContextNameCompleter(self.context_manager)},
+        )
         def context_cmd(*args):
-            """Manage contexts: create, switch, push, pop, list, remove."""
+            """Manage contexts: push, pop, switch, list."""
             if not args:
                 ctx = self.context_manager.current()
                 if ctx:
@@ -143,9 +164,9 @@ class Shell:
             subcmd = args[0]
             rest = args[1:]
 
-            if subcmd == "create":
+            if subcmd == "push":
                 if not rest:
-                    print("Usage: context create <name> [--key value ...]")
+                    print("Usage: context push <name> [--key value ...]")
                     return
                 name = rest[0]
                 variables = {}
@@ -156,8 +177,24 @@ class Shell:
                         i += 2
                     else:
                         i += 1
-                self.context_manager.create(name, **variables)
-                print(f"Created context '{name}'")
+                if name not in self.context_manager.contexts:
+                    self.context_manager.create(name, **variables)
+                self.context_manager.push(name)
+                print(f"Pushed context '{name}'")
+
+            elif subcmd == "pop":
+                ctx = self.context_manager.current()
+                if ctx is None:
+                    print("No active context.")
+                    return
+                name = ctx.name
+                self.context_manager.pop()
+                self.context_manager.remove(name)
+                prev = self.context_manager.current()
+                if prev:
+                    print(f"Popped '{name}', now in '{prev.name}'")
+                else:
+                    print(f"Popped '{name}'")
 
             elif subcmd == "switch":
                 if not rest:
@@ -168,22 +205,6 @@ class Shell:
                 except KeyError as e:
                     print(e)
 
-            elif subcmd == "push":
-                if not rest:
-                    print("Usage: context push <name>")
-                    return
-                try:
-                    self.context_manager.push(rest[0])
-                except KeyError as e:
-                    print(e)
-
-            elif subcmd == "pop":
-                prev = self.context_manager.pop()
-                if prev:
-                    print(f"Switched back to '{prev.name}'")
-                else:
-                    print("Context stack empty.")
-
             elif subcmd == "list":
                 names = self.context_manager.list_contexts()
                 if not names:
@@ -193,25 +214,6 @@ class Shell:
                         marker = "*" if n == self.context_manager.current_name else " "
                         ctx = self.context_manager.contexts[n]
                         print(f"  {marker} {n} {ctx.variables}")
-
-            elif subcmd == "remove":
-                if not rest:
-                    print("Usage: context remove <name>")
-                    return
-                try:
-                    self.context_manager.remove(rest[0])
-                    print(f"Removed context '{rest[0]}'")
-                except KeyError as e:
-                    print(e)
-
-            elif subcmd == "set":
-                if len(rest) < 2:
-                    print("Usage: context set <key> <value>")
-                    return
-                try:
-                    self.context_manager.set_variable(rest[0], rest[1])
-                except RuntimeError as e:
-                    print(e)
 
             else:
                 print(f"Unknown subcommand: {subcmd}")
