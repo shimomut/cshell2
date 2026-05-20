@@ -149,6 +149,7 @@ class Shell:
         self.session = PromptSession(
             completer=ShellCompleter(self.registry, self.context_manager),
             history=FileHistory(str(history_path)),
+            complete_while_typing=False,
         )
         self.session.app.ttimeoutlen = 0.1
         self.session.app.timeoutlen = 0.1
