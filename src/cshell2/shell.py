@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import select
 import signal
 import sys
@@ -20,7 +21,7 @@ from .completion import (
 )
 from .context import ContextManager, ContextState
 from .lineedit import History, LineEditor, SWITCH_SENTINEL
-from .parsing import split_for_completion
+from .parsing import expand_vars, split_for_completion
 from .process import ProcessSlot
 from .prompt import get_prompt_func, set_prompt
 
@@ -158,9 +159,9 @@ class Shell:
             self._load_user_config()
             print("Config reloaded.")
 
-        @self.registry.command(name="export")
-        def export_cmd(*args):
-            """Set environment variables: export KEY=VALUE [KEY=VALUE ...]"""
+        @self.registry.command(name="var")
+        def var_cmd(*args):
+            """Set or list context variables: var KEY=VALUE [KEY=VALUE ...]"""
             if not args:
                 for key, value in sorted(os.environ.items()):
                     print(f"{key}={value}")
@@ -168,18 +169,18 @@ class Shell:
             for arg in args:
                 if "=" in arg:
                     key, _, value = arg.partition("=")
-                    os.environ[key] = value
+                    self.context_manager.set_variable(key, value)
                 else:
-                    print(f"export: invalid argument '{arg}' (expected KEY=VALUE)")
+                    print(f"var: invalid argument '{arg}' (expected KEY=VALUE)")
 
         @self.registry.command(name="unset")
         def unset_cmd(*args):
-            """Unset environment variables: unset KEY [KEY ...]"""
+            """Unset context variables: unset KEY [KEY ...]"""
             if not args:
                 print("Usage: unset KEY [KEY ...]")
                 return
             for key in args:
-                os.environ.pop(key, None)
+                self.context_manager.unset_variable(key)
 
         @self.registry.command(name="help")
         def help_cmd(command_name: str = ""):
@@ -231,7 +232,8 @@ class Shell:
             if not args:
                 ctx = self.context_manager.current()
                 if ctx:
-                    print(f"Current: {ctx.name}")
+                    vars_str = f" {ctx.variables}" if ctx.variables else ""
+                    print(f"Current: {ctx.name}{vars_str}")
                 else:
                     print("No active context.")
                 return
@@ -247,7 +249,9 @@ class Shell:
                 if name in self.context_manager.contexts:
                     print(f"Context '{name}' already exists.")
                     return
-                self.context_manager.create(name)
+                parent = self.context_manager.current()
+                inherited = dict(parent.variables) if parent else {}
+                self.context_manager.create(name, variables=inherited)
                 self.context_manager.push(name)
                 print(f"Pushed context '{name}'")
 
@@ -300,7 +304,8 @@ class Shell:
                             state_str = f" (running: {cmd})"
                         else:
                             state_str = f" ({state})"
-                        print(f"  {marker} {n}{state_str}")
+                        vars_str = f" {ctx.variables}" if ctx.variables else ""
+                        print(f"  {marker} {n}{state_str}{vars_str}")
 
             elif subcmd == "kill":
                 if not rest:
@@ -338,9 +343,17 @@ class Shell:
             except Exception as e:
                 print(f"Error loading config: {e}", file=sys.stderr)
 
+    _ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)")
+
     def _execute(self, line: str) -> None:
-        tokens, _ = split_for_completion(line + " ")
+        tokens, _ = split_for_completion(expand_vars(line) + " ")
         if not tokens:
+            return
+
+        if all(self._ASSIGNMENT_RE.match(t) for t in tokens):
+            for token in tokens:
+                m = self._ASSIGNMENT_RE.match(token)
+                self.context_manager.set_variable(m.group(1), m.group(2))
             return
 
         command_name = tokens[0]

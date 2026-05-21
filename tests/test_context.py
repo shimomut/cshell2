@@ -73,6 +73,75 @@ def test_remove_current():
     assert cm.current_name == "prod"
 
 
+def test_set_get_variable():
+    cm = ContextManager()
+    cm.create("prod")
+    cm.set_variable("REGION", "us-west-2")
+    assert cm.get_variable("REGION") == "us-west-2"
+    assert cm.get_variable("nonexistent") is None
+
+
+def test_set_variable_updates_env():
+    cm = ContextManager()
+    os.environ.pop("CSHELL2_TEST_VAR", None)
+    cm.create("prod")
+    cm.set_variable("CSHELL2_TEST_VAR", "hello")
+    assert os.environ.get("CSHELL2_TEST_VAR") == "hello"
+    cm.remove("prod")
+    os.environ.pop("CSHELL2_TEST_VAR", None)
+
+
+def test_unset_variable():
+    cm = ContextManager()
+    os.environ.pop("CSHELL2_TEST_VAR", None)
+    cm.create("prod")
+    cm.set_variable("CSHELL2_TEST_VAR", "hello")
+    cm.unset_variable("CSHELL2_TEST_VAR")
+    assert cm.get_variable("CSHELL2_TEST_VAR") is None
+    assert os.environ.get("CSHELL2_TEST_VAR") is None
+
+
+def test_variables_saved_and_restored_on_switch():
+    cm = ContextManager()
+    os.environ.pop("CSHELL2_TEST_VAR", None)
+    cm.create("prod")
+    cm.set_variable("CSHELL2_TEST_VAR", "prod_val")
+    cm.create("staging")
+    cm.switch("staging")
+    assert os.environ.get("CSHELL2_TEST_VAR") is None
+    cm.set_variable("CSHELL2_TEST_VAR", "staging_val")
+    cm.switch("prod")
+    assert os.environ.get("CSHELL2_TEST_VAR") == "prod_val"
+    cm.switch("staging")
+    assert os.environ.get("CSHELL2_TEST_VAR") == "staging_val"
+    os.environ.pop("CSHELL2_TEST_VAR", None)
+
+
+def test_variables_saved_and_restored_on_push_pop():
+    cm = ContextManager()
+    os.environ.pop("CSHELL2_TEST_VAR", None)
+    cm.create("base")
+    cm.set_variable("CSHELL2_TEST_VAR", "base_val")
+    cm.create("child")
+    cm.push("child")
+    assert os.environ.get("CSHELL2_TEST_VAR") is None
+    cm.pop()
+    assert os.environ.get("CSHELL2_TEST_VAR") == "base_val"
+    os.environ.pop("CSHELL2_TEST_VAR", None)
+
+
+def test_push_inherits_parent_variables():
+    cm = ContextManager()
+    os.environ.pop("CSHELL2_TEST_VAR", None)
+    cm.create("base")
+    cm.set_variable("CSHELL2_TEST_VAR", "base_val")
+    cm.create("child", variables=dict(cm.current().variables))
+    cm.push("child")
+    assert cm.current().variables.get("CSHELL2_TEST_VAR") == "base_val"
+    assert os.environ.get("CSHELL2_TEST_VAR") == "base_val"
+    os.environ.pop("CSHELL2_TEST_VAR", None)
+
+
 def test_cwd_saved_and_restored_on_switch():
     original_cwd = os.getcwd()
     with tempfile.TemporaryDirectory() as dir_a, tempfile.TemporaryDirectory() as dir_b:
