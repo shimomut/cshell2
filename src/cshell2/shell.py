@@ -435,8 +435,6 @@ class Shell:
         if current in contexts:
             picker._selected = contexts.index(current)
 
-        sys.stdout.write("\n")
-        sys.stdout.flush()
         selected = picker.run()
 
         if selected is None or selected == current:
@@ -487,6 +485,8 @@ class Shell:
                     result = self._enter_forwarding_mode(ctx.process_slot, force_redraw=True)
                     ctx.process_slot.deactivate()
                     if result == "switched":
+                        sys.stdout.write("\r\n")
+                        sys.stdout.flush()
                         self._handle_switch()
                         continue
                     else:
