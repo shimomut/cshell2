@@ -21,9 +21,9 @@ class InlinePicker(Generic[T]):
     """
     Selectable list rendered inline below the current cursor position.
 
-    Invariant: cursor is at the top-left of the reserved area both before
-    and after every _render() call, and after _cleanup().
-    This makes resize trivial: update size, call _render().
+    Cursor invariant: after _render() and after _cleanup(), the cursor sits
+    on the SELECTED row (not the top). _cursor_row tracks this offset from
+    the top so the next _render() or _cleanup() knows where to move from.
     """
 
     def __init__(
@@ -61,6 +61,8 @@ class InlinePicker(Generic[T]):
             self._update_size()
             self._reserve()
             tty.setraw(fd)
+            sys.stdout.write("\033[?25l")  # hide cursor
+            sys.stdout.flush()
             signal.signal(signal.SIGWINCH, self._on_resize)
             self._render()
 
@@ -81,6 +83,8 @@ class InlinePicker(Generic[T]):
             termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
             signal.signal(signal.SIGWINCH, old_sigwinch)
             self._cleanup()
+            sys.stdout.write("\033[?25h")  # restore cursor
+            sys.stdout.flush()
 
         return result
 
