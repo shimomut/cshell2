@@ -145,6 +145,9 @@ class Shell:
         @self.registry.command(name="exit")
         def exit_shell():
             """Exit the shell."""
+            running = self._running_contexts()
+            if running and not self._confirm_exit(running):
+                return
             raise SystemExit(0)
 
         @self.registry.command(name="reload")
@@ -528,9 +531,30 @@ class Shell:
                 continue
             except EOFError:
                 print("\nexit")
+                running = self._running_contexts()
+                if running and not self._confirm_exit(running):
+                    continue
                 break
             except SystemExit:
                 break
+
+    def _running_contexts(self) -> list[tuple[str, list[str]]]:
+        return [
+            (name, ctx.process_slot.argv)
+            for name, ctx in self.context_manager.contexts.items()
+            if ctx.process_slot and ctx.process_slot.is_alive()
+        ]
+
+    def _confirm_exit(self, running: list[tuple[str, list[str]]]) -> bool:
+        print(f"There {'is' if len(running) == 1 else 'are'} {len(running)} context(s) with running processes:")
+        for name, argv in running:
+            print(f"  {name}: {' '.join(argv)}")
+        try:
+            answer = input("Exit anyway? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+        return answer in ("y", "yes")
 
     def _install_sigwinch_handler(self) -> None:
         def on_resize(signum, frame):
