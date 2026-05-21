@@ -158,6 +158,29 @@ class Shell:
             self._load_user_config()
             print("Config reloaded.")
 
+        @self.registry.command(name="export")
+        def export_cmd(*args):
+            """Set environment variables: export KEY=VALUE [KEY=VALUE ...]"""
+            if not args:
+                for key, value in sorted(os.environ.items()):
+                    print(f"{key}={value}")
+                return
+            for arg in args:
+                if "=" in arg:
+                    key, _, value = arg.partition("=")
+                    os.environ[key] = value
+                else:
+                    print(f"export: invalid argument '{arg}' (expected KEY=VALUE)")
+
+        @self.registry.command(name="unset")
+        def unset_cmd(*args):
+            """Unset environment variables: unset KEY [KEY ...]"""
+            if not args:
+                print("Usage: unset KEY [KEY ...]")
+                return
+            for key in args:
+                os.environ.pop(key, None)
+
         @self.registry.command(name="help")
         def help_cmd(command_name: str = ""):
             """Show help for a command, or list all commands."""
@@ -208,7 +231,7 @@ class Shell:
             if not args:
                 ctx = self.context_manager.current()
                 if ctx:
-                    print(f"Current: {ctx.name} {ctx.variables}")
+                    print(f"Current: {ctx.name}")
                 else:
                     print("No active context.")
                 return
@@ -218,21 +241,13 @@ class Shell:
 
             if subcmd == "push":
                 if not rest:
-                    print("Usage: context push <name> [--key value ...]")
+                    print("Usage: context push <name>")
                     return
                 name = rest[0]
-                variables = {}
-                i = 1
-                while i < len(rest):
-                    if rest[i].startswith("--") and i + 1 < len(rest):
-                        variables[rest[i][2:]] = rest[i + 1]
-                        i += 2
-                    else:
-                        i += 1
                 if name in self.context_manager.contexts:
                     print(f"Context '{name}' already exists.")
                     return
-                self.context_manager.create(name, **variables)
+                self.context_manager.create(name)
                 self.context_manager.push(name)
                 print(f"Pushed context '{name}'")
 
@@ -285,7 +300,7 @@ class Shell:
                             state_str = f" (running: {cmd})"
                         else:
                             state_str = f" ({state})"
-                        print(f"  {marker} {n}{state_str} {ctx.variables}")
+                        print(f"  {marker} {n}{state_str}")
 
             elif subcmd == "kill":
                 if not rest:

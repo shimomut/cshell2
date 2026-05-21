@@ -7,16 +7,15 @@ from cshell2.context import ContextManager
 
 def test_create_and_current():
     cm = ContextManager()
-    cm.create("prod", account="123", region="us-east-1")
+    cm.create("prod")
     ctx = cm.current()
     assert ctx.name == "prod"
-    assert ctx.variables == {"account": "123", "region": "us-east-1"}
 
 
 def test_switch():
     cm = ContextManager()
-    cm.create("prod", account="123")
-    cm.create("staging", account="456")
+    cm.create("prod")
+    cm.create("staging")
     cm.switch("staging")
     assert cm.current().name == "staging"
     cm.switch("prod")
@@ -31,8 +30,8 @@ def test_switch_nonexistent():
 
 def test_push_pop():
     cm = ContextManager()
-    cm.create("prod", account="123")
-    cm.create("staging", account="456")
+    cm.create("prod")
+    cm.create("staging")
     cm.switch("prod")
     cm.push("staging")
     assert cm.current().name == "staging"
@@ -72,63 +71,6 @@ def test_remove_current():
     cm.push("staging")
     cm.remove("staging")
     assert cm.current_name == "prod"
-
-
-def test_set_get_variable():
-    cm = ContextManager()
-    cm.create("prod")
-    cm.set_variable("region", "us-west-2")
-    assert cm.get_variable("region") == "us-west-2"
-    assert cm.get_variable("nonexistent") is None
-
-
-def test_env_exported_on_create():
-    cm = ContextManager()
-    os.environ.pop("CSHELL2_TEST_VAR", None)
-    cm.create("prod", CSHELL2_TEST_VAR="hello")
-    assert os.environ.get("CSHELL2_TEST_VAR") == "hello"
-    # cleanup
-    cm.remove("prod")
-
-
-def test_env_switches_on_context_switch():
-    cm = ContextManager()
-    os.environ.pop("CSHELL2_TEST_VAR", None)
-    cm.create("prod", CSHELL2_TEST_VAR="prod_val")
-    cm.create("staging", CSHELL2_TEST_VAR="staging_val")
-    cm.switch("staging")
-    assert os.environ.get("CSHELL2_TEST_VAR") == "staging_val"
-    cm.switch("prod")
-    assert os.environ.get("CSHELL2_TEST_VAR") == "prod_val"
-    # cleanup
-    cm.remove("prod")
-    os.environ.pop("CSHELL2_TEST_VAR", None)
-
-
-def test_env_restored_on_pop():
-    os.environ.pop("CSHELL2_TEST_VAR", None)
-    cm = ContextManager()
-    cm.create("base")  # no CSHELL2_TEST_VAR
-    cm.create("prod", CSHELL2_TEST_VAR="prod_val")
-    cm.switch("base")
-    assert os.environ.get("CSHELL2_TEST_VAR") is None
-    cm.push("prod")
-    assert os.environ.get("CSHELL2_TEST_VAR") == "prod_val"
-    cm.pop()
-    assert os.environ.get("CSHELL2_TEST_VAR") is None
-    # cleanup
-    cm.remove("base")
-    cm.remove("prod")
-
-
-def test_set_variable_updates_env():
-    cm = ContextManager()
-    os.environ.pop("CSHELL2_TEST_VAR", None)
-    cm.create("prod")
-    cm.set_variable("CSHELL2_TEST_VAR", "new_val")
-    assert os.environ.get("CSHELL2_TEST_VAR") == "new_val"
-    cm.remove("prod")
-    os.environ.pop("CSHELL2_TEST_VAR", None)
 
 
 def test_cwd_saved_and_restored_on_switch():

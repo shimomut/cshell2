@@ -76,6 +76,6 @@ def test_completer_receives_shell_context():
         arg_index=0,
         prefix="",
         line="deploy ",
-        shell_context=Context(name="prod", variables={"region": "us-east-1"}),
+        shell_context=Context(name="prod"),
     )
-    assert ctx.shell_context.variables["region"] == "us-east-1"
+    assert ctx.shell_context.name == "prod"
