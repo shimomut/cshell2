@@ -335,8 +335,12 @@ class LineEditor:
             self._apply(completions[0], prefix)
             return
 
-        # Clear current line and show inline picker below.
-        sys.stdout.write("\r\033[K")
+        # Move to the end of the visible content, then go one line down.
+        # The prompt line stays visible above the picker during interaction.
+        chars_from_end = len(self._buf) - self._cursor
+        if chars_from_end > 0:
+            sys.stdout.write(f"\033[{chars_from_end}C")
+        sys.stdout.write("\n")
         sys.stdout.flush()
 
         from .tui import InlinePicker
@@ -348,6 +352,11 @@ class LineEditor:
             max_height=10,
         )
         selected = picker.run()
+
+        # Picker cleanup leaves the cursor at the top of its reserved area,
+        # which is always one line below the blank prompt line.
+        sys.stdout.write("\033[1A")
+        sys.stdout.flush()
 
         if selected is not None:
             self._apply(selected, prefix)
