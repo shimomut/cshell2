@@ -46,23 +46,28 @@ class ContextManager:
         self.contexts: dict[str, Context] = {}
         self.current_name: str | None = None
         self.stack: list[str] = []
+        self._display_order: list[str] = []
         self._env_backup: dict[str, str | None] = {}
         self._initial_cwd: str = os.getcwd()
 
     def create(self, name: str, **variables: str) -> Context:
         ctx = Context(name=name, variables=variables, cwd=os.getcwd())
         self.contexts[name] = ctx
+        self._display_order.append(name)
         if self.current_name is None:
-            self.current_name = name
-            self._apply_env(ctx)
+            self._activate(name)
         return ctx
+
+    def _activate(self, name: str) -> None:
+        self.current_name = name
+        self._display_order = [name] + [n for n in self._display_order if n != name]
+        self._restore(self.contexts[name])
 
     def switch(self, name: str) -> None:
         if name not in self.contexts:
             raise KeyError(f"No context named '{name}'")
         self._save_current()
-        self.current_name = name
-        self._restore(self.contexts[name])
+        self._activate(name)
 
     def push(self, name: str) -> None:
         if self.current_name is not None:
@@ -70,8 +75,7 @@ class ContextManager:
         if name not in self.contexts:
             raise KeyError(f"No context named '{name}'")
         self._save_current()
-        self.current_name = name
-        self._restore(self.contexts[name])
+        self._activate(name)
 
     def pop(self) -> Context | None:
         if not self.stack:
@@ -82,11 +86,8 @@ class ContextManager:
             return None
         self._save_current()
         prev_name = self.stack.pop()
-        self.current_name = prev_name
-        ctx = self.contexts.get(prev_name)
-        if ctx:
-            self._restore(ctx)
-        return ctx
+        self._activate(prev_name)
+        return self.contexts.get(prev_name)
 
     def current(self) -> Context | None:
         if self.current_name is None:
@@ -94,13 +95,14 @@ class ContextManager:
         return self.contexts.get(self.current_name)
 
     def list_contexts(self) -> list[str]:
-        return list(self.contexts.keys())
+        return [n for n in self._display_order if n in self.contexts]
 
     def remove(self, name: str) -> None:
         if name not in self.contexts:
             raise KeyError(f"No context named '{name}'")
         was_current = self.current_name == name
         del self.contexts[name]
+        self._display_order = [n for n in self._display_order if n != name]
         self.stack = [n for n in self.stack if n != name]
         if was_current:
             self._unapply_env()

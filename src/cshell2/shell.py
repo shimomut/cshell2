@@ -218,8 +218,10 @@ class Shell:
                         i += 2
                     else:
                         i += 1
-                if name not in self.context_manager.contexts:
-                    self.context_manager.create(name, **variables)
+                if name in self.context_manager.contexts:
+                    print(f"Context '{name}' already exists.")
+                    return
+                self.context_manager.create(name, **variables)
                 self.context_manager.push(name)
                 print(f"Pushed context '{name}'")
 
@@ -259,8 +261,10 @@ class Shell:
                 if not names:
                     print("No contexts defined.")
                 else:
-                    for n in names:
-                        marker = "*" if n == self.context_manager.current_name else " "
+                    current = self.context_manager.current_name
+                    ordered = ([current] if current else []) + [n for n in names if n != current]
+                    for n in ordered:
+                        marker = "*" if n == current else " "
                         ctx = self.context_manager.contexts[n]
                         state = ctx.state.name.lower()
                         state_str = f" ({state})" if state != "idle" else ""
