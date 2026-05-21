@@ -46,6 +46,7 @@ class ProcessSlot:
     def __init__(self):
         self.pid: int = -1
         self.master_fd: int = -1
+        self.argv: list[str] = []
         self.buffer: OutputBuffer = OutputBuffer()
         self.active: bool = False
         self.exit_code: int | None = None
@@ -56,6 +57,7 @@ class ProcessSlot:
         }
 
     def start(self, argv: list[str], env: dict[str, str], cwd: str) -> None:
+        self.argv = argv
         master_fd, slave_fd = pty.openpty()
 
         # Set PTY size before fork so child sees correct dimensions immediately

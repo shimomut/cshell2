@@ -182,9 +182,17 @@ class Shell:
                 return bool(ctx.args) and ctx.args[0] in names_after_subcommands
 
             def complete(self, ctx: CompletionContext) -> list[Completion]:
+                subcmd = ctx.args[0] if ctx.args else ""
+                names = self._cm.list_contexts()
+                if subcmd == "kill":
+                    names = [
+                        n for n in names
+                        if self._cm.contexts[n].process_slot
+                        and self._cm.contexts[n].process_slot.is_alive()
+                    ]
                 return [
                     Completion(value=n)
-                    for n in self._cm.list_contexts()
+                    for n in names
                     if n.startswith(ctx.prefix)
                 ]
 
@@ -267,7 +275,13 @@ class Shell:
                         marker = "*" if n == current else " "
                         ctx = self.context_manager.contexts[n]
                         state = ctx.state.name.lower()
-                        state_str = f" ({state})" if state != "idle" else ""
+                        if state == "idle":
+                            state_str = ""
+                        elif state == "running" and ctx.process_slot and ctx.process_slot.argv:
+                            cmd = " ".join(ctx.process_slot.argv)
+                            state_str = f" (running: {cmd})"
+                        else:
+                            state_str = f" ({state})"
                         print(f"  {marker} {n}{state_str} {ctx.variables}")
 
             elif subcmd == "kill":
