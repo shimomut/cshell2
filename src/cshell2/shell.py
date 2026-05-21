@@ -64,6 +64,7 @@ class Shell:
     def __init__(self):
         self.registry = registry
         self.context_manager = ContextManager()
+        self.context_manager.create("default")
         self._register_builtins()
         self.registry.mark_builtins()
         self._load_user_config()
@@ -227,10 +228,18 @@ class Shell:
                 if ctx is None:
                     print("No active context.")
                     return
+                if len(self.context_manager.list_contexts()) <= 1:
+                    print("Cannot remove the last context.")
+                    return
                 name = ctx.name
                 self.context_manager.pop()
                 self.context_manager.remove(name)
                 prev = self.context_manager.current()
+                if prev is None:
+                    remaining = self.context_manager.list_contexts()
+                    if remaining:
+                        self.context_manager.switch(remaining[0])
+                        prev = self.context_manager.current()
                 if prev:
                     print(f"Popped '{name}', now in '{prev.name}'")
                 else:
@@ -317,9 +326,6 @@ class Shell:
 
     def _execute_external(self, command_name: str, args: list[str]) -> None:
         ctx = self.context_manager.current()
-        if ctx is None:
-            self.context_manager.create("default")
-            ctx = self.context_manager.current()
 
         slot = ProcessSlot()
         try:
@@ -335,15 +341,18 @@ class Shell:
             print(f"cshell2: {e}")
             return
 
-        ctx.process_slot = slot
         slot.activate()
         result = self._enter_forwarding_mode(slot)
         if result == "switched":
+            if ctx is None:
+                ctx = self.context_manager.current()
+            ctx.process_slot = slot
             slot.deactivate()
             self._handle_switch()
         elif result == "exited":
             slot.deactivate()
-            ctx.process_slot = None
+            if ctx is not None:
+                ctx.process_slot = None
             exit_code = slot.exit_code
             if exit_code and exit_code != 0:
                 print(f"\n[Process exited with code {exit_code}]")
@@ -399,49 +408,36 @@ class Shell:
                     sys.stdout.flush()
 
     def _show_switch_menu(self) -> str | None:
-        """Show context switch menu. Returns context name to switch to, or None."""
+        """Show TUI context picker. Returns context name to switch to, or None."""
         contexts = self.context_manager.list_contexts()
+        if not contexts:
+            return None
+
         current = self.context_manager.current_name
 
-        print("\n--- Context Switch (Ctrl+]) ---")
-        for i, name in enumerate(contexts):
+        from .tui import InlinePicker
+
+        def meta_fn(name: str) -> str:
             ctx = self.context_manager.contexts[name]
             state = ctx.state.name.lower()
-            marker = "*" if name == current else " "
-            print(f"  {marker} [{i + 1}] {name} ({state})")
-        print("  [n] New context")
-        print("  [q] Cancel")
+            return "" if state == "idle" else state
 
-        try:
-            choice = input("Switch to: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            return None
+        picker = InlinePicker(
+            contexts,
+            display_fn=lambda name: ("* " if name == current else "  ") + name,
+            meta_fn=meta_fn,
+            max_height=10,
+        )
+        if current in contexts:
+            picker._selected = contexts.index(current)
 
-        if choice == "q" or not choice:
-            return None
-        if choice == "n":
-            try:
-                name = input("Context name: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                return None
-            if name:
-                if name not in self.context_manager.contexts:
-                    self.context_manager.create(name)
-                return name
-            return None
-        try:
-            idx = int(choice) - 1
-            if 0 <= idx < len(contexts):
-                target = contexts[idx]
-                if target == current:
-                    return None
-                return target
-        except ValueError:
-            if choice in self.context_manager.contexts:
-                return choice
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        selected = picker.run()
 
-        print("Invalid choice.")
-        return None
+        if selected is None or selected == current:
+            return None
+        return selected
 
     def _handle_switch(self) -> None:
         """Handle Ctrl+] switch request."""

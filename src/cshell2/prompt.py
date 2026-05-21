@@ -39,7 +39,7 @@ def default_prompt(context_manager: "ContextManager") -> str:
     parts = []
 
     ctx = context_manager.current()
-    if ctx:
+    if ctx and ctx.name != "default":
         parts.append(f"{CYAN_BOLD}[{ctx.name}]{RESET}")
 
     cwd = os.getcwd()
