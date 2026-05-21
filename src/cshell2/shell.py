@@ -5,19 +5,11 @@ from __future__ import annotations
 import os
 import select
 import signal
-import subprocess
 import sys
 import termios
 import traceback
 import tty
 from pathlib import Path
-
-from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import Completer as PTKCompleter, Completion as PTKCompletion
-from prompt_toolkit.document import Document
-from prompt_toolkit.formatted_text import ANSI
-from prompt_toolkit.history import FileHistory
-from prompt_toolkit.key_binding import KeyBindings
 
 from .commands import CommandRegistry, registry
 from .completion import (
@@ -27,11 +19,10 @@ from .completion import (
     Completion,
 )
 from .context import ContextManager, ContextState
+from .lineedit import History, LineEditor, SWITCH_SENTINEL
 from .parsing import split_for_completion
 from .process import ProcessSlot
 from .prompt import get_prompt_func, set_prompt
-
-_SWITCH_SENTINEL = "\x1d__SWITCH__"
 
 _DEFAULT_CONFIG = """\
 # cshell2 user configuration
@@ -69,72 +60,6 @@ _DEFAULT_CONFIG = """\
 """
 
 
-class ShellCompleter(PTKCompleter):
-    """Bridges cshell2's completion engine to prompt_toolkit."""
-
-    def __init__(self, cmd_registry: CommandRegistry, context_manager: ContextManager):
-        self._registry = cmd_registry
-        self._context_manager = context_manager
-        self._command_completer = CommandNameCompleter(cmd_registry)
-        self._file_completer = FileCompleter()
-
-    def get_completions(self, document: Document, complete_event):
-        line = document.text_before_cursor
-        tokens, prefix = split_for_completion(line)
-
-        if not tokens:
-            ctx = CompletionContext(
-                command=None,
-                args=[],
-                arg_index=0,
-                prefix=prefix,
-                line=line,
-                shell_context=self._context_manager.current(),
-            )
-            completions = self._command_completer.complete(ctx)
-        else:
-            command_name = tokens[0]
-            args = tokens[1:]
-            arg_index = len(args)
-
-            ctx = CompletionContext(
-                command=command_name,
-                args=args,
-                arg_index=arg_index,
-                prefix=prefix,
-                line=line,
-                shell_context=self._context_manager.current(),
-            )
-
-            cmd = self._registry.get(command_name)
-            completions = []
-            has_completer = False
-            if cmd and arg_index in cmd.completers:
-                has_completer = True
-                completer = cmd.completers[arg_index]
-                if completer.should_activate(ctx):
-                    completions = completer.complete(ctx)
-            else:
-                ext = self._registry.get_external_completers(command_name)
-                if ext and arg_index in ext:
-                    has_completer = True
-                    completer = ext[arg_index]
-                    if completer.should_activate(ctx):
-                        completions = completer.complete(ctx)
-
-            if not completions and not has_completer:
-                completions = self._file_completer.complete(ctx)
-
-        for c in completions:
-            display_text = c.display or c.value
-            yield PTKCompletion(
-                c.value,
-                start_position=-len(prefix),
-                display=display_text,
-                display_meta=c.description,
-            )
-
-
 class Shell:
     def __init__(self):
         self.registry = registry
@@ -146,16 +71,66 @@ class Shell:
         history_path = Path.home() / ".cshell2" / "history"
         history_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.session = PromptSession(
-            completer=ShellCompleter(self.registry, self.context_manager),
-            history=FileHistory(str(history_path)),
-            complete_while_typing=False,
+        history = History(history_path)
+        self._line_editor = LineEditor(
+            history=history,
+            get_completions=self._get_completions,
+            get_prompt=lambda: get_prompt_func()(self.context_manager),
         )
-        self.session.app.ttimeoutlen = 0.1
-        self.session.app.timeoutlen = 0.1
+
+        self._command_completer = CommandNameCompleter(self.registry)
+        self._file_completer = FileCompleter()
+
+    def _get_completions(self, line_before_cursor: str) -> tuple[list[Completion], str]:
+        tokens, prefix = split_for_completion(line_before_cursor)
+
+        if not tokens:
+            ctx = CompletionContext(
+                command=None,
+                args=[],
+                arg_index=0,
+                prefix=prefix,
+                line=line_before_cursor,
+                shell_context=self.context_manager.current(),
+            )
+            return self._command_completer.complete(ctx), prefix
+
+        command_name = tokens[0]
+        args = tokens[1:]
+        arg_index = len(args)
+
+        ctx = CompletionContext(
+            command=command_name,
+            args=args,
+            arg_index=arg_index,
+            prefix=prefix,
+            line=line_before_cursor,
+            shell_context=self.context_manager.current(),
+        )
+
+        cmd = self.registry.get(command_name)
+        completions: list[Completion] = []
+        has_completer = False
+        if cmd and arg_index in cmd.completers:
+            has_completer = True
+            completer = cmd.completers[arg_index]
+            if completer.should_activate(ctx):
+                completions = completer.complete(ctx)
+        else:
+            ext = self.registry.get_external_completers(command_name)
+            if ext and arg_index in ext:
+                has_completer = True
+                completer = ext[arg_index]
+                if completer.should_activate(ctx):
+                    completions = completer.complete(ctx)
+
+        if not completions and not has_completer:
+            completions = self._file_completer.complete(ctx)
+
+        return completions, prefix
 
     def _register_builtins(self) -> None:
-        from .completion import CallbackCompleter, ChoiceCompleter, Completer, Completion
+        from .completion import ChoiceCompleter, Completer, Completion
 
         @self.registry.command(name="cd")
         def cd(path: str = "~"):
@@ -317,9 +292,6 @@ class Shell:
                 spec.loader.exec_module(module)
             except Exception as e:
                 print(f"Error loading config: {e}", file=sys.stderr)
-
-    def _get_prompt(self) -> ANSI:
-        return ANSI(get_prompt_func()(self.context_manager))
 
     def _execute(self, line: str) -> None:
         tokens, _ = split_for_completion(line + " ")
@@ -506,8 +478,7 @@ class Shell:
                 ctx = self.context_manager.current()
 
                 if ctx and ctx.process_slot and ctx.process_slot.is_alive():
-                    ctx.process_slot.buffer.drain()  # discard stale buffer
-                    # Restore terminal modes the child had active
+                    ctx.process_slot.buffer.drain()
                     restore_seq = ctx.process_slot.restore_terminal_modes()
                     if restore_seq:
                         sys.stdout.write(restore_seq)
@@ -532,18 +503,12 @@ class Shell:
                     if exit_code and exit_code != 0:
                         print(f"\n[Process exited with code {exit_code}]")
 
-                text = self.session.prompt(
-                    self._get_prompt(),
-                    multiline=True,
-                    prompt_continuation="> ",
-                    key_bindings=self._key_bindings(),
-                )
-                if text == _SWITCH_SENTINEL:
+                text = self._line_editor.prompt()
+                if text == SWITCH_SENTINEL:
                     self._handle_switch()
                     continue
-                line = text.replace("\\\n", "")
-                if line.strip():
-                    self._execute(line.strip())
+                if text.strip():
+                    self._execute(text.strip())
             except KeyboardInterrupt:
                 print()
                 continue
@@ -552,28 +517,6 @@ class Shell:
                 break
             except SystemExit:
                 break
-
-    def _key_bindings(self) -> KeyBindings:
-        """Key bindings: Enter for multiline, Ctrl+] for context switch."""
-        bindings = KeyBindings()
-
-        @bindings.add("enter")
-        def _(event):
-            buf = event.current_buffer
-            if buf.document.text_before_cursor.endswith("\\"):
-                buf.insert_text("\n")
-            else:
-                buf.validate_and_handle()
-
-        @bindings.add("c-]")
-        def _switch(event):
-            event.app.exit(result=_SWITCH_SENTINEL)
-
-        @bindings.add("escape", "]", eager=True)
-        def _switch_esc(event):
-            event.app.exit(result=_SWITCH_SENTINEL)
-
-        return bindings
 
     def _install_sigwinch_handler(self) -> None:
         def on_resize(signum, frame):
