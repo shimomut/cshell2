@@ -90,6 +90,7 @@ class LineEditor:
         self._cols = 80
         self._prompt_str = ""
         self._prompt_len = 0
+        self._cursor_row = 0  # rows below render-top where cursor sits
 
     def prompt(self) -> str:
         self._buf = ""
@@ -105,10 +106,10 @@ class LineEditor:
 
         try:
             self._update_cols()
+            self._cursor_row = 0
             tty.setraw(fd)
             signal.signal(signal.SIGWINCH, self._on_resize)
-            sys.stdout.write(self._prompt_str)
-            sys.stdout.flush()
+            self._redraw()
 
             while True:
                 key = self._read_key(fd)
@@ -138,17 +139,43 @@ class LineEditor:
 
     def _on_resize(self, _sig, _frame) -> None:
         self._update_cols()
+        # Navigate to the render top using new-width geometry and clear down.
+        # \033[nA is clamped at the top of the screen so it is safe to overshoot.
+        cursor_char = self._prompt_len + self._cursor
+        rows_up = cursor_char // self._cols
+        if rows_up > 0:
+            sys.stdout.write(f"\033[{rows_up}A")
+        sys.stdout.write("\r\033[J")
+        self._cursor_row = 0
         self._redraw()
 
     # ── rendering ────────────────────────────────────────────────────────────
 
     def _redraw(self) -> None:
-        """Rewrite the current line in place."""
-        chars_from_end = len(self._buf) - self._cursor
-        out = ["\r\033[K", self._prompt_str, self._buf]
-        if chars_from_end > 0:
-            out.append(f"\033[{chars_from_end}D")
-        sys.stdout.write("".join(out))
+        """Rewrite the prompt and buffer, handling multi-line wrapping."""
+        cols = self._cols
+        cursor_char = self._prompt_len + self._cursor
+        total_char = self._prompt_len + len(self._buf)
+
+        # Go up to the render top, then clear to end of screen.
+        if self._cursor_row > 0:
+            sys.stdout.write(f"\033[{self._cursor_row}A")
+        sys.stdout.write("\r\033[J")
+        sys.stdout.write(self._prompt_str + self._buf)
+
+        # Compute cursor position within the render for next resize.
+        self._cursor_row = cursor_char // cols
+
+        # Navigate from end of content back to where the cursor belongs.
+        end_row = total_char // cols
+        rows_up = end_row - self._cursor_row
+        if rows_up > 0:
+            sys.stdout.write(f"\033[{rows_up}A")
+        cursor_col = cursor_char % cols
+        sys.stdout.write("\r")
+        if cursor_col > 0:
+            sys.stdout.write(f"\033[{cursor_col}C")
+
         sys.stdout.flush()
 
     # ── input ────────────────────────────────────────────────────────────────
