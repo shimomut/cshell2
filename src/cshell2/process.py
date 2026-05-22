@@ -109,7 +109,14 @@ class ProcessSlot:
     def _reader_loop(self) -> None:
         try:
             while True:
+                # Use select before read: on macOS, a blocking os.read() wakes
+                # with EIO when the slave PTY closes, discarding buffered data.
+                # select() correctly reports the fd as readable when data is
+                # available even after slave close, so we get the data first.
                 try:
+                    r, _, _ = select.select([self.master_fd], [], [], 0.05)
+                    if not r:
+                        continue
                     data = os.read(self.master_fd, 4096)
                 except OSError:
                     break

@@ -7,6 +7,8 @@ in ~/.cshell2/config.py:
     enable("make", "git", "docker", "ssh", "kill", "tail")
 
 Available recipes:
+    aws     aws s3 subcommands (ls, cp, mv, sync, rm, mb, rb, presign, website),
+            S3 URI completion (s3://bucket/key), per-subcommand flags
     df      disk-free filesystem usage
     docker  subcommands, running containers, images, per-subcommand flags
     du      disk usage with size options

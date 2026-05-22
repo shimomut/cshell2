@@ -595,6 +595,7 @@ class Shell:
             return
 
         slot.activate()
+        slot.replay_buffer()  # flush any output that arrived before activate()
         result = self._enter_forwarding_mode(slot)
         if result == "switched":
             if ctx is None:
