@@ -47,7 +47,7 @@ class InlinePicker(Generic[T]):
         col: int = 0,
         initial_offset: int = 0,
         rows_above: int = 1,
-        refresh_fn: Callable[[str], list[T]] | None = None,
+        refresh_fn: Callable[[str], tuple[list[T], int]] | None = None,
         value_fn: Callable[[T], str] | None = None,
         completion_prefix: str = "",
     ):
@@ -106,14 +106,13 @@ class InlinePicker(Generic[T]):
                     self._render()
                 elif action == "tab_complete":
                     if self._handle_tab_complete():
-                        self.reopen = True
                         break
                 elif action == "backspace":
                     if self._handle_backspace():
-                        self.apply_backspace = True
                         break
                 elif len(action) == 1:  # printable char
-                    self._handle_char(action)
+                    if self._handle_char(action):
+                        break
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
             signal.signal(signal.SIGWINCH, old_sigwinch)
@@ -194,7 +193,7 @@ class InlinePicker(Generic[T]):
     # ── char input ──────────────────────────────────────────────────────────
 
     def _handle_tab_complete(self) -> bool:
-        """Type the common prefix extension. Returns True if chars were typed (caller should reopen)."""
+        """Type the common prefix extension. Returns True (sets reopen) if chars were typed."""
         if not self._items or self._value_fn is None:
             return False
         values = [self._value_fn(item) for item in self._items]
@@ -206,29 +205,39 @@ class InlinePicker(Generic[T]):
         sys.stdout.write(extension)
         sys.stdout.flush()
         self._typed += extension
+        self.reopen = True
         return True
 
-    def _handle_char(self, ch: str) -> None:
-        """Write ch at the prompt caret and refresh the candidate list."""
+    def _handle_char(self, ch: str) -> bool:
+        """Write ch at prompt caret and refresh. Returns True (sets reopen) if col changed."""
         sys.stdout.write(ch)
         sys.stdout.flush()
         self._typed += ch
         if self._refresh_fn is not None:
-            new_items = self._refresh_fn(self._typed)
+            new_items, new_col = self._refresh_fn(self._typed)
+            if new_col != self._col:
+                self._items = new_items
+                self.reopen = True
+                return True
             self._items = new_items
             self._selected = 0
             self._offset = 0
         self._render()
+        return False
 
     def _handle_backspace(self) -> bool:
-        """Erase one char. Returns True when the picker should close and reopen."""
+        """Erase one char. Returns True when the picker should close (sets reopen or apply_backspace)."""
         if self._typed:
             # Erase last picker-typed char from the prompt line.
             sys.stdout.write("\033[D \033[D")
             sys.stdout.flush()
             self._typed = self._typed[:-1]
             if self._refresh_fn is not None:
-                new_items = self._refresh_fn(self._typed)
+                new_items, new_col = self._refresh_fn(self._typed)
+                if new_col != self._col:
+                    self._items = new_items
+                    self.reopen = True
+                    return True
                 self._items = new_items
                 self._selected = 0
                 self._offset = 0
@@ -236,11 +245,12 @@ class InlinePicker(Generic[T]):
             return False
         else:
             # No picker-typed chars remain; erase the last buffer char visually
-            # and signal the caller to apply the deletion and reopen.
+            # and signal the caller to apply the deletion and close.
             caret_col = self._col + self._initial_offset
             if caret_col > 0:
                 sys.stdout.write("\033[D \033[D")
                 sys.stdout.flush()
+            self.apply_backspace = True
             return True
 
     # ── input ───────────────────────────────────────────────────────────────

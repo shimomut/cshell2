@@ -430,9 +430,13 @@ class LineEditor:
 
             buf_at_tab = self._buf[: self._cursor]
 
-            def refresh(typed: str) -> list[Completion]:
-                new_completions, _ = self._get_completions(buf_at_tab + typed)
-                return new_completions
+            def refresh(typed: str) -> tuple[list[Completion], int]:
+                new_completions, new_prefix = self._get_completions(buf_at_tab + typed)
+                new_caret_col = _pending_wrap_col(
+                    self._prompt_len + self._cursor + len(typed), self._cols
+                )
+                new_col = new_caret_col - _display_col_offset(new_prefix, new_completions)
+                return new_completions, new_col
 
             picker = InlinePicker(
                 completions,
