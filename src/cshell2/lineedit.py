@@ -574,8 +574,10 @@ class LineEditor:
         caret_col = _pending_wrap_col(self._prompt_len, self._cols)
 
         def refresh(typed: str) -> tuple[list[str], int]:
-            q = typed.lower()
-            filtered = [e for e in unique if q in e.lower()] if typed else unique
+            if not typed:
+                return unique, caret_col
+            keywords = typed.lower().split()
+            filtered = [e for e in unique if all(k in e.lower() for k in keywords)]
             return filtered, caret_col
 
         picker = InlinePicker(
