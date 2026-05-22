@@ -185,7 +185,8 @@ def expand_globs(tokens: list[str]) -> list[str]:
     result: list[str] = []
     for token in tokens:
         if any(c in token for c in ('*', '?', '[')):
-            expanded = glob.glob(os.path.expanduser(token))
+            recursive = '**' in token
+            expanded = glob.glob(os.path.expanduser(token), recursive=recursive)
             if expanded:
                 result.extend(sorted(expanded))
                 continue

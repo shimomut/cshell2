@@ -187,3 +187,14 @@ def test_expand_globs_match(tmp_path, monkeypatch):
 def test_expand_globs_no_pattern():
     result = expand_globs(["hello", "world"])
     assert result == ["hello", "world"]
+
+
+def test_expand_globs_recursive(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (tmp_path / "a.py").write_text("")
+    (sub / "b.py").write_text("")
+    result = expand_globs(["**/*.py"])
+    assert any("a.py" in p for p in result)
+    assert any("b.py" in p for p in result)

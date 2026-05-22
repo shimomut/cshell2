@@ -271,18 +271,18 @@ cshell2/
 
 ### Planned features (priority order)
 
-**Tier 1 — Core (share a single pipeline parser):**
+**Tier 1 — Core (share a single pipeline parser):** ✅ all done
 - Pipe `|` — `ls | grep py`
 - Stdout redirect `>` `>>` — `make > build.log`
 - Stdin redirect `<` — `sort < input.txt`
 - Sequencing `;` `&&` `||` — `make && ./run`
 
 **Tier 2 — High value, independent:**
-- Glob expansion `*` `?` `**` — pure Python `glob.glob`, no exec changes
-- Command substitution `$(…)` — capture stdout, substitute into token
-- Stderr redirect `2>` `2>&1`
+- Glob expansion `*` `?` `**` ✅ — `expand_globs` with `recursive=True` for `**`
+- Stderr redirect `2>` `2>>` `2>&1` ✅
+- Command substitution `$(…)` ❌ — not yet implemented
 
-**Tier 3 — Nice to have:**
+**Tier 3 — Nice to have:** ❌ none yet
 - Background `&` (maps to auto context creation)
 - Process substitution `<(cmd)`
 - Here-documents `<<EOF`
