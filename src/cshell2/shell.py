@@ -562,7 +562,6 @@ class Shell:
                 if text.strip():
                     self._execute(text.strip())
             except KeyboardInterrupt:
-                print()
                 continue
             except EOFError:
                 print("\nexit")
