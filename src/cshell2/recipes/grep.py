@@ -39,9 +39,20 @@ GREP_OPTIONS: dict[str, str] = {
 }
 
 
+GREP_ARGS: dict[str, str] = {
+    "-A": "N",
+    "-B": "N",
+    "-C": "N",
+    "-m": "N",
+    "--include": "PATTERN",
+    "--exclude": "PATTERN",
+    "--exclude-dir": "PATTERN",
+}
+
+
 def register(registry: CommandRegistry) -> None:
     completers = {
-        None: OptionsCompleter(GREP_OPTIONS),
+        None: OptionsCompleter(GREP_OPTIONS, args=GREP_ARGS),
         0: FileCompleter(),
         1: FileCompleter(),
         2: FileCompleter(),

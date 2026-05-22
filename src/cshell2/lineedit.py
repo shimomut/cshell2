@@ -410,6 +410,8 @@ class LineEditor:
 
             if len(completions) == 1:
                 self._apply(completions[0], prefix)
+                if completions[0].arg_hint:
+                    self._prompt_for_arg(completions[0])
                 return
 
             # Multi-select options picker.
@@ -497,7 +499,7 @@ class LineEditor:
 
         picker = InlineMultiPicker(
             completions,
-            display_fn=lambda c: c.display or c.value,
+            display_fn=lambda c: f"{c.display or c.value} <{c.arg_hint}>" if c.arg_hint else (c.display or c.value),
             meta_fn=lambda c: c.description,
             max_height=12,
             rows_above=rows_above,
@@ -507,24 +509,75 @@ class LineEditor:
         sys.stdout.write(f"\033[{rows_above}A")
         sys.stdout.flush()
 
-        if selected:
-            self._apply_multi(selected, prefix)
+        if not selected:
+            return
+
+        bool_sel = [c for c in selected if not c.arg_hint]
+        arg_sel = [c for c in selected if c.arg_hint]
+
+        # Replace the prefix and insert combined boolean flags.
+        pre = self._buf[: self._cursor - len(prefix)]
+        post = self._buf[self._cursor :]
+        short = [c for c in bool_sel if c.combinable]
+        long_bool = [c for c in bool_sel if not c.combinable]
+        parts: list[str] = []
+        if short:
+            parts.append("-" + "".join(c.value[1:] for c in short))
+        parts.extend(c.value for c in long_bool)
+        bool_str = " ".join(parts)
+        self._buf = pre + bool_str + post
+        self._cursor = len(pre) + len(bool_str)
+
+        # For each arg-taking option, insert the flag then prompt for its value.
+        for opt in arg_sel:
+            sep = " " if self._cursor > 0 and self._buf[self._cursor - 1] != " " else ""
+            ins = f"{sep}{opt.value} "
+            self._buf = self._buf[: self._cursor] + ins + self._buf[self._cursor :]
+            self._cursor += len(ins)
+            if not self._prompt_for_arg(opt):
+                break
 
     def _apply(self, completion: Completion, prefix: str) -> None:
         pre = self._buf[: self._cursor - len(prefix)]
         post = self._buf[self._cursor :]
-        self._buf = pre + completion.value + post
-        self._cursor = len(pre) + len(completion.value)
+        # Append a trailing space for arg-taking options so _prompt_for_arg
+        # can insert the value immediately after without an extra separator.
+        value = completion.value + (" " if completion.arg_hint else "")
+        self._buf = pre + value + post
+        self._cursor = len(pre) + len(value)
 
-    def _apply_multi(self, completions: list[Completion], prefix: str) -> None:
-        pre = self._buf[: self._cursor - len(prefix)]
-        post = self._buf[self._cursor :]
-        short = [c for c in completions if c.combinable]
-        long_opts = [c for c in completions if not c.combinable]
-        parts: list[str] = []
-        if short:
-            parts.append("-" + "".join(c.value[1:] for c in short))
-        parts.extend(c.value for c in long_opts)
-        inserted = " ".join(parts)
-        self._buf = pre + inserted + post
-        self._cursor = len(pre) + len(inserted)
+    def _prompt_for_arg(self, opt: Completion) -> bool:
+        """Show an inline prompt for opt's argument, insert the value, return False if cancelled."""
+        from .tui import InlineArgPrompt
+
+        self._redraw()
+
+        # Navigate from the caret to one line below the end of the buffer.
+        end_char = self._prompt_len + len(self._buf)
+        end_row = _pending_wrap_row(end_char, self._cols)
+        end_col = _pending_wrap_col(end_char, self._cols)
+        caret_row = self._cursor_row  # updated by _redraw()
+
+        rows_to_end = end_row - caret_row
+        if rows_to_end > 0:
+            sys.stdout.write(f"\033[{rows_to_end}B")
+        sys.stdout.write("\r")
+        if end_col > 0:
+            sys.stdout.write(f"\033[{end_col}C")
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+        arg_prompt = InlineArgPrompt(label=f"{opt.value} <{opt.arg_hint}>", description=opt.description)
+        value = arg_prompt.run()
+
+        # InlineArgPrompt._cleanup() left the cursor at anchor (col 0 of the prompt
+        # line, which is end_row + 1 below render-top). Move back to caret_row.
+        sys.stdout.write(f"\033[{end_row + 1 - caret_row}A")
+        sys.stdout.flush()
+
+        if value is None:
+            return False
+
+        self._buf = self._buf[: self._cursor] + value + self._buf[self._cursor :]
+        self._cursor += len(value)
+        return True

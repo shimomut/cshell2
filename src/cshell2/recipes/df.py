@@ -25,9 +25,17 @@ DF_OPTIONS: dict[str, str] = {
 }
 
 
+DF_ARGS: dict[str, str] = {
+    "-B": "SIZE",
+    "-t": "TYPE",
+    "-x": "TYPE",
+    "--output": "FIELD[,FIELD...]",
+}
+
+
 def register(registry: CommandRegistry) -> None:
     registry.register_external_completers("df", {
-        None: OptionsCompleter(DF_OPTIONS),
+        None: OptionsCompleter(DF_OPTIONS, args=DF_ARGS),
         0: FileCompleter(),
         1: FileCompleter(),
     })

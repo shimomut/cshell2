@@ -52,9 +52,33 @@ FIND_OPTIONS: dict[str, str] = {
 }
 
 
+FIND_ARGS: dict[str, str] = {
+    "-name": "PATTERN",
+    "-iname": "PATTERN",
+    "-path": "PATTERN",
+    "-ipath": "PATTERN",
+    "-regex": "PATTERN",
+    "-iregex": "PATTERN",
+    "-maxdepth": "N",
+    "-mindepth": "N",
+    "-mtime": "N",
+    "-atime": "N",
+    "-ctime": "N",
+    "-newer": "FILE",
+    "-newermt": "TIMESTAMP",
+    "-size": "N[ckMG]",
+    "-type": "f|d|l|b|c|p|s",
+    "-perm": "MODE",
+    "-user": "NAME",
+    "-group": "NAME",
+    "-exec": "CMD {} \\;",
+    "-execdir": "CMD {} \\;",
+}
+
+
 def register(registry: CommandRegistry) -> None:
     registry.register_external_completers("find", {
-        None: OptionsCompleter(FIND_OPTIONS),
+        None: OptionsCompleter(FIND_OPTIONS, args=FIND_ARGS),
         0: FileCompleter(),
         1: FileCompleter(),
     })

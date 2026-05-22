@@ -300,6 +300,111 @@ class InlinePicker(Generic[T]):
             self._offset = self._selected - self._height + 1
 
 
+class InlineArgPrompt:
+    """Single-line inline prompt for a flag argument, rendered below the cursor.
+
+    Shows a dim label (e.g. ``--max-depth <N>:``) followed by an editable
+    input area. Enter confirms; Esc / Ctrl+C cancels (returns None).
+    The caller is responsible for positioning (writing \\n to move below the
+    command line) before calling run() and moving the cursor back afterward.
+    """
+
+    def __init__(self, label: str, description: str = ""):
+        self._label = label
+        self._description = description
+        self._buf = ""
+        self._cancelled = False
+        try:
+            self._cols = os.get_terminal_size().columns
+        except OSError:
+            self._cols = 80
+
+    def run(self) -> str | None:
+        fd = sys.stdin.fileno()
+        old_attrs = termios.tcgetattr(fd)
+        old_sigwinch = signal.getsignal(signal.SIGWINCH)
+
+        sig_r, sig_w = os.pipe()
+        os.set_blocking(sig_w, False)
+        old_wakeup_fd = signal.set_wakeup_fd(sig_w, warn_on_full_buffer=False)
+
+        result: str | None = None
+        try:
+            self._reserve()
+            tty.setraw(fd)
+            signal.signal(signal.SIGWINCH, self._on_resize)
+            self._render()
+
+            while True:
+                key = self._read_key(fd, sig_r)
+                if self._cancelled or key in (b"\x1b", b"\x03"):
+                    break
+                if key in (b"\r", b"\n"):
+                    result = self._buf
+                    break
+                if key in (b"\x7f", b"\x08"):
+                    if self._buf:
+                        self._buf = self._buf[:-1]
+                        self._render()
+                elif len(key) == 1 and 0x20 <= key[0] < 0x7F:
+                    self._buf += key.decode()
+                    self._render()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+            signal.signal(signal.SIGWINCH, old_sigwinch)
+            signal.set_wakeup_fd(old_wakeup_fd)
+            os.close(sig_r)
+            os.close(sig_w)
+            self._cleanup()
+
+        return result
+
+    def _on_resize(self, _sig, _frame) -> None:
+        self._cancelled = True
+
+    def _reserve(self) -> None:
+        """Save anchor at col 0 of the current line (caller moved us here).
+        When a description is shown, an extra line is reserved below."""
+        if self._description:
+            sys.stdout.write("\n")   # push a second line into existence
+            sys.stdout.write("\033[1A")  # come back up to the anchor line
+        sys.stdout.write("\r\0337")
+        sys.stdout.flush()
+
+    def _render(self) -> None:
+        """Restore to anchor, redraw description (if any) + label + typed text."""
+        out = ["\0338\r\033[J"]
+        if self._description:
+            desc = self._description[: self._cols - 2]
+            out.append(f"  \033[2m{desc}\033[0m\n")
+        # \r ensures col 0 — raw-mode \n is a bare line-feed and leaves the
+        # cursor at the column where the description text ended.
+        out.append(f"\r\033[2m{self._label}:\033[0m {self._buf}")
+        sys.stdout.write("".join(out))
+        sys.stdout.flush()
+
+    def _cleanup(self) -> None:
+        sys.stdout.write("\0338\r\033[J")
+        sys.stdout.flush()
+
+    def _read_key(self, fd: int, sig_r: int) -> bytes:
+        while True:
+            if self._cancelled:
+                return b"\x1b"
+            r, _, _ = select.select([fd, sig_r], [], [], 1.0)
+            if sig_r in r:
+                os.read(sig_r, 256)
+                continue
+            if not r:
+                continue
+            data = os.read(fd, 1)
+            if data == b"\x1b":
+                r2, _, _ = select.select([fd], [], [], 0.05)
+                if r2:
+                    data += os.read(fd, 8)
+            return data
+
+
 class InlineMultiPicker(Generic[T]):
     """
     Multi-select inline picker rendered below the cursor.

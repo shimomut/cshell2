@@ -27,6 +27,7 @@ class Completion:
     description: str = ""
     multi_select: bool = False
     combinable: bool = False  # True for single-char flags that can be merged (-a -l → -al)
+    arg_hint: str = ""        # non-empty when the flag requires a following argument (e.g. "N")
 
     def __post_init__(self):
         if not self.display:
@@ -146,24 +147,28 @@ class OptionsCompleter(Completer):
         })
     """
 
-    def __init__(self, options: dict[str, str]):
+    def __init__(self, options: dict[str, str], args: dict[str, str] | None = None):
         self.options = options
+        self.args = args or {}  # maps flag → argument hint, e.g. {"-d": "N", "--max-depth": "N"}
 
     def should_activate(self, ctx: CompletionContext) -> bool:
         return ctx.prefix.startswith("-")
 
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         prefix = ctx.prefix
-        return [
-            Completion(
+        result = []
+        for flag, desc in sorted(self.options.items()):
+            if not flag.startswith(prefix):
+                continue
+            arg_hint = self.args.get(flag, "")
+            result.append(Completion(
                 value=flag,
                 description=desc,
                 multi_select=True,
-                combinable=(len(flag) == 2 and flag.startswith("-")),
-            )
-            for flag, desc in sorted(self.options.items())
-            if flag.startswith(prefix)
-        ]
+                combinable=(len(flag) == 2 and flag.startswith("-") and not arg_hint),
+                arg_hint=arg_hint,
+            ))
+        return result
 
 
 class ConditionalCompleter(Completer):

@@ -28,9 +28,20 @@ DU_OPTIONS: dict[str, str] = {
 }
 
 
+DU_ARGS: dict[str, str] = {
+    "-B": "SIZE",
+    "-d": "N",
+    "--max-depth": "N",
+    "-t": "SIZE",
+    "--threshold": "SIZE",
+    "--exclude": "PATTERN",
+    "--time-style": "STYLE",
+}
+
+
 def register(registry: CommandRegistry) -> None:
     registry.register_external_completers("du", {
-        None: OptionsCompleter(DU_OPTIONS),
+        None: OptionsCompleter(DU_OPTIONS, args=DU_ARGS),
         0: FileCompleter(),
         1: FileCompleter(),
         2: FileCompleter(),
