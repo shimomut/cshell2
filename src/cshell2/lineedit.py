@@ -519,6 +519,12 @@ class LineEditor:
     def _apply_multi(self, completions: list[Completion], prefix: str) -> None:
         pre = self._buf[: self._cursor - len(prefix)]
         post = self._buf[self._cursor :]
-        inserted = " ".join(c.value for c in completions)
+        short = [c for c in completions if c.combinable]
+        long_opts = [c for c in completions if not c.combinable]
+        parts: list[str] = []
+        if short:
+            parts.append("-" + "".join(c.value[1:] for c in short))
+        parts.extend(c.value for c in long_opts)
+        inserted = " ".join(parts)
         self._buf = pre + inserted + post
         self._cursor = len(pre) + len(inserted)

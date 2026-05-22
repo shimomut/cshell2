@@ -331,6 +331,7 @@ class InlineMultiPicker(Generic[T]):
         self._cols = 80
         self._height = min(max_height, len(items))
         self._cancelled = False
+        self._label_col_w = max((len(display_fn(item)) for item in items), default=4)
 
     def run(self) -> list[T] | None:
         """Return checked items (or [highlighted] if none), or None on cancel."""
@@ -429,18 +430,19 @@ class InlineMultiPicker(Generic[T]):
         label = self._display_fn(item)
         meta = self._meta_fn(item) if self._meta_fn else ""
 
-        prefix = self._CHECK_ON if checked else self._CHECK_OFF
-        avail = self._cols - len(prefix)
-        meta_w = min(len(meta), min(30, avail // 3))
-        label_w = max(1, avail - meta_w - 2)
-        label = label[:label_w]
+        check = self._CHECK_ON if checked else self._CHECK_OFF
+        avail = self._cols - len(check)
+        # Align all labels to the widest one; give everything left to the description.
+        label_col = min(self._label_col_w, avail)
+        meta_w = max(0, avail - label_col - 2)
+        label_padded = label[:label_col].ljust(label_col)
         meta = meta[:meta_w]
 
         if selected:
-            inner = prefix + label + (f"  {meta}" if meta else "")
+            inner = check + label_padded + (f"  {meta}" if meta else "")
             return f"\r\033[K\033[7m{inner}\033[K\033[0m"
         else:
-            inner = prefix + label + (f"  \033[2m{meta}\033[0m" if meta else "")
+            inner = check + label_padded + (f"  \033[2m{meta}\033[0m" if meta else "")
             return f"\r\033[K{inner}"
 
     def _cleanup(self) -> None:

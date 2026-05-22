@@ -26,6 +26,7 @@ class Completion:
     display: str = ""
     description: str = ""
     multi_select: bool = False
+    combinable: bool = False  # True for single-char flags that can be merged (-a -l → -al)
 
     def __post_init__(self):
         if not self.display:
@@ -154,7 +155,12 @@ class OptionsCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         prefix = ctx.prefix
         return [
-            Completion(value=flag, description=desc, multi_select=True)
+            Completion(
+                value=flag,
+                description=desc,
+                multi_select=True,
+                combinable=(len(flag) == 2 and flag.startswith("-")),
+            )
             for flag, desc in sorted(self.options.items())
             if flag.startswith(prefix)
         ]
