@@ -377,6 +377,9 @@ class InlineMultiPicker(Generic[T]):
                     else:
                         self._checked.add(idx)
                     self._render()
+                elif action.startswith("jump:"):
+                    self._jump_to(action[5:])
+                    self._render()
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
             signal.signal(signal.SIGWINCH, old_sigwinch)
@@ -479,13 +482,36 @@ class InlineMultiPicker(Generic[T]):
             return "down"
         if key == b" ":
             return "toggle"
+        if len(key) == 1 and chr(key[0]).isalnum():
+            return f"jump:{chr(key[0])}"
         return "noop"
 
-    # ── scroll ───────────────────────────────────────────────────────────────
+    # ── scroll / jump ────────────────────────────────────────────────────────
 
     def _move(self, delta: int) -> None:
         n = len(self._items)
         self._selected = max(0, min(n - 1, self._selected + delta))
+        self._scroll_to_selected()
+
+    def _jump_to(self, ch: str) -> None:
+        """Move selection to the next item whose label starts with ch (case-insensitive), rotating."""
+        ch_lower = ch.lower()
+        candidates = [
+            i for i, item in enumerate(self._items)
+            if self._display_fn(item).lstrip("-")[:1].lower() == ch_lower
+        ]
+        if not candidates:
+            return
+        # Advance to the first candidate strictly after the current position; wrap on exhaustion.
+        for idx in candidates:
+            if idx > self._selected:
+                self._selected = idx
+                self._scroll_to_selected()
+                return
+        self._selected = candidates[0]
+        self._scroll_to_selected()
+
+    def _scroll_to_selected(self) -> None:
         if self._selected < self._offset:
             self._offset = self._selected
         elif self._selected >= self._offset + self._height:
