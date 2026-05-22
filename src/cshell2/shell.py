@@ -659,24 +659,32 @@ class Shell:
                     sys.stdout.write(suspend_seq)
                     sys.stdout.flush()
 
-    def _show_switch_menu(self) -> str | None:
-        """Show TUI context picker. Returns context name to switch to, or None."""
+    _NEW_CTX_SENTINEL = "\x00new"
+
+    def _show_switch_menu(self) -> tuple[str, bool] | None:
+        """Show TUI context picker. Returns (name, is_new) or None on cancel."""
         contexts = self.context_manager.list_contexts()
-        if not contexts:
-            return None
+        items = contexts + [self._NEW_CTX_SENTINEL]
 
         current = self.context_manager.current_name
 
-        from .tui import InlinePicker
+        from .tui import InlineArgPrompt, InlinePicker
+
+        def display_fn(name: str) -> str:
+            if name == self._NEW_CTX_SENTINEL:
+                return "+ new context"
+            return ("* " if name == current else "  ") + name
 
         def meta_fn(name: str) -> str:
+            if name == self._NEW_CTX_SENTINEL:
+                return ""
             ctx = self.context_manager.contexts[name]
             state = ctx.state.name.lower()
             return "" if state == "idle" else state
 
         picker = InlinePicker(
-            contexts,
-            display_fn=lambda name: ("* " if name == current else "  ") + name,
+            items,
+            display_fn=display_fn,
             meta_fn=meta_fn,
             max_height=10,
         )
@@ -685,9 +693,23 @@ class Shell:
 
         selected = picker.run()
 
-        if selected is None or selected == current:
+        if selected is None:
             return None
-        return selected
+
+        if selected == self._NEW_CTX_SENTINEL:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            arg_prompt = InlineArgPrompt(label="new context name")
+            name = arg_prompt.run()
+            sys.stdout.write("\033[1A")
+            sys.stdout.flush()
+            if not name or name in self.context_manager.contexts:
+                return None
+            return (name, True)
+
+        if selected == current:
+            return None
+        return (selected, False)
 
     def _handle_switch(self) -> None:
         """Handle Ctrl+] switch request."""
@@ -695,14 +717,23 @@ class Shell:
         if ctx and ctx.process_slot:
             ctx.process_slot.deactivate()
 
-        target_name = self._show_switch_menu()
+        result = self._show_switch_menu()
 
-        if target_name is None:
+        if result is None:
             if ctx and ctx.process_slot and ctx.process_slot.is_alive():
                 ctx.process_slot.activate()
             return
 
-        self.context_manager.switch(target_name)
+        target_name, is_new = result
+
+        if is_new:
+            parent = self.context_manager.current()
+            inherited = dict(parent.variables) if parent else {}
+            self.context_manager.create(target_name, variables=inherited)
+            self.context_manager.push(target_name)
+        else:
+            self.context_manager.switch(target_name)
+
         new_ctx = self.context_manager.current()
         if new_ctx and new_ctx.process_slot and new_ctx.process_slot.is_alive():
             new_ctx.process_slot.activate()

@@ -32,6 +32,7 @@ class OutputBuffer:
 
 
 _TRACKED_MODES = {
+    b"1": "app_cursor_keys", # DECCKM — application cursor key sequences (vi, less, …)
     b"1049": "alt_screen",   # alternate screen buffer
     b"1000": "mouse_click",  # mouse click tracking
     b"1002": "mouse_btn",    # mouse button tracking

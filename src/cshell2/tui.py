@@ -310,9 +310,9 @@ class InlinePicker(Generic[T]):
             return "accept"
         if key in (b"\x1b", b"\x03"):
             return "cancel"
-        if key in (b"\x1b[A", b"\x10"):         # up arrow, Ctrl+P
+        if key in (b"\x1b[A", b"\x1bOA", b"\x10"):   # up arrow (normal/app mode), Ctrl+P
             return "up"
-        if key in (b"\x1b[B", b"\x0e"):          # down arrow, Ctrl+N
+        if key in (b"\x1b[B", b"\x1bOB", b"\x0e"):  # down arrow (normal/app mode), Ctrl+N
             return "down"
         if key == b"\t":
             return "tab_complete"
@@ -618,9 +618,9 @@ class InlineMultiPicker(Generic[T]):
             return "accept"
         if key in (b"\x1b", b"\x03"):
             return "cancel"
-        if key in (b"\x1b[A", b"\x10"):
+        if key in (b"\x1b[A", b"\x1bOA", b"\x10"):
             return "up"
-        if key in (b"\x1b[B", b"\x0e"):
+        if key in (b"\x1b[B", b"\x1bOB", b"\x0e"):
             return "down"
         if key == b" ":
             return "toggle"
