@@ -24,6 +24,20 @@ def _visible_len(s: str) -> int:
     return len(_ANSI_RE.sub("", s))
 
 
+def _display_col_offset(prefix: str, completions: list[Completion]) -> int:
+    """Return how many chars of prefix appear at the start of every display value.
+
+    The picker should open this many columns to the LEFT of the caret so that
+    the candidate text aligns with the already-typed partial token.
+    E.g. prefix="doc/co", displays=["completion.md","context.md"] → 2 ("co").
+    """
+    for start in range(len(prefix) + 1):
+        suffix = prefix[start:]
+        if all(c.display.startswith(suffix) for c in completions):
+            return len(suffix)
+    return 0
+
+
 def _pending_wrap_row(char_count: int, cols: int) -> int:
     """Row offset below render-top where cursor sits after writing char_count visible chars.
 
@@ -386,58 +400,71 @@ class LineEditor:
     # ── completion ───────────────────────────────────────────────────────────
 
     def _complete(self, fd: int) -> None:
-        completions, prefix = self._get_completions(self._buf[: self._cursor])
-
-        if not completions:
-            return
-
-        if len(completions) == 1:
-            self._apply(completions[0], prefix)
-            return
-
-        # Move to the end of the visible content, then go one line down.
-        # The prompt line stays visible above the picker during interaction.
-        caret_char = self._prompt_len + self._cursor
-        caret_col = _pending_wrap_col(caret_char, self._cols)
-        caret_row = _pending_wrap_row(caret_char, self._cols)
-        end_row = _pending_wrap_row(self._prompt_len + len(self._buf), self._cols)
-        rows_above = end_row - caret_row + 1
-
-        chars_from_end = len(self._buf) - self._cursor
-        if chars_from_end > 0:
-            sys.stdout.write(f"\033[{chars_from_end}C")
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-
-        buf_at_tab = self._buf[: self._cursor]
-
-        def refresh(typed: str) -> list[Completion]:
-            new_completions, _ = self._get_completions(buf_at_tab + typed)
-            return new_completions
-
         from .tui import InlinePicker
 
-        picker = InlinePicker(
-            completions,
-            display_fn=lambda c: c.display or c.value,
-            meta_fn=lambda c: c.description,
-            max_height=10,
-            col=caret_col,
-            rows_above=rows_above,
-            refresh_fn=refresh,
-            value_fn=lambda c: c.value,
-            completion_prefix=prefix,
-        )
-        selected = picker.run()
+        while True:
+            completions, prefix = self._get_completions(self._buf[: self._cursor])
 
-        # Picker cleanup leaves cursor at the anchor row (first blank line).
-        # Move up rows_above lines to reach the caret row, then let _redraw
-        # handle the rest.
-        sys.stdout.write(f"\033[{rows_above}A")
-        sys.stdout.flush()
+            if not completions:
+                return
 
-        if selected is not None:
-            self._apply(selected, prefix)
+            if len(completions) == 1:
+                self._apply(completions[0], prefix)
+                return
+
+            # Move to the end of the visible content, then go one line down.
+            # The prompt line stays visible above the picker during interaction.
+            caret_char = self._prompt_len + self._cursor
+            caret_col = _pending_wrap_col(caret_char, self._cols)
+            caret_row = _pending_wrap_row(caret_char, self._cols)
+            end_row = _pending_wrap_row(self._prompt_len + len(self._buf), self._cols)
+            rows_above = end_row - caret_row + 1
+            display_offset = _display_col_offset(prefix, completions)
+            col = caret_col - display_offset
+
+            chars_from_end = len(self._buf) - self._cursor
+            if chars_from_end > 0:
+                sys.stdout.write(f"\033[{chars_from_end}C")
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+            buf_at_tab = self._buf[: self._cursor]
+
+            def refresh(typed: str) -> list[Completion]:
+                new_completions, _ = self._get_completions(buf_at_tab + typed)
+                return new_completions
+
+            picker = InlinePicker(
+                completions,
+                display_fn=lambda c: c.display or c.value,
+                meta_fn=lambda c: c.description,
+                max_height=10,
+                col=col,
+                initial_offset=display_offset,
+                rows_above=rows_above,
+                refresh_fn=refresh,
+                value_fn=lambda c: c.value,
+                completion_prefix=prefix,
+            )
+            selected = picker.run()
+
+            # Picker cleanup leaves cursor at the anchor row (first blank line).
+            # Move up rows_above lines to reach the caret row, then let _redraw
+            # handle the rest.
+            sys.stdout.write(f"\033[{rows_above}A")
+            sys.stdout.flush()
+
+            if picker.reopen:
+                # TAB-complete typed chars into the prompt; commit them to the
+                # buffer and reopen the picker at the updated caret position.
+                typed = picker._typed
+                self._buf = self._buf[: self._cursor] + typed + self._buf[self._cursor :]
+                self._cursor += len(typed)
+                continue
+
+            if selected is not None:
+                self._apply(selected, prefix)
+            return
 
     def _apply(self, completion: Completion, prefix: str) -> None:
         pre = self._buf[: self._cursor - len(prefix)]

@@ -45,6 +45,7 @@ class InlinePicker(Generic[T]):
         meta_fn: Callable[[T], str] | None = None,
         max_height: int = 10,
         col: int = 0,
+        initial_offset: int = 0,
         rows_above: int = 1,
         refresh_fn: Callable[[str], list[T]] | None = None,
         value_fn: Callable[[T], str] | None = None,
@@ -55,11 +56,13 @@ class InlinePicker(Generic[T]):
         self._meta_fn = meta_fn
         self._max_height = max_height
         self._col = col
+        self._initial_offset = initial_offset
         self._rows_above = rows_above
         self._refresh_fn = refresh_fn
         self._value_fn = value_fn
         self._completion_prefix = completion_prefix
         self._typed = ""
+        self.reopen = False  # set True when tab-complete typed chars; caller should reopen
 
         self._selected = 0
         self._offset = 0
@@ -101,7 +104,9 @@ class InlinePicker(Generic[T]):
                     self._move(1)
                     self._render()
                 elif action == "tab_complete":
-                    self._handle_tab_complete()
+                    if self._handle_tab_complete():
+                        self.reopen = True
+                        break
                 elif action == "backspace":
                     self._handle_backspace()
                 elif len(action) == 1:  # printable char
@@ -149,7 +154,7 @@ class InlinePicker(Generic[T]):
         out.append("\0338\0337")
         if self._rows_above > 0:
             out.append(f"\033[{self._rows_above}A")
-        caret_col_now = self._col + len(self._typed)
+        caret_col_now = self._col + self._initial_offset + len(self._typed)
         out.append("\r")
         if caret_col_now > 0:
             out.append(f"\033[{caret_col_now}C")
@@ -185,25 +190,20 @@ class InlinePicker(Generic[T]):
 
     # ── char input ──────────────────────────────────────────────────────────
 
-    def _handle_tab_complete(self) -> None:
-        """Type the common prefix extension shared by all current candidates."""
+    def _handle_tab_complete(self) -> bool:
+        """Type the common prefix extension. Returns True if chars were typed (caller should reopen)."""
         if not self._items or self._value_fn is None:
-            return
+            return False
         values = [self._value_fn(item) for item in self._items]
         common = _common_prefix(values)
         effective_len = len(self._completion_prefix) + len(self._typed)
         extension = common[effective_len:]
         if not extension:
-            return
+            return False
         sys.stdout.write(extension)
         sys.stdout.flush()
         self._typed += extension
-        if self._refresh_fn is not None:
-            new_items = self._refresh_fn(self._typed)
-            self._items = new_items
-            self._selected = 0
-            self._offset = 0
-        self._render()
+        return True
 
     def _handle_char(self, ch: str) -> None:
         """Write ch at the prompt caret and refresh the candidate list."""
