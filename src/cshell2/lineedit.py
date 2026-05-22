@@ -15,6 +15,7 @@ from typing import Callable
 from .completion import Completion
 
 SWITCH_SENTINEL = "\x1d__SWITCH__"
+CONTEXT_CHANGED_SENTINEL = "\x1d__CHANGED__"
 
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[A-Za-z]")
 
@@ -115,10 +116,12 @@ class LineEditor:
         history: History,
         get_completions: GetCompletionsFn,
         get_prompt: Callable[[], str],
+        switch_fn: Callable[[], None] | None = None,
     ):
         self._history = history
         self._get_completions = get_completions
         self._get_prompt = get_prompt
+        self._switch_fn = switch_fn
 
         self._buf = ""
         self._cursor = 0
@@ -258,6 +261,9 @@ class LineEditor:
 
         # Ctrl+] — context switch
         if key == b"\x1d":
+            if self._switch_fn is not None:
+                needs_forward = self._do_inline_switch()
+                return CONTEXT_CHANGED_SENTINEL if needs_forward else None
             return SWITCH_SENTINEL
 
         # TAB — completion
@@ -401,6 +407,39 @@ class LineEditor:
         else:
             self._buf = self._history.entries[-self._hist_idx]
         self._cursor = len(self._buf)
+
+    # ── context switch ───────────────────────────────────────────────────────
+
+    def _do_inline_switch(self) -> bool:
+        """Run the context-switch picker inline, preserving the current buffer.
+
+        Returns True if the new context has a running process (caller should
+        exit prompt so the run loop can enter forwarding mode).
+        """
+        caret_char = self._prompt_len + self._cursor
+        caret_row = _pending_wrap_row(caret_char, self._cols)
+        end_row = _pending_wrap_row(self._prompt_len + len(self._buf), self._cols)
+        rows_above = end_row - caret_row + 1
+
+        chars_from_end = len(self._buf) - self._cursor
+        if chars_from_end > 0:
+            sys.stdout.write(f"\033[{chars_from_end}C")
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+        assert self._switch_fn is not None
+        needs_forward = self._switch_fn()
+
+        # Picker cleanup left cursor at the anchor (col 0 of the blank line).
+        # Move back up to the caret row so _redraw() can take over from there.
+        sys.stdout.write(f"\033[{rows_above}A")
+        sys.stdout.flush()
+
+        # Prompt text may have changed after a context switch.
+        self._prompt_str = self._get_prompt()
+        self._prompt_len = _visible_len(self._prompt_str)
+
+        return bool(needs_forward)
 
     # ── completion ───────────────────────────────────────────────────────────
 

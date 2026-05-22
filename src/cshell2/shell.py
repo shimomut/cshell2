@@ -20,7 +20,7 @@ from .completion import (
     Completion,
 )
 from .context import ContextManager, ContextState
-from .lineedit import History, LineEditor, SWITCH_SENTINEL
+from .lineedit import CONTEXT_CHANGED_SENTINEL, History, LineEditor, SWITCH_SENTINEL
 from .parsing import expand_vars, split_for_completion, tokenize
 from .pipeline import Redirect, Sequence, Stage, Pipeline, expand_globs, parse_line, _split_on_operators
 from .process import ProcessSlot
@@ -79,6 +79,7 @@ class Shell:
             history=history,
             get_completions=self._get_completions,
             get_prompt=lambda: get_prompt_func()(self.context_manager),
+            switch_fn=self._handle_switch,
         )
 
         self._command_completer = CommandNameCompleter(self.registry)
@@ -679,14 +680,19 @@ class Shell:
             if name == self._NEW_CTX_SENTINEL:
                 return ""
             ctx = self.context_manager.contexts[name]
-            state = ctx.state.name.lower()
-            return "" if state == "idle" else state
+            slot = ctx.process_slot
+            if slot and slot.is_alive() and slot.argv:
+                parts = [os.path.basename(slot.argv[0])] + slot.argv[1:2]
+                return " ".join(parts)
+            return ""
 
         picker = InlinePicker(
             items,
             display_fn=display_fn,
             meta_fn=meta_fn,
             max_height=10,
+            min_width=32,
+            hide_cursor=True,
         )
         if current in contexts:
             picker._selected = contexts.index(current)
@@ -711,8 +717,8 @@ class Shell:
             return None
         return (selected, False)
 
-    def _handle_switch(self) -> None:
-        """Handle Ctrl+] switch request."""
+    def _handle_switch(self) -> bool:
+        """Handle Ctrl+] switch request. Returns True if new context has a live process."""
         ctx = self.context_manager.current()
         if ctx and ctx.process_slot:
             ctx.process_slot.deactivate()
@@ -722,7 +728,7 @@ class Shell:
         if result is None:
             if ctx and ctx.process_slot and ctx.process_slot.is_alive():
                 ctx.process_slot.activate()
-            return
+            return False
 
         target_name, is_new = result
 
@@ -737,6 +743,8 @@ class Shell:
         new_ctx = self.context_manager.current()
         if new_ctx and new_ctx.process_slot and new_ctx.process_slot.is_alive():
             new_ctx.process_slot.activate()
+            return True
+        return False
 
     def _background_count(self) -> int:
         """Count contexts with running processes (excluding current)."""
@@ -785,6 +793,8 @@ class Shell:
                 text = self._line_editor.prompt()
                 if text == SWITCH_SENTINEL:
                     self._handle_switch()
+                    continue
+                if text == CONTEXT_CHANGED_SENTINEL:
                     continue
                 if text.strip():
                     self._execute(text.strip())

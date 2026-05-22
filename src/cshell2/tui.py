@@ -51,6 +51,8 @@ class InlinePicker(Generic[T]):
         value_fn: Callable[[T], str] | None = None,
         completion_prefix: str = "",
         reopen_when: Callable[[list[T]], bool] | None = None,
+        min_width: int = 0,
+        hide_cursor: bool = False,
     ):
         self._items = items
         self._display_fn = display_fn
@@ -63,6 +65,8 @@ class InlinePicker(Generic[T]):
         self._value_fn = value_fn
         self._completion_prefix = completion_prefix
         self._reopen_when = reopen_when
+        self._min_width = min_width
+        self._hide_cursor = hide_cursor
         self._typed = ""
         self.reopen = False          # set True when tab-complete typed chars; caller should reopen
         self.apply_backspace = False  # set True when backspace pressed with no typed chars
@@ -86,6 +90,9 @@ class InlinePicker(Generic[T]):
         old_wakeup_fd = signal.set_wakeup_fd(sig_w, warn_on_full_buffer=False)
 
         result: T | None = None
+        if self._hide_cursor:
+            sys.stdout.write("\x1b[?25l")
+            sys.stdout.flush()
         try:
             self._update_size()
             self._reserve()
@@ -122,6 +129,9 @@ class InlinePicker(Generic[T]):
             os.close(sig_r)
             os.close(sig_w)
             self._cleanup()
+            if self._hide_cursor:
+                sys.stdout.write("\x1b[?25h")
+                sys.stdout.flush()
 
         return result
 
@@ -178,10 +188,10 @@ class InlinePicker(Generic[T]):
         return "\033[38;5;240m│\033[0m"
 
     def _compute_panel_w(self) -> int:
-        """Minimal width that fits all items, bounded by available columns."""
+        """Width that fits all items (respecting min_width), bounded by available columns."""
         has_scrollbar = len(self._items) > self._height
         avail = max(1, self._cols - self._col - (1 if has_scrollbar else 0))
-        max_w = 0
+        max_w = self._min_width
         for item in self._items:
             label = self._display_fn(item)
             meta = self._meta_fn(item) if self._meta_fn else ""
