@@ -65,9 +65,9 @@ class FileCompleter(Completer):
                 full_path = os.path.join(directory, entry)
                 display_path = os.path.join(os.path.dirname(prefix), entry) if prefix and os.path.dirname(prefix) else entry
                 if os.path.isdir(full_path):
-                    dirs.append(Completion(value=display_path + "/"))
+                    dirs.append(Completion(value=display_path + "/", display=entry + "/"))
                 else:
-                    files.append(Completion(value=display_path))
+                    files.append(Completion(value=display_path, display=entry))
         return dirs + files
 
 

@@ -425,6 +425,8 @@ class LineEditor:
             col=caret_col,
             rows_above=rows_above,
             refresh_fn=refresh,
+            value_fn=lambda c: c.value,
+            completion_prefix=prefix,
         )
         selected = picker.run()
 

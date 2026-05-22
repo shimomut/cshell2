@@ -17,6 +17,18 @@ def _csi(code: str) -> str:
     return f"\033[{code}"
 
 
+def _common_prefix(strings: list[str]) -> str:
+    if not strings:
+        return ""
+    prefix = strings[0]
+    for s in strings[1:]:
+        while not s.startswith(prefix):
+            prefix = prefix[:-1]
+            if not prefix:
+                return ""
+    return prefix
+
+
 class InlinePicker(Generic[T]):
     """
     Selectable list rendered inline below the current cursor position.
@@ -35,6 +47,8 @@ class InlinePicker(Generic[T]):
         col: int = 0,
         rows_above: int = 1,
         refresh_fn: Callable[[str], list[T]] | None = None,
+        value_fn: Callable[[T], str] | None = None,
+        completion_prefix: str = "",
     ):
         self._items = items
         self._display_fn = display_fn
@@ -43,6 +57,8 @@ class InlinePicker(Generic[T]):
         self._col = col
         self._rows_above = rows_above
         self._refresh_fn = refresh_fn
+        self._value_fn = value_fn
+        self._completion_prefix = completion_prefix
         self._typed = ""
 
         self._selected = 0
@@ -84,6 +100,8 @@ class InlinePicker(Generic[T]):
                 elif action == "down":
                     self._move(1)
                     self._render()
+                elif action == "tab_complete":
+                    self._handle_tab_complete()
                 elif action == "backspace":
                     self._handle_backspace()
                 elif len(action) == 1:  # printable char
@@ -148,16 +166,16 @@ class InlinePicker(Generic[T]):
         # reverse-video, which fills colour without adding characters.
         avail = self._cols - self._col
         meta_w = min(len(meta), min(20, avail // 4))
-        label_w = max(1, avail - meta_w - 3)  # 1 prefix + 2 gap
+        label_w = max(1, avail - meta_w - 2)  # 2 gap between label and meta
         label = label[:label_w]
         meta = meta[:meta_w]
 
         col_move = f"\033[{self._col}C" if self._col > 0 else ""
         if selected:
-            inner = f" {label}" + (f"  {meta}" if meta else "")
+            inner = label + (f"  {meta}" if meta else "")
             return f"\r{col_move}\033[K\033[7m{inner}\033[K\033[0m"
         else:
-            inner = f" {label}" + (f"  \033[2m{meta}\033[0m" if meta else "")
+            inner = label + (f"  \033[2m{meta}\033[0m" if meta else "")
             return f"\r{col_move}\033[K{inner}"
 
     def _cleanup(self) -> None:
@@ -166,6 +184,26 @@ class InlinePicker(Generic[T]):
         sys.stdout.flush()
 
     # ── char input ──────────────────────────────────────────────────────────
+
+    def _handle_tab_complete(self) -> None:
+        """Type the common prefix extension shared by all current candidates."""
+        if not self._items or self._value_fn is None:
+            return
+        values = [self._value_fn(item) for item in self._items]
+        common = _common_prefix(values)
+        effective_len = len(self._completion_prefix) + len(self._typed)
+        extension = common[effective_len:]
+        if not extension:
+            return
+        sys.stdout.write(extension)
+        sys.stdout.flush()
+        self._typed += extension
+        if self._refresh_fn is not None:
+            new_items = self._refresh_fn(self._typed)
+            self._items = new_items
+            self._selected = 0
+            self._offset = 0
+        self._render()
 
     def _handle_char(self, ch: str) -> None:
         """Write ch at the prompt caret and refresh the candidate list."""
@@ -219,8 +257,10 @@ class InlinePicker(Generic[T]):
             return "cancel"
         if key in (b"\x1b[A", b"\x10"):         # up arrow, Ctrl+P
             return "up"
-        if key in (b"\x1b[B", b"\x0e", b"\t"):  # down arrow, Ctrl+N, Tab
+        if key in (b"\x1b[B", b"\x0e"):          # down arrow, Ctrl+N
             return "down"
+        if key == b"\t":
+            return "tab_complete"
         if key in (b"\x7f", b"\x08"):            # Backspace, Ctrl+H
             return "backspace"
         if len(key) == 1 and 0x20 <= key[0] < 0x7F:
