@@ -267,6 +267,57 @@ cshell2/
     └── test_parsing.py
 ```
 
+## Shell Operator Support
+
+### Planned features (priority order)
+
+**Tier 1 — Core (share a single pipeline parser):**
+- Pipe `|` — `ls | grep py`
+- Stdout redirect `>` `>>` — `make > build.log`
+- Stdin redirect `<` — `sort < input.txt`
+- Sequencing `;` `&&` `||` — `make && ./run`
+
+**Tier 2 — High value, independent:**
+- Glob expansion `*` `?` `**` — pure Python `glob.glob`, no exec changes
+- Command substitution `$(…)` — capture stdout, substitute into token
+- Stderr redirect `2>` `2>&1`
+
+**Tier 3 — Nice to have:**
+- Background `&` (maps to auto context creation)
+- Process substitution `<(cmd)`
+- Here-documents `<<EOF`
+
+### Implementation design
+
+Parse order (all quote-aware, implemented in `pipeline.py`):
+
+```
+raw line
+ └─ split on ;          → list of statements
+     └─ split on && ||  → conditional chain
+         └─ split on |  → list of pipeline stages
+             └─ each stage: extract redirections (>, >>, <, 2>, 2>&1)
+                 └─ remaining text: expand $(...), expand $VAR, tokenize, glob
+```
+
+Two execution modes in `shell.py`:
+
+| Situation | Execution path |
+|-----------|---------------|
+| Standalone command (no pipe) | PTY via `ProcessSlot` (current) |
+| Command in a pipeline | `subprocess.Popen` with plain fds |
+| Last stage of pipe, no output redirect | PTY (so interactive pagers work) |
+
+Python registered commands (`@registry.command`) in a pipeline have their
+`sys.stdout` temporarily replaced with a `io.BytesIO` to capture output.
+
+### File layout addition
+
+```
+src/cshell2/
+    pipeline.py   # quote-aware operator parser: split_pipeline(), parse_redirects()
+```
+
 ## Key Design Decisions
 
 1. **prompt_toolkit over raw readline** — gives us multi-line edit, colored completions with descriptions, async completion, and better cross-platform support.

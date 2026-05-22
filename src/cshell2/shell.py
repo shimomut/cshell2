@@ -21,7 +21,8 @@ from .completion import (
 )
 from .context import ContextManager, ContextState
 from .lineedit import History, LineEditor, SWITCH_SENTINEL
-from .parsing import expand_vars, split_for_completion
+from .parsing import expand_vars, split_for_completion, tokenize
+from .pipeline import Redirect, Sequence, Stage, Pipeline, expand_globs, parse_line
 from .process import ProcessSlot
 from .prompt import get_prompt_func, set_prompt
 
@@ -353,22 +354,159 @@ class Shell:
     _ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)")
 
     def _execute(self, line: str) -> None:
-        tokens, _ = split_for_completion(expand_vars(line) + " ")
-        if not tokens:
-            return
+        seq = parse_line(expand_vars(line))
+        last_exit = 0
+        for op, pipeline in seq.items:
+            if op == "&&" and last_exit != 0:
+                continue
+            if op == "||" and last_exit == 0:
+                continue
+            last_exit = self._execute_pipeline(pipeline)
 
+    def _tokenize_stage(self, stage: Stage) -> list[str]:
+        """Expand variables, tokenize, glob-expand a stage's text."""
+        tokens = tokenize(stage.text + " ")
+        tokens = [os.path.expanduser(t) for t in tokens]
+        return expand_globs(tokens)
+
+    def _execute_pipeline(self, pipeline: Pipeline) -> int:
+        """Execute a pipeline; return exit code of last stage."""
+        stages = pipeline.stages
+        if len(stages) == 1:
+            return self._execute_stage(stages[0], stdin_fd=None, stdout_fd=None)
+
+        # Multi-stage pipeline: connect with OS pipes.
+        # All stages except the last use plain subprocess (no PTY).
+        import subprocess
+
+        n = len(stages)
+        pipe_fds: list[tuple[int, int]] = []
+        for _ in range(n - 1):
+            pipe_fds.append(os.pipe())
+
+        procs: list[subprocess.Popen] = []
+        for idx, stage in enumerate(stages):
+            tokens = self._tokenize_stage(stage)
+            if not tokens:
+                continue
+
+            stdin_fd = pipe_fds[idx - 1][0] if idx > 0 else None
+            stdout_fd = pipe_fds[idx][1] if idx < n - 1 else None
+
+            stdin_src = subprocess.PIPE if stdin_fd is not None else None
+            stdout_dst = subprocess.PIPE if stdout_fd is not None else None
+
+            # Apply explicit redirects
+            stdin_file = stdout_file = stderr_dst = None
+            for redir in stage.redirects:
+                if redir.kind == "<":
+                    stdin_file = open(redir.target, "rb")
+                elif redir.kind == ">":
+                    stdout_file = open(redir.target, "wb")
+                elif redir.kind == ">>":
+                    stdout_file = open(redir.target, "ab")
+                elif redir.kind == "2>":
+                    stderr_dst = open(redir.target, "wb")
+                elif redir.kind == "2>>":
+                    stderr_dst = open(redir.target, "ab")
+                elif redir.kind == "2>&1":
+                    stderr_dst = subprocess.STDOUT
+
+            stdin_arg = stdin_file if stdin_file else (pipe_fds[idx - 1][0] if idx > 0 else None)
+            stdout_arg = stdout_file if stdout_file else (pipe_fds[idx][1] if idx < n - 1 else None)
+
+            try:
+                p = subprocess.Popen(
+                    tokens,
+                    stdin=stdin_arg,
+                    stdout=stdout_arg,
+                    stderr=stderr_dst,
+                    env=dict(os.environ),
+                    cwd=os.getcwd(),
+                )
+            except FileNotFoundError:
+                print(f"cshell2: command not found: {tokens[0]}")
+                p = None
+            except OSError as e:
+                print(f"cshell2: {e}")
+                p = None
+
+            # Close pipe ends in parent after handing them to child
+            if idx > 0:
+                os.close(pipe_fds[idx - 1][0])
+            if idx < n - 1:
+                os.close(pipe_fds[idx][1])
+
+            if stdin_file:
+                stdin_file.close()
+            if stdout_file:
+                stdout_file.close()
+            if stderr_dst and stderr_dst not in (subprocess.STDOUT,):
+                stderr_dst.close()
+
+            if p:
+                procs.append(p)
+
+        exit_code = 0
+        for p in procs:
+            p.wait()
+            exit_code = p.returncode or 0
+        return exit_code
+
+    def _execute_stage(self, stage: Stage, stdin_fd, stdout_fd) -> int:
+        """Execute a single stage (no pipe neighbours).
+
+        stdin_fd / stdout_fd are file descriptors or None (meaning inherit terminal).
+        Returns exit code.
+        """
+        tokens = self._tokenize_stage(stage)
+        if not tokens:
+            return 0
+
+        # Pure-assignment line
         if all(self._ASSIGNMENT_RE.match(t) for t in tokens):
             for token in tokens:
                 m = self._ASSIGNMENT_RE.match(token)
                 self.context_manager.set_variable(m.group(1), m.group(2))
-            return
+            return 0
 
         command_name = tokens[0]
-        args = [os.path.expanduser(a) for a in tokens[1:]]
+        args = tokens[1:]
+
+        # Resolve redirections
+        stdin_override = stdout_override = stderr_override = None
+        for redir in stage.redirects:
+            if redir.kind == "<":
+                stdin_override = open(redir.target, "rb")
+            elif redir.kind == ">":
+                stdout_override = open(redir.target, "wb")
+            elif redir.kind == ">>":
+                stdout_override = open(redir.target, "ab")
+            elif redir.kind == "2>":
+                stderr_override = open(redir.target, "wb")
+            elif redir.kind == "2>>":
+                stderr_override = open(redir.target, "ab")
+            elif redir.kind == "2>&1":
+                stderr_override = "stdout"
+
+        has_redirects = any([stdin_override, stdout_override, stderr_override])
 
         cmd = self.registry.get(command_name)
         if cmd:
+            # Python command — redirect sys.stdout/stdin if needed
+            import io as _io
+            old_stdout = sys.stdout
+            old_stdin = sys.stdin
+            old_stderr = sys.stderr
             try:
+                if stdout_override:
+                    sys.stdout = _io.TextIOWrapper(stdout_override)
+                if stdin_override:
+                    sys.stdin = _io.TextIOWrapper(stdin_override)
+                if stderr_override == "stdout":
+                    sys.stderr = sys.stdout
+                elif stderr_override:
+                    sys.stderr = _io.TextIOWrapper(stderr_override)
                 cmd.func(*args)
             except SystemExit:
                 raise
@@ -377,8 +515,63 @@ class Shell:
             except Exception as e:
                 print(f"{command_name}: error: {e}")
                 traceback.print_exc()
+            finally:
+                sys.stdout = old_stdout
+                sys.stdin = old_stdin
+                sys.stderr = old_stderr
+                for f in (stdout_override, stdin_override):
+                    if f:
+                        try:
+                            f.close()
+                        except Exception:
+                            pass
+                if stderr_override and stderr_override != "stdout":
+                    try:
+                        stderr_override.close()
+                    except Exception:
+                        pass
+            return 0
+
+        # External command
+        if has_redirects:
+            import subprocess
+            stdin_arg = stdin_override or None
+            stdout_arg = stdout_override or None
+            if stderr_override == "stdout":
+                stderr_arg = subprocess.STDOUT
+            else:
+                stderr_arg = stderr_override or None
+            try:
+                p = subprocess.run(
+                    [command_name] + args,
+                    stdin=stdin_arg,
+                    stdout=stdout_arg,
+                    stderr=stderr_arg,
+                    env=dict(os.environ),
+                    cwd=os.getcwd(),
+                )
+            except FileNotFoundError:
+                print(f"cshell2: command not found: {command_name}")
+                return 127
+            except OSError as e:
+                print(f"cshell2: {e}")
+                return 1
+            finally:
+                for f in (stdin_override, stdout_override):
+                    if f:
+                        try:
+                            f.close()
+                        except Exception:
+                            pass
+                if stderr_override and stderr_override != "stdout":
+                    try:
+                        stderr_override.close()
+                    except Exception:
+                        pass
+            return p.returncode
         else:
             self._execute_external(command_name, args)
+            return 0
 
     def _execute_external(self, command_name: str, args: list[str]) -> None:
         ctx = self.context_manager.current()
