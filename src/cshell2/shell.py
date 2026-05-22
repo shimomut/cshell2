@@ -111,20 +111,27 @@ class Shell:
         )
 
         cmd = self.registry.get(command_name)
-        completions: list[Completion] = []
+        ext = self.registry.get_external_completers(command_name)
+        completers_dict = cmd.completers if cmd else ext
+
         has_completer = False
-        if cmd and arg_index in cmd.completers:
-            has_completer = True
-            completer = cmd.completers[arg_index]
-            if completer.should_activate(ctx):
-                completions = completer.complete(ctx)
-        else:
-            ext = self.registry.get_external_completers(command_name)
-            if ext and arg_index in ext:
+        completions: list[Completion] = []
+
+        if completers_dict is not None:
+            options_completer = completers_dict.get(None)
+            positional_completer = completers_dict.get(arg_index)
+
+            # Options completer takes priority when typing a "-"-prefixed token.
+            if options_completer and ctx.prefix.startswith("-"):
                 has_completer = True
-                completer = ext[arg_index]
-                if completer.should_activate(ctx):
-                    completions = completer.complete(ctx)
+                if options_completer.should_activate(ctx):
+                    completions = options_completer.complete(ctx)
+
+            # Positional completer as fallback (or primary when no "-" prefix).
+            if not completions and positional_completer:
+                has_completer = True
+                if positional_completer.should_activate(ctx):
+                    completions = positional_completer.complete(ctx)
 
         if not completions and not has_completer:
             completions = self._file_completer.complete(ctx)

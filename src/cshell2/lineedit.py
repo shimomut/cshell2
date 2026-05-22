@@ -412,6 +412,11 @@ class LineEditor:
                 self._apply(completions[0], prefix)
                 return
 
+            # Multi-select options picker.
+            if all(c.multi_select for c in completions):
+                self._complete_multi(completions, prefix)
+                return
+
             # Move to the end of the visible content, then go one line down.
             # The prompt line stays visible above the picker during interaction.
             caret_char = self._prompt_len + self._cursor
@@ -476,8 +481,44 @@ class LineEditor:
                 self._apply(selected, prefix)
             return
 
+    def _complete_multi(self, completions: list[Completion], prefix: str) -> None:
+        from .tui import InlineMultiPicker
+
+        caret_char = self._prompt_len + self._cursor
+        caret_row = _pending_wrap_row(caret_char, self._cols)
+        end_row = _pending_wrap_row(self._prompt_len + len(self._buf), self._cols)
+        rows_above = end_row - caret_row + 1
+
+        chars_from_end = len(self._buf) - self._cursor
+        if chars_from_end > 0:
+            sys.stdout.write(f"\033[{chars_from_end}C")
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+        picker = InlineMultiPicker(
+            completions,
+            display_fn=lambda c: c.display or c.value,
+            meta_fn=lambda c: c.description,
+            max_height=12,
+            rows_above=rows_above,
+        )
+        selected = picker.run()
+
+        sys.stdout.write(f"\033[{rows_above}A")
+        sys.stdout.flush()
+
+        if selected:
+            self._apply_multi(selected, prefix)
+
     def _apply(self, completion: Completion, prefix: str) -> None:
         pre = self._buf[: self._cursor - len(prefix)]
         post = self._buf[self._cursor :]
         self._buf = pre + completion.value + post
         self._cursor = len(pre) + len(completion.value)
+
+    def _apply_multi(self, completions: list[Completion], prefix: str) -> None:
+        pre = self._buf[: self._cursor - len(prefix)]
+        post = self._buf[self._cursor :]
+        inserted = " ".join(c.value for c in completions)
+        self._buf = pre + inserted + post
+        self._cursor = len(pre) + len(inserted)

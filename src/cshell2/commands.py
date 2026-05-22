@@ -13,20 +13,20 @@ from .completion import Completer
 class Command:
     name: str
     func: Callable
-    completers: dict[int, Completer] = field(default_factory=dict)
+    completers: dict[int | None, Completer] = field(default_factory=dict)
     help_text: str = ""
 
 
 class CommandRegistry:
     def __init__(self):
         self._commands: dict[str, Command] = {}
-        self._external_completers: dict[str, dict[int, Completer]] = {}
+        self._external_completers: dict[str, dict[int | None, Completer]] = {}
         self._builtin_names: set[str] = set()
 
     def command(
         self,
         name: str | None = None,
-        completers: dict[int, Completer] | None = None,
+        completers: dict[int | None, Completer] | None = None,
     ):
         """Decorator to register a Python function as a shell command."""
         def decorator(func: Callable) -> Callable:
@@ -45,7 +45,7 @@ class CommandRegistry:
         self,
         func: Callable,
         name: str | None = None,
-        completers: dict[int, Completer] | None = None,
+        completers: dict[int | None, Completer] | None = None,
     ) -> None:
         """Imperative registration (alternative to decorator)."""
         cmd_name = name or func.__name__
@@ -60,12 +60,21 @@ class CommandRegistry:
     def register_external_completers(
         self,
         command_name: str,
-        completers: dict[int, Completer],
+        completers: dict[int | None, Completer],
     ) -> None:
-        """Register completers for an external (system) command."""
+        """Register completers for an external (system) command.
+
+        Use ``None`` as a key for an options completer that activates whenever
+        the user types a ``-``-prefixed token at any argument position:
+
+            registry.register_external_completers("ls", {
+                None: OptionsCompleter({"-l": "long format", ...}),
+                0: FileCompleter(),
+            })
+        """
         self._external_completers[command_name] = completers
 
-    def get_external_completers(self, command_name: str) -> dict[int, Completer] | None:
+    def get_external_completers(self, command_name: str) -> dict[int | None, Completer] | None:
         return self._external_completers.get(command_name)
 
     def get(self, name: str) -> Command | None:

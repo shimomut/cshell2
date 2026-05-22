@@ -25,6 +25,7 @@ class Completion:
     value: str
     display: str = ""
     description: str = ""
+    multi_select: bool = False
 
     def __post_init__(self):
         if not self.display:
@@ -129,6 +130,33 @@ class CallbackCompleter(Completer):
             Completion(value=c)
             for c in self.func()
             if c.startswith(ctx.prefix)
+        ]
+
+
+class OptionsCompleter(Completer):
+    """Completer for command-line flags with multi-select TUI support.
+
+    Register under the ``None`` key in a completers dict to activate at any
+    argument position when the user types a ``-``-prefixed token:
+
+        registry.register_external_completers("ls", {
+            None: OptionsCompleter({"-l": "long format", "-a": "show hidden"}),
+            0: FileCompleter(),
+        })
+    """
+
+    def __init__(self, options: dict[str, str]):
+        self.options = options
+
+    def should_activate(self, ctx: CompletionContext) -> bool:
+        return ctx.prefix.startswith("-")
+
+    def complete(self, ctx: CompletionContext) -> list[Completion]:
+        prefix = ctx.prefix
+        return [
+            Completion(value=flag, description=desc, multi_select=True)
+            for flag, desc in sorted(self.options.items())
+            if flag.startswith(prefix)
         ]
 
 
