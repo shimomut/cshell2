@@ -397,11 +397,23 @@ class LineEditor:
 
         # Move to the end of the visible content, then go one line down.
         # The prompt line stays visible above the picker during interaction.
+        caret_char = self._prompt_len + self._cursor
+        caret_col = _pending_wrap_col(caret_char, self._cols)
+        caret_row = _pending_wrap_row(caret_char, self._cols)
+        end_row = _pending_wrap_row(self._prompt_len + len(self._buf), self._cols)
+        rows_above = end_row - caret_row + 1
+
         chars_from_end = len(self._buf) - self._cursor
         if chars_from_end > 0:
             sys.stdout.write(f"\033[{chars_from_end}C")
         sys.stdout.write("\n")
         sys.stdout.flush()
+
+        buf_at_tab = self._buf[: self._cursor]
+
+        def refresh(typed: str) -> list[Completion]:
+            new_completions, _ = self._get_completions(buf_at_tab + typed)
+            return new_completions
 
         from .tui import InlinePicker
 
@@ -410,12 +422,16 @@ class LineEditor:
             display_fn=lambda c: c.display or c.value,
             meta_fn=lambda c: c.description,
             max_height=10,
+            col=caret_col,
+            rows_above=rows_above,
+            refresh_fn=refresh,
         )
         selected = picker.run()
 
-        # Picker cleanup leaves the cursor at the top of its reserved area,
-        # which is always one line below the blank prompt line.
-        sys.stdout.write("\033[1A")
+        # Picker cleanup leaves cursor at the anchor row (first blank line).
+        # Move up rows_above lines to reach the caret row, then let _redraw
+        # handle the rest.
+        sys.stdout.write(f"\033[{rows_above}A")
         sys.stdout.flush()
 
         if selected is not None:

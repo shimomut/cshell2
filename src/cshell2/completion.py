@@ -56,19 +56,19 @@ class FileCompleter(Completer):
         except OSError:
             return []
 
-        results = []
+        dirs = []
+        files = []
         for entry in sorted(entries):
             if entry.startswith(".") and not partial.startswith("."):
                 continue
             if entry.lower().startswith(partial.lower()):
                 full_path = os.path.join(directory, entry)
                 display_path = os.path.join(os.path.dirname(prefix), entry) if prefix and os.path.dirname(prefix) else entry
-                suffix = "/" if os.path.isdir(full_path) else ""
-                results.append(Completion(
-                    value=display_path + suffix,
-                    description="dir" if suffix else "",
-                ))
-        return results
+                if os.path.isdir(full_path):
+                    dirs.append(Completion(value=display_path + "/"))
+                else:
+                    files.append(Completion(value=display_path))
+        return dirs + files
 
 
 class CommandNameCompleter(Completer):

@@ -32,11 +32,18 @@ class InlinePicker(Generic[T]):
         display_fn: Callable[[T], str] = str,
         meta_fn: Callable[[T], str] | None = None,
         max_height: int = 10,
+        col: int = 0,
+        rows_above: int = 1,
+        refresh_fn: Callable[[str], list[T]] | None = None,
     ):
         self._items = items
         self._display_fn = display_fn
         self._meta_fn = meta_fn
         self._max_height = max_height
+        self._col = col
+        self._rows_above = rows_above
+        self._refresh_fn = refresh_fn
+        self._typed = ""
 
         self._selected = 0
         self._offset = 0
@@ -61,21 +68,26 @@ class InlinePicker(Generic[T]):
             self._update_size()
             self._reserve()
             tty.setraw(fd)
-            sys.stdout.write("\033[?25l")   # hide cursor
-            sys.stdout.flush()
             signal.signal(signal.SIGWINCH, self._on_resize)
             self._render()
 
             while True:
                 action = self._dispatch(self._read_key(fd, sig_r))
                 if action == "accept":
-                    result = self._items[self._selected]
+                    result = self._items[self._selected] if self._items else None
                     break
                 if action == "cancel":
                     break
-                if action in ("up", "down"):
-                    self._move(-1 if action == "up" else 1)
+                if action == "up":
+                    self._move(-1)
                     self._render()
+                elif action == "down":
+                    self._move(1)
+                    self._render()
+                elif action == "backspace":
+                    self._handle_backspace()
+                elif len(action) == 1:  # printable char
+                    self._handle_char(action)
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
             signal.signal(signal.SIGWINCH, old_sigwinch)
@@ -83,8 +95,6 @@ class InlinePicker(Generic[T]):
             os.close(sig_r)
             os.close(sig_w)
             self._cleanup()
-            sys.stdout.write("\033[?25h")   # restore cursor
-            sys.stdout.flush()
 
         return result
 
@@ -103,20 +113,28 @@ class InlinePicker(Generic[T]):
     def _reserve(self) -> None:
         """Create blank lines below cursor and save the top position with DECSC."""
         sys.stdout.write("\n" * self._height)
-        sys.stdout.write(_csi(f"{self._height}A") + "\r\0337")
+        col_move = f"\033[{self._col}C" if self._col > 0 else ""
+        sys.stdout.write(_csi(f"{self._height}A") + "\r" + col_move + "\0337")
         sys.stdout.flush()
 
     def _render(self) -> None:
-        """Restore to DECSC anchor, clear, draw rows, restore anchor again."""
+        """Restore to DECSC anchor, clear, draw rows, then place cursor at prompt caret."""
         visible = self._items[self._offset : self._offset + self._height]
         out: list[str] = ["\0338\r\033[J"]  # restore to anchor, clear to end
 
         for i, item in enumerate(visible):
             out.append(self._format_row(item, selected=(i + self._offset == self._selected)))
-            if i < self._height - 1:
+            if i < len(visible) - 1:
                 out.append("\n")
 
-        out.append("\0338\r\0337")  # restore to anchor, re-save
+        # Re-save anchor, then move cursor to prompt caret position.
+        out.append("\0338\0337")
+        if self._rows_above > 0:
+            out.append(f"\033[{self._rows_above}A")
+        caret_col_now = self._col + len(self._typed)
+        out.append("\r")
+        if caret_col_now > 0:
+            out.append(f"\033[{caret_col_now}C")
 
         sys.stdout.write("".join(out))
         sys.stdout.flush()
@@ -128,22 +146,52 @@ class InlinePicker(Generic[T]):
         # No padding — rows stay narrow to avoid wrapping on resize.
         # The selected-row highlight extends to EOL via \033[K inside
         # reverse-video, which fills colour without adding characters.
-        meta_w = min(len(meta), min(20, self._cols // 4))
-        label_w = max(1, self._cols - meta_w - 4)  # 2 prefix + 2 gap
+        avail = self._cols - self._col
+        meta_w = min(len(meta), min(20, avail // 4))
+        label_w = max(1, avail - meta_w - 3)  # 1 prefix + 2 gap
         label = label[:label_w]
         meta = meta[:meta_w]
 
+        col_move = f"\033[{self._col}C" if self._col > 0 else ""
         if selected:
-            inner = f"❯ {label}" + (f"  {meta}" if meta else "")
-            return f"\r\033[K\033[7m{inner}\033[K\033[0m"
+            inner = f" {label}" + (f"  {meta}" if meta else "")
+            return f"\r{col_move}\033[K\033[7m{inner}\033[K\033[0m"
         else:
-            inner = f"  {label}" + (f"  \033[2m{meta}\033[0m" if meta else "")
-            return f"\r\033[K{inner}"
+            inner = f" {label}" + (f"  \033[2m{meta}\033[0m" if meta else "")
+            return f"\r{col_move}\033[K{inner}"
 
     def _cleanup(self) -> None:
         """Restore to anchor and erase the picker area."""
         sys.stdout.write("\0338\r\033[J")
         sys.stdout.flush()
+
+    # ── char input ──────────────────────────────────────────────────────────
+
+    def _handle_char(self, ch: str) -> None:
+        """Write ch at the prompt caret and refresh the candidate list."""
+        sys.stdout.write(ch)
+        sys.stdout.flush()
+        self._typed += ch
+        if self._refresh_fn is not None:
+            new_items = self._refresh_fn(self._typed)
+            self._items = new_items
+            self._selected = 0
+            self._offset = 0
+        self._render()
+
+    def _handle_backspace(self) -> None:
+        if not self._typed:
+            return
+        # Cursor is at (caret_row, col + len(typed)); erase the last typed char.
+        sys.stdout.write("\033[D \033[D")
+        sys.stdout.flush()
+        self._typed = self._typed[:-1]
+        if self._refresh_fn is not None:
+            new_items = self._refresh_fn(self._typed)
+            self._items = new_items
+            self._selected = 0
+            self._offset = 0
+        self._render()
 
     # ── input ───────────────────────────────────────────────────────────────
 
@@ -173,6 +221,10 @@ class InlinePicker(Generic[T]):
             return "up"
         if key in (b"\x1b[B", b"\x0e", b"\t"):  # down arrow, Ctrl+N, Tab
             return "down"
+        if key in (b"\x7f", b"\x08"):            # Backspace, Ctrl+H
+            return "backspace"
+        if len(key) == 1 and 0x20 <= key[0] < 0x7F:
+            return key.decode()
         return "noop"
 
     # ── scroll ───────────────────────────────────────────────────────────────
