@@ -22,7 +22,7 @@ from .completion import (
 from .context import ContextManager, ContextState
 from .lineedit import History, LineEditor, SWITCH_SENTINEL
 from .parsing import expand_vars, split_for_completion, tokenize
-from .pipeline import Redirect, Sequence, Stage, Pipeline, expand_globs, parse_line
+from .pipeline import Redirect, Sequence, Stage, Pipeline, expand_globs, parse_line, _split_on_operators
 from .process import ProcessSlot
 from .prompt import get_prompt_func, set_prompt
 
@@ -85,7 +85,10 @@ class Shell:
         self._file_completer = FileCompleter()
 
     def _get_completions(self, line_before_cursor: str) -> tuple[list[Completion], str]:
-        tokens, prefix = split_for_completion(line_before_cursor)
+        # Isolate the current pipeline stage so completions for `ls | grep -`
+        # are computed against `grep`, not `ls`.
+        stage_line = _split_on_operators(line_before_cursor, [";", "&&", "||", "|"])[-1][1]
+        tokens, prefix = split_for_completion(stage_line)
 
         if not tokens:
             ctx = CompletionContext(
