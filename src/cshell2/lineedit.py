@@ -24,6 +24,29 @@ def _visible_len(s: str) -> int:
     return len(_ANSI_RE.sub("", s))
 
 
+def _pending_wrap_row(char_count: int, cols: int) -> int:
+    """Row offset below render-top where cursor sits after writing char_count visible chars.
+
+    Writing exactly N*cols chars leaves the cursor in pending-wrap state on the
+    last filled row (row N-1), not on the next row. N//cols would be off by one.
+    """
+    if char_count <= 0:
+        return 0
+    return (char_count - 1) // cols
+
+
+def _pending_wrap_col(char_count: int, cols: int) -> int:
+    """Column offset (from col 0) for the cursor after writing char_count visible chars.
+
+    When the content exactly fills a row, the cursor sits at the rightmost column
+    in pending-wrap state. cursor_char % cols would give 0 (wrong).
+    """
+    if char_count <= 0:
+        return 0
+    rem = char_count % cols
+    return rem if rem != 0 else cols - 1
+
+
 # ── History ──────────────────────────────────────────────────────────────────
 
 
@@ -91,6 +114,10 @@ class LineEditor:
         self._prompt_str = ""
         self._prompt_len = 0
         self._cursor_row = 0  # rows below render-top where cursor sits
+        # VSCode integrated terminal does not reflow content on resize;
+        # cursor stays at the same row (clamped column). Detect it so we
+        # re-render explicitly instead of relying on terminal reflow.
+        self._terminal_reflows = os.environ.get("TERM_PROGRAM", "") != "vscode"
 
     def prompt(self) -> str:
         self._buf = ""
@@ -138,16 +165,22 @@ class LineEditor:
             self._cols = 80
 
     def _on_resize(self, _sig, _frame) -> None:
+        old_cursor_row = self._cursor_row
         self._update_cols()
-        # Navigate to the render top using new-width geometry and clear down.
-        # \033[nA is clamped at the top of the screen so it is safe to overshoot.
         cursor_char = self._prompt_len + self._cursor
-        rows_up = cursor_char // self._cols
-        if rows_up > 0:
-            sys.stdout.write(f"\033[{rows_up}A")
-        sys.stdout.write("\r\033[J")
-        self._cursor_row = 0
-        self._redraw()
+        if self._terminal_reflows:
+            # Terminal reflows content and moves the cursor to the correct
+            # position in the new geometry; just update our tracking.
+            self._cursor_row = _pending_wrap_row(cursor_char, self._cols)
+        else:
+            # Terminal doesn't reflow (e.g. VSCode). The cursor stays on the
+            # same row (clamped to the new width), so go up old_cursor_row to
+            # reach render-top, then clear and redraw.
+            if old_cursor_row > 0:
+                sys.stdout.write(f"\033[{old_cursor_row}A")
+            sys.stdout.write("\r\033[J")
+            self._cursor_row = 0
+            self._redraw()
 
     # ── rendering ────────────────────────────────────────────────────────────
 
@@ -164,14 +197,14 @@ class LineEditor:
         sys.stdout.write(self._prompt_str + self._buf)
 
         # Compute cursor position within the render for next resize.
-        self._cursor_row = cursor_char // cols
+        self._cursor_row = _pending_wrap_row(cursor_char, cols)
 
         # Navigate from end of content back to where the cursor belongs.
-        end_row = total_char // cols
+        end_row = _pending_wrap_row(total_char, cols)
         rows_up = end_row - self._cursor_row
         if rows_up > 0:
             sys.stdout.write(f"\033[{rows_up}A")
-        cursor_col = cursor_char % cols
+        cursor_col = _pending_wrap_col(cursor_char, cols)
         sys.stdout.write("\r")
         if cursor_col > 0:
             sys.stdout.write(f"\033[{cursor_col}C")
