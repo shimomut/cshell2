@@ -156,9 +156,12 @@ class OptionsCompleter(Completer):
 
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         prefix = ctx.prefix
+        used = self._used_flags(ctx)
         result = []
         for flag, desc in sorted(self.options.items()):
             if not flag.startswith(prefix):
+                continue
+            if flag in used:
                 continue
             arg_hint = self.args.get(flag, "")
             result.append(Completion(
@@ -169,6 +172,20 @@ class OptionsCompleter(Completer):
                 arg_hint=arg_hint,
             ))
         return result
+
+    def _used_flags(self, ctx: CompletionContext) -> set[str]:
+        """Return the set of option flags already present in ctx.args."""
+        used: set[str] = set()
+        for arg in ctx.args:
+            if not arg.startswith("-"):
+                continue
+            if arg.startswith("--"):
+                used.add(arg)
+            else:
+                # Split short-flag clusters: -hs → {-h, -s}
+                for ch in arg[1:]:
+                    used.add(f"-{ch}")
+        return used
 
 
 class ConditionalCompleter(Completer):
