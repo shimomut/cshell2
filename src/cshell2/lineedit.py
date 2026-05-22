@@ -342,6 +342,11 @@ class LineEditor:
             self._cursor = i
             return None
 
+        # Ctrl+R — history search
+        if key == b"\x12":
+            self._history_search(fd)
+            return None
+
         # Up arrow — history back
         if key in (b"\x1b[A", b"\x10"):
             self._hist_back()
@@ -539,6 +544,62 @@ class LineEditor:
             self._cursor += len(ins)
             if not self._prompt_for_arg(opt):
                 break
+
+    def _history_search(self, fd: int) -> None:
+        from .tui import InlinePicker
+
+        entries = self._history.entries
+        if not entries:
+            return
+
+        # Deduplicate, most recent first
+        seen: set[str] = set()
+        unique: list[str] = []
+        for e in reversed(entries):
+            if e not in seen:
+                seen.add(e)
+                unique.append(e)
+
+        saved_buf = self._buf
+        saved_cursor = self._cursor
+
+        self._buf = ""
+        self._cursor = 0
+        self._redraw()
+
+        # Move below the (now empty) prompt line
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+        caret_col = _pending_wrap_col(self._prompt_len, self._cols)
+
+        def refresh(typed: str) -> tuple[list[str], int]:
+            q = typed.lower()
+            filtered = [e for e in unique if q in e.lower()] if typed else unique
+            return filtered, caret_col
+
+        picker = InlinePicker(
+            unique,
+            display_fn=str,
+            max_height=10,
+            col=caret_col,
+            initial_offset=0,
+            rows_above=1,
+            refresh_fn=refresh,
+            value_fn=None,  # disable tab-complete inside the search picker
+        )
+        selected = picker.run()
+
+        sys.stdout.write("\033[1A")
+        sys.stdout.flush()
+
+        if selected is not None:
+            self._buf = selected
+            self._cursor = len(self._buf)
+            self._hist_idx = 0
+        else:
+            self._buf = saved_buf
+            self._cursor = saved_cursor
 
     def _apply(self, completion: Completion, prefix: str) -> None:
         pre = self._buf[: self._cursor - len(prefix)]
