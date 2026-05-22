@@ -425,12 +425,14 @@ class InlineMultiPicker(Generic[T]):
         meta_fn: Callable[[T], str] | None = None,
         max_height: int = 12,
         rows_above: int = 1,
+        caret_col: int = 0,
     ):
         self._items = items
         self._display_fn = display_fn
         self._meta_fn = meta_fn
         self._max_height = max_height
         self._rows_above = rows_above
+        self._caret_col = caret_col
 
         self._selected = 0
         self._offset = 0
@@ -529,6 +531,8 @@ class InlineMultiPicker(Generic[T]):
         if self._rows_above > 0:
             out.append(f"\033[{self._rows_above}A")
         out.append("\r")
+        if self._caret_col > 0:
+            out.append(f"\033[{self._caret_col}C")
 
         sys.stdout.write("".join(out))
         sys.stdout.flush()

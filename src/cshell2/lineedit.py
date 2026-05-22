@@ -488,6 +488,7 @@ class LineEditor:
         from .tui import InlineMultiPicker
 
         caret_char = self._prompt_len + self._cursor
+        caret_col = _pending_wrap_col(caret_char, self._cols)
         caret_row = _pending_wrap_row(caret_char, self._cols)
         end_row = _pending_wrap_row(self._prompt_len + len(self._buf), self._cols)
         rows_above = end_row - caret_row + 1
@@ -504,6 +505,7 @@ class LineEditor:
             meta_fn=lambda c: c.description,
             max_height=12,
             rows_above=rows_above,
+            caret_col=caret_col,
         )
         selected = picker.run()
 
