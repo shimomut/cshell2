@@ -62,7 +62,8 @@ class InlinePicker(Generic[T]):
         self._value_fn = value_fn
         self._completion_prefix = completion_prefix
         self._typed = ""
-        self.reopen = False  # set True when tab-complete typed chars; caller should reopen
+        self.reopen = False          # set True when tab-complete typed chars; caller should reopen
+        self.apply_backspace = False  # set True when backspace pressed with no typed chars
 
         self._selected = 0
         self._offset = 0
@@ -108,7 +109,9 @@ class InlinePicker(Generic[T]):
                         self.reopen = True
                         break
                 elif action == "backspace":
-                    self._handle_backspace()
+                    if self._handle_backspace():
+                        self.apply_backspace = True
+                        break
                 elif len(action) == 1:  # printable char
                     self._handle_char(action)
         finally:
@@ -217,19 +220,28 @@ class InlinePicker(Generic[T]):
             self._offset = 0
         self._render()
 
-    def _handle_backspace(self) -> None:
-        if not self._typed:
-            return
-        # Cursor is at (caret_row, col + len(typed)); erase the last typed char.
-        sys.stdout.write("\033[D \033[D")
-        sys.stdout.flush()
-        self._typed = self._typed[:-1]
-        if self._refresh_fn is not None:
-            new_items = self._refresh_fn(self._typed)
-            self._items = new_items
-            self._selected = 0
-            self._offset = 0
-        self._render()
+    def _handle_backspace(self) -> bool:
+        """Erase one char. Returns True when the picker should close and reopen."""
+        if self._typed:
+            # Erase last picker-typed char from the prompt line.
+            sys.stdout.write("\033[D \033[D")
+            sys.stdout.flush()
+            self._typed = self._typed[:-1]
+            if self._refresh_fn is not None:
+                new_items = self._refresh_fn(self._typed)
+                self._items = new_items
+                self._selected = 0
+                self._offset = 0
+            self._render()
+            return False
+        else:
+            # No picker-typed chars remain; erase the last buffer char visually
+            # and signal the caller to apply the deletion and reopen.
+            caret_col = self._col + self._initial_offset
+            if caret_col > 0:
+                sys.stdout.write("\033[D \033[D")
+                sys.stdout.flush()
+            return True
 
     # ── input ───────────────────────────────────────────────────────────────
 

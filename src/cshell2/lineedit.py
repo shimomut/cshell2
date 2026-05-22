@@ -455,12 +455,18 @@ class LineEditor:
             sys.stdout.flush()
 
             if picker.reopen:
-                # TAB-complete typed chars into the prompt; commit them to the
-                # buffer and reopen the picker at the updated caret position.
+                # TAB-complete typed chars; commit to buffer and reopen at new position.
                 typed = picker._typed
                 self._buf = self._buf[: self._cursor] + typed + self._buf[self._cursor :]
                 self._cursor += len(typed)
                 continue
+
+            if picker.apply_backspace:
+                # Backspace with no picker-typed chars: delete one buffer char and close.
+                if self._cursor > 0:
+                    self._buf = self._buf[: self._cursor - 1] + self._buf[self._cursor :]
+                    self._cursor -= 1
+                return
 
             if selected is not None:
                 self._apply(selected, prefix)
