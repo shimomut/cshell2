@@ -149,8 +149,9 @@ class InlinePicker(Generic[T]):
         visible = self._items[self._offset : self._offset + self._height]
         out: list[str] = ["\0338\r\033[J"]  # restore to anchor, clear to end
 
+        panel_w = self._compute_panel_w()
         for i, item in enumerate(visible):
-            out.append(self._format_row(item, selected=(i + self._offset == self._selected)))
+            out.append(self._format_row(item, selected=(i + self._offset == self._selected), row_index=i, panel_w=panel_w))
             if i < len(visible) - 1:
                 out.append("\n")
 
@@ -166,26 +167,56 @@ class InlinePicker(Generic[T]):
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
-    def _format_row(self, item: T, *, selected: bool) -> str:
+    _BG = "\033[48;5;236m"  # dark gray background for all rows
+
+    def _scrollbar_char(self, row_index: int) -> str:
+        n = len(self._items)
+        thumb_start = self._offset * self._height // n
+        thumb_end = max(thumb_start + 1, (self._offset + self._height) * self._height // n)
+        if thumb_start <= row_index < thumb_end:
+            return "\033[38;5;244m█\033[0m"
+        return "\033[38;5;240m│\033[0m"
+
+    def _compute_panel_w(self) -> int:
+        """Minimal width that fits all items, bounded by available columns."""
+        has_scrollbar = len(self._items) > self._height
+        avail = max(1, self._cols - self._col - (1 if has_scrollbar else 0))
+        max_w = 0
+        for item in self._items:
+            label = self._display_fn(item)
+            meta = self._meta_fn(item) if self._meta_fn else ""
+            meta_clip = min(len(meta), min(20, avail // 4))
+            label_clip = min(len(label), max(1, avail - (meta_clip + 2 if meta_clip else 0)))
+            row_w = label_clip + (2 + meta_clip if meta_clip else 0)
+            max_w = max(max_w, row_w)
+        return min(max_w, avail)
+
+    def _format_row(self, item: T, *, selected: bool, row_index: int = 0, panel_w: int = 0) -> str:
         label = self._display_fn(item)
         meta = self._meta_fn(item) if self._meta_fn else ""
 
-        # No padding — rows stay narrow to avoid wrapping on resize.
-        # The selected-row highlight extends to EOL via \033[K inside
-        # reverse-video, which fills colour without adding characters.
-        avail = self._cols - self._col
+        has_scrollbar = len(self._items) > self._height
+        avail = max(1, self._cols - self._col - (1 if has_scrollbar else 0))
         meta_w = min(len(meta), min(20, avail // 4))
-        label_w = max(1, avail - meta_w - 2)  # 2 gap between label and meta
+        label_w = min(len(label), max(1, panel_w - (meta_w + 2 if meta_w else 0)))
         label = label[:label_w]
         meta = meta[:meta_w]
+
+        content_w = len(label) + (2 + len(meta) if meta else 0)
+        pad = " " * max(0, panel_w - content_w)
 
         col_move = f"\033[{self._col}C" if self._col > 0 else ""
         if selected:
             inner = label + (f"  {meta}" if meta else "")
-            return f"\r{col_move}\033[K\033[7m{inner}\033[K\033[0m"
+            row = f"\r{col_move}{self._BG}\033[7m{inner}{pad}\033[0m"
         else:
-            inner = label + (f"  \033[2m{meta}\033[0m" if meta else "")
-            return f"\r{col_move}\033[K{inner}"
+            inner = label + (f"  \033[2m{meta}\033[22m" if meta else "")
+            row = f"\r{col_move}{self._BG}{inner}{pad}\033[0m"
+
+        if has_scrollbar:
+            sb_col = self._col + panel_w + 1  # 1-indexed terminal column
+            row += f"\033[{sb_col}G{self._scrollbar_char(row_index)}"
+        return row
 
     def _cleanup(self) -> None:
         """Restore to anchor and erase the picker area."""
