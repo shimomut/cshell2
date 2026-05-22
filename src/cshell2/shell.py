@@ -772,8 +772,6 @@ class Shell:
                     result = self._enter_forwarding_mode(ctx.process_slot, force_redraw=True)
                     ctx.process_slot.deactivate()
                     if result == "switched":
-                        sys.stdout.write("\r\n")
-                        sys.stdout.flush()
                         self._handle_switch()
                         continue
                     else:
