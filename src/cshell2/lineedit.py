@@ -456,6 +456,7 @@ class LineEditor:
                 refresh_fn=refresh,
                 value_fn=lambda c: c.value,
                 completion_prefix=prefix,
+                reopen_when=lambda items: bool(items) and all(c.multi_select for c in items),
             )
             selected = picker.run()
 

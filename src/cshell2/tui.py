@@ -50,6 +50,7 @@ class InlinePicker(Generic[T]):
         refresh_fn: Callable[[str], tuple[list[T], int]] | None = None,
         value_fn: Callable[[T], str] | None = None,
         completion_prefix: str = "",
+        reopen_when: Callable[[list[T]], bool] | None = None,
     ):
         self._items = items
         self._display_fn = display_fn
@@ -61,6 +62,7 @@ class InlinePicker(Generic[T]):
         self._refresh_fn = refresh_fn
         self._value_fn = value_fn
         self._completion_prefix = completion_prefix
+        self._reopen_when = reopen_when
         self._typed = ""
         self.reopen = False          # set True when tab-complete typed chars; caller should reopen
         self.apply_backspace = False  # set True when backspace pressed with no typed chars
@@ -209,13 +211,13 @@ class InlinePicker(Generic[T]):
         return True
 
     def _handle_char(self, ch: str) -> bool:
-        """Write ch at prompt caret and refresh. Returns True (sets reopen) if col changed."""
+        """Write ch at prompt caret and refresh. Returns True (sets reopen) if col changed or reopen_when fires."""
         sys.stdout.write(ch)
         sys.stdout.flush()
         self._typed += ch
         if self._refresh_fn is not None:
             new_items, new_col = self._refresh_fn(self._typed)
-            if new_col != self._col:
+            if new_col != self._col or (self._reopen_when is not None and self._reopen_when(new_items)):
                 self._items = new_items
                 self.reopen = True
                 return True
