@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import select
+import shlex
 import signal
 import sys
 import termios
@@ -642,12 +643,47 @@ class LineEditor:
             self._buf = saved_buf
             self._cursor = saved_cursor
 
-    def _apply(self, completion: Completion, prefix: str) -> None:
-        pre = self._buf[: self._cursor - len(prefix)]
+    def _raw_token_start(self) -> int:
+        """Return the index in self._buf where the current raw token starts.
+
+        Scans forward up to the cursor, tracking single- and double-quote
+        state so that a token like ``'My Documents/'`` is treated as one unit.
+        The returned index is the position of the first character of the last
+        whitespace-delimited (but quote-aware) token before the cursor.
+        """
+        buf = self._buf[: self._cursor]
+        last_start = 0
+        i = 0
+        while i < len(buf):
+            c = buf[i]
+            if c in (" ", "\t"):
+                last_start = i + 1
+                i += 1
+            elif c in ("'", '"'):
+                j = buf.find(c, i + 1)
+                if j == -1:
+                    break  # unclosed quote — rest is part of this token
+                i = j + 1
+            else:
+                i += 1
+        return last_start
+
+    def _apply(self, completion: Completion, prefix: str) -> None:  # noqa: ARG002
+        # Find where the raw token starts in the buffer.  We cannot use
+        # len(prefix) here because shlex.split returns the *unquoted* length,
+        # which differs from the raw length when the token is surrounded by
+        # quotes (e.g. `'My Documents/'` is 16 raw chars but 14 unquoted).
+        raw_start = self._raw_token_start()
+        pre = self._buf[:raw_start]
         post = self._buf[self._cursor :]
+        # Shell-quote the value if it contains whitespace or other characters
+        # that shlex would split on (e.g. spaces in S3 keys or local filenames).
+        # shlex.quote only adds quotes when necessary, so plain values are
+        # returned unchanged.
+        value = shlex.quote(completion.value)
         # Append a trailing space for arg-taking options so _prompt_for_arg
         # can insert the value immediately after without an extra separator.
-        value = completion.value + (" " if completion.arg_hint else "")
+        value = value + (" " if completion.arg_hint else "")
         self._buf = pre + value + post
         self._cursor = len(pre) + len(value)
 

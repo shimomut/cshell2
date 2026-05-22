@@ -220,10 +220,12 @@ class S3PathCompleter(Completer):
                         description="prefix",
                     ))
             else:
-                # Object line: "2023-01-01 00:00:00   12345 key.txt"
-                parts = line.split()
+                # Object line: "2023-01-01 00:00:00   12345 key with spaces.txt"
+                # Split into at most 4 parts so the filename (which may contain
+                # spaces) is captured whole in parts[3].
+                parts = line.split(None, 3)
                 if len(parts) >= 4:
-                    name = parts[-1]
+                    name = parts[3]
                     size = parts[2]
                     if name.startswith(partial):
                         completions.append(Completion(

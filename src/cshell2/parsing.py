@@ -52,8 +52,15 @@ def tokenize(line: str) -> list[str]:
     try:
         return shlex.split(line)
     except ValueError:
-        # Unclosed quote — do best-effort split
-        return shlex.split(line + '"')
+        # Unclosed quote — try closing with each quote character in turn.
+        # (The existing token may be single- or double-quoted.)
+        for close in ('"', "'"):
+            try:
+                return shlex.split(line + close)
+            except ValueError:
+                continue
+        # Last resort: naive whitespace split
+        return line.split()
 
 
 def split_for_completion(line: str) -> tuple[list[str], str]:
