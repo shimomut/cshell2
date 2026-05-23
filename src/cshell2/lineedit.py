@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import re
 import select
-import shlex
 import signal
 import sys
 import termios
@@ -17,6 +16,17 @@ from .completion import Completion
 
 SWITCH_SENTINEL = "\x1d__SWITCH__"
 CONTEXT_CHANGED_SENTINEL = "\x1d__CHANGED__"
+
+_NEEDS_QUOTING = re.compile(r"[^\w@%+=:,./~-]")
+
+
+def _shell_quote(s: str) -> str:
+    """Like shlex.quote but treats ~ as safe (common in home-dir paths like ~/foo)."""
+    if not s:
+        return "''"
+    if not _NEEDS_QUOTING.search(s):
+        return s
+    return "'" + s.replace("'", "'\"'\"'") + "'"
 
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[A-Za-z]")
 
@@ -742,9 +752,9 @@ class LineEditor:
         post = self._buf[self._cursor :]
         # Shell-quote the value if it contains whitespace or other characters
         # that shlex would split on (e.g. spaces in S3 keys or local filenames).
-        # shlex.quote only adds quotes when necessary, so plain values are
-        # returned unchanged.
-        value = shlex.quote(completion.value)
+        # _shell_quote only adds quotes when necessary and treats ~ as safe so
+        # that home-dir paths like ~/Desktop/ are not needlessly quoted.
+        value = _shell_quote(completion.value)
         # Append a trailing space for arg-taking options so _prompt_for_arg
         # can insert the value immediately after without an extra separator.
         value = value + (" " if completion.arg_hint else "")
