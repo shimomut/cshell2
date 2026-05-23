@@ -19,6 +19,7 @@ from .completion import (
     FileCompleter,
     Completion,
 )
+from .variables import var_registry, VarCompleter
 from .context import ContextManager, ContextState
 from .lineedit import CONTEXT_CHANGED_SENTINEL, History, LineEditor, SWITCH_SENTINEL
 from .parsing import expand_vars, split_for_completion, tokenize
@@ -69,6 +70,7 @@ class Shell:
         self.context_manager.create("default")
         self._register_builtins()
         self.registry.mark_builtins()
+        var_registry.mark_builtins()
         self._load_user_config()
 
         history_path = Path.home() / ".cshell2" / "history"
@@ -188,32 +190,77 @@ class Shell:
         def reload_config():
             """Reload ~/.cshell2/config.py."""
             self.registry.clear_user_commands()
+            var_registry.clear_user_vars()
             set_prompt(None)
             self._load_user_config()
             print("Config reloaded.")
 
-        @self.registry.command(name="var")
+        @self.registry.command(name="var", completers={0: VarCompleter()})
         def var_cmd(*args):
-            """Set or list context variables: var KEY=VALUE [KEY=VALUE ...]"""
+            """Set or list context variables: var NAME=VALUE [NAME=VALUE ...]
+
+            NAME may be a registered Python-backed variable (e.g. 'aws_region')
+            or a plain environment variable name.  Registered variables handle
+            their own set logic (e.g. writing multiple env keys at once).
+            """
             if not args:
+                # List registered Python-backed vars first, then plain env.
+                py_vars = var_registry.all()
+                if py_vars:
+                    print("[vars]")
+                    for v in py_vars:
+                        val = v.get()
+                        val_str = val if val is not None else "(unset)"
+                        desc = f"  # {v.description}" if v.description else ""
+                        print(f"  {v.name}={val_str}{desc}")
+                    print("[env]")
                 for key, value in sorted(os.environ.items()):
-                    print(f"{key}={value}")
+                    print(f"  {key}={value}")
                 return
             for arg in args:
                 if "=" in arg:
                     key, _, value = arg.partition("=")
-                    self.context_manager.set_variable(key, value)
+                    py_var = var_registry.get(key)
+                    if py_var is not None:
+                        # Register each actual env key with the context manager
+                        # BEFORE calling set(), so the original values are captured
+                        # as the backup for context save/restore.
+                        for env_key in py_var.env_keys:
+                            if env_key not in os.environ:
+                                # Key doesn't exist yet; backup as absent.
+                                self.context_manager.set_variable(env_key, value)
+                            else:
+                                self.context_manager.set_variable(env_key, os.environ[env_key])
+                        py_var.set(value)
+                        # Sync context's stored value to what set() actually wrote.
+                        for env_key in py_var.env_keys:
+                            ctx = self.context_manager.current()
+                            if ctx is not None:
+                                ctx.variables[env_key] = os.environ.get(env_key, value)
+                    else:
+                        self.context_manager.set_variable(key, value)
+                elif var_registry.get(arg) is not None:
+                    # 'var NAME' with no '=' → print current value
+                    v = var_registry.get(arg)
+                    val = v.get()
+                    print(f"{arg}={val}" if val is not None else f"{arg}=(unset)")
                 else:
-                    print(f"var: invalid argument '{arg}' (expected KEY=VALUE)")
+                    print(f"var: invalid argument '{arg}' (expected NAME=VALUE)")
 
         @self.registry.command(name="unset")
         def unset_cmd(*args):
-            """Unset context variables: unset KEY [KEY ...]"""
+            """Unset context variables: unset NAME [NAME ...]"""
             if not args:
-                print("Usage: unset KEY [KEY ...]")
+                print("Usage: unset NAME [NAME ...]")
                 return
             for key in args:
-                self.context_manager.unset_variable(key)
+                py_var = var_registry.get(key)
+                if py_var is not None:
+                    py_var.unset()
+                    for env_key in py_var.env_keys:
+                        self.context_manager.unset_variable(env_key)
+                else:
+                    self.context_manager.unset_variable(key)
 
         @self.registry.command(name="help")
         def help_cmd(command_name: str = ""):

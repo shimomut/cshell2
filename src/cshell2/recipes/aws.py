@@ -15,11 +15,13 @@ Enable in ~/.cshell2/config.py::
 from __future__ import annotations
 
 import configparser
+import os
 import subprocess
 from pathlib import Path
 
 from ..commands import CommandRegistry
 from ..completion import Completer, Completion, CompletionContext, FileCompleter
+from ..variables import EnvVar, Var, var_registry
 
 # ─── Service map ─────────────────────────────────────────────────────────────
 
@@ -468,6 +470,39 @@ class AwsOptionsCompleter(Completer):
         ]
 
 
+# ─── Variables ───────────────────────────────────────────────────────────────
+
+class AwsRegionVar(Var):
+    """Sets AWS_REGION and AWS_DEFAULT_REGION together from one logical name."""
+
+    @property
+    def name(self) -> str:
+        return "aws_region"
+
+    @property
+    def description(self) -> str:
+        return "AWS region — sets AWS_REGION + AWS_DEFAULT_REGION"
+
+    @property
+    def env_keys(self) -> list[str]:
+        return ["AWS_REGION", "AWS_DEFAULT_REGION"]
+
+    def get(self) -> str | None:
+        return os.environ.get("AWS_REGION")
+
+    def set(self, value: str) -> None:
+        os.environ["AWS_REGION"] = value
+        os.environ["AWS_DEFAULT_REGION"] = value
+
+    def unset(self) -> None:
+        os.environ.pop("AWS_REGION", None)
+        os.environ.pop("AWS_DEFAULT_REGION", None)
+
+    @property
+    def value_completer(self) -> Completer:
+        return AwsRegionCompleter()
+
+
 def register(registry: CommandRegistry) -> None:
     # Register AwsArgCompleter at enough positions to handle several global
     # flag+value pairs before the service name (each pair uses 2 slots).
@@ -477,3 +512,11 @@ def register(registry: CommandRegistry) -> None:
         None: AwsOptionsCompleter(),
         **{i: arg_completer for i in range(8)},
     })
+
+    var_registry.register(AwsRegionVar())
+    var_registry.register(EnvVar(
+        name="aws_profile",
+        env_var="AWS_PROFILE",
+        completer=AwsProfileCompleter(),
+        description="AWS named profile",
+    ))
