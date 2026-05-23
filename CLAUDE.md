@@ -9,24 +9,46 @@ A lightweight but powerful terminal shell environment implemented in Python.
 │                    cshell2                           │
 ├─────────────────────────────────────────────────────┤
 │  Shell Loop (shell.py)                              │
-│  ├── Input handling (prompt_toolkit or readline)    │
-│  ├── Line parsing                                  │
+│  ├── Input handling (lineedit.py — DIY raw editor)  │
+│  ├── Line parsing / pipeline execution              │
 │  ├── Command dispatch                              │
-│  └── History management                            │
+│  ├── PTY process multiplexing (process.py)         │
+│  └── Context switch TUI (tui.py)                   │
 ├─────────────────────────────────────────────────────┤
 │  Command Registry (commands.py)                     │
 │  ├── Built-in commands                             │
 │  ├── Python function commands (from config)        │
+│  ├── External completer registration               │
 │  └── System command passthrough                    │
 ├─────────────────────────────────────────────────────┤
 │  Completion Engine (completion.py)                  │
 │  ├── Command name completion                       │
 │  ├── Argument completion (per-command completers)  │
+│  ├── Options completion (flags, multi-select TUI)  │
 │  └── Filesystem completion (fallback)              │
+├─────────────────────────────────────────────────────┤
+│  TUI Widgets (tui.py)                               │
+│  ├── InlinePicker — single-select inline list      │
+│  ├── InlineMultiPicker — multi-select with Space   │
+│  └── InlineArgPrompt — flag-argument text input    │
+├─────────────────────────────────────────────────────┤
+│  Line Editor (lineedit.py)                          │
+│  ├── Raw-mode key dispatch                         │
+│  ├── History (up/down, Ctrl+R search)              │
+│  ├── TAB completion via InlinePicker               │
+│  └── Ctrl+] context switch (inline picker)         │
 ├─────────────────────────────────────────────────────┤
 │  Context Manager (context.py)                       │
 │  ├── Context stack                                 │
-│  └── Context-aware variable resolution             │
+│  ├── Context-aware variable resolution             │
+│  ├── CWD save/restore on switch                    │
+│  └── env var apply/unapply on switch               │
+├─────────────────────────────────────────────────────┤
+│  Prompt (prompt.py)                                 │
+│  └── Default + user-overrideable prompt function   │
+├─────────────────────────────────────────────────────┤
+│  Recipes (recipes/)                                 │
+│  └── Completion recipes for external commands      │
 ├─────────────────────────────────────────────────────┤
 │  User Config (~/.cshell2/config.py)                 │
 │  ├── Custom command definitions                    │
@@ -40,25 +62,38 @@ A lightweight but powerful terminal shell environment implemented in Python.
 
 Entry point. Reads input, parses lines, dispatches commands.
 
-- Uses `prompt_toolkit` for terminal input (rich completion UI, history search, key bindings)
-- Falls back to `readline` if prompt_toolkit unavailable
-- Supports `Ctrl+R` history search
+- Uses a DIY raw-mode line editor (`lineedit.py`) — no external dependencies
+- Supports `Ctrl+R` history search (via inline picker)
+- Supports `Ctrl+]` to open an inline context-switch picker
 - Maintains command history in `~/.cshell2/history`
+- Runs external commands in PTY-backed subprocess slots (`process.py`)
+- Executes pipelines (`|`), sequences (`;`, `&&`, `||`), and redirections (`>`, `>>`, `<`, `2>`, `2>&1`)
+
+**Built-in commands:** `cd`, `exit`, `reload`, `var`, `unset`, `help`, `context`
+
+**Ctrl+] context switching:** The user can press `Ctrl+]` at the shell prompt (or during a running process) to open a TUI picker listing all contexts. Selecting a context with a live process resumes it immediately. Selecting `+ new context` prompts for a name and creates a new context inheriting the current context's variables. The shell tracks processes across context switches via `ProcessSlot` (see `process.py`).
 
 ### commands.py — Command Registry
 
 ```python
 registry = CommandRegistry()
 
-@registry.command(name="hello", completers=[None, UsernameCompleter()])
+@registry.command(name="hello", completers={0: UsernameCompleter()})
 def hello(name: str):
     print(f"Hello, {name}!")
 ```
 
+Methods:
+- `command(name, completers)` — decorator to register a Python function
+- `register(func, name, completers)` — imperative alternative
+- `register_external_completers(command_name, completers)` — attach completers to a system command (e.g. `git`, `docker`) without wrapping it as a Python command
+- `mark_builtins()` — snapshot current commands as builtins (not removed on `reload`)
+- `clear_user_commands()` — remove non-builtin commands and all external completers
+
 Dispatch order:
-1. Built-in commands (cd, exit, context)
+1. Built-in commands (cd, exit, reload, var, unset, help, context)
 2. Registered Python function commands
-3. System commands (via subprocess)
+3. System commands (via PTY subprocess)
 
 ### completion.py — Completion Engine
 
@@ -94,36 +129,68 @@ class Completer(ABC):
 
 @dataclass
 class Completion:
-    value: str              # the completion text
-    display: str = ""       # optional display label (shown in menu)
+    value: str              # the completion text (inserted into buffer)
+    display: str = ""       # optional display label (shown in menu; defaults to value)
     description: str = ""   # optional description (shown beside completion)
+    multi_select: bool = False   # True → opens InlineMultiPicker instead of InlinePicker
+    combinable: bool = False     # True for single-char flags that can be merged (-a -l → -al)
+    arg_hint: str = ""           # non-empty when flag requires a following argument (e.g. "N")
+    is_arg_hint: bool = False    # True when this completion IS the hint for a preceding flag's value
 ```
 
 #### Built-in Completers
 
 ```python
-class FileCompleter(Completer): ...       # filesystem paths
+class FileCompleter(Completer): ...       # filesystem paths (files + dirs)
+class DirCompleter(Completer): ...        # directory paths only
 class CommandNameCompleter(Completer): ... # registered + system commands
 class ChoiceCompleter(Completer):          # static list of choices
     def __init__(self, choices: list[str]): ...
+class CallbackCompleter(Completer):        # dynamic list from a function
+    def __init__(self, func: Callable[[], list[str]]): ...
+class OptionsCompleter(Completer):         # flags with optional arg-hints and multi-select TUI
+    def __init__(self, options: dict[str, str],
+                 args: dict[str, str | tuple[str, Completer]] | None = None): ...
+class ConditionalCompleter(Completer):     # pick sub-completer based on preceding args
+    def __init__(self, mapping: dict[tuple, Completer]): ...
 ```
 
 #### Per-Argument Completer Binding
 
-Commands declare a completer for each argument position. Completers at later positions can inspect preceding args via `ctx.args`:
+Commands declare completers by argument position. The special key `None` registers an **options completer** that activates whenever the user types a `-`-prefixed token at any position:
 
 ```python
 @registry.command(
     name="ssh_instance",
     completers={
+        None: OptionsCompleter({"-v": "verbose", "-p": "port", ...},
+                               args={"-p": "PORT"}),
         0: ChoiceCompleter(["account-A", "account-B"]),
         1: RegionCompleter(),
         2: EC2InstanceCompleter(),  # uses ctx.args[0] and ctx.args[1]
     }
 )
-def ssh_instance(account: str, region: str, instance_id: str):
-    ...
+def ssh_instance(account: str, region: str, instance_id: str): ...
 ```
+
+External completers for system commands follow the same dict format:
+
+```python
+registry.register_external_completers("git", {
+    None: OptionsCompleter({"-v": "verbose", "--no-pager": "no pager"}),
+    0: ChoiceCompleter(["commit", "push", "pull", ...]),
+})
+```
+
+#### OptionsCompleter — Multi-Select Flag Picker
+
+When all completions have `multi_select=True` (returned by `OptionsCompleter`), pressing TAB opens `InlineMultiPicker` instead of `InlinePicker`. The user can:
+- Navigate with arrows / `Ctrl+P` / `Ctrl+N`
+- **Space** to toggle a flag's checked state
+- **Enter** to confirm (checked items, or the highlighted item if nothing is checked)
+- Jump to a flag by typing its first letter
+
+Short boolean flags are automatically merged: selecting `-a` and `-l` inserts `-al`. Flags with `arg_hint` are inserted individually with a space, then followed by either a picker (if a value completer is registered via the `args` dict) or an inline hint prompting the user to type the value.
 
 #### Example: Context-Aware EC2 Completer
 
@@ -164,46 +231,53 @@ class ConditionalCompleter(Completer):
         completer = self.mapping.get(key)
         if completer:
             return completer.complete(ctx)
+        # Fall back to longest matching prefix
+        for length in range(len(ctx.args), 0, -1):
+            partial_key = tuple(ctx.args[:length])
+            if partial_key in self.mapping:
+                return self.mapping[partial_key].complete(ctx)
         return []
 ```
 
 ### context.py — Context Switch
 
-Contexts represent an environment (e.g., AWS account + region, k8s cluster, project directory). Commands and completers see the active context.
-
-The context manager holds a named collection of contexts with a "current" pointer. You can switch to any context by name without destroying others. Push/pop is available as a convenience for temporary context switches.
+Contexts represent an environment (e.g., AWS account + region, k8s cluster). Each context stores:
+- `variables: dict[str, str]` — exported to `os.environ` on activation
+- `cwd: str` — saved and restored on switch
+- `process_slot: ProcessSlot | None` — optional running subprocess for multiplexing
+- `state: ContextState` — `IDLE`, `RUNNING`, or `EXITED` (derived from `process_slot`)
 
 ```python
-class Context:
-    name: str
-    variables: dict[str, str]   # e.g. {"account": "123", "region": "us-west-2"}
-
 class ContextManager:
     contexts: dict[str, Context]   # all known contexts by name
     current_name: str | None       # which context is active
-    stack: list[str]               # history stack for push/pop (stores names)
+    stack: list[str]               # push/pop stack (stores names)
 
-    def create(self, name: str, **variables) -> Context: ...
+    def create(self, name: str, variables: dict | None = None) -> Context: ...
     def switch(self, name: str): ...           # set current to any existing context
     def push(self, name: str): ...             # save current to stack, switch to name
-    def pop(self) -> Context: ...              # switch back to previous on stack
+    def pop(self) -> Context | None: ...       # switch back to previous on stack
     def current(self) -> Context | None: ...
-    def list_contexts(self) -> list[str]: ...
+    def list_contexts(self) -> list[str]: ...  # in display order (current first)
     def remove(self, name: str): ...
-    def set_variable(self, key, value): ...    # set on current context
+    def set_variable(self, key, value): ...    # set on current context + os.environ
+    def unset_variable(self, key): ...         # remove from current context + os.environ
     def get_variable(self, key) -> str | None: ...
 ```
 
-Switching context:
+Context switching (shell commands):
 ```
-cshell2> context create prod --account 123456 --region us-east-1
-cshell2> context create staging --account 789012 --region us-west-2
-cshell2> context switch prod
-[prod] cshell2> context switch staging       # switch directly, prod is still available
-[staging] cshell2> context switch prod       # jump back without pop
-[prod] cshell2> context push staging         # stack-style: remember prod, switch to staging
-[staging] cshell2> context pop               # back to prod
-[prod] cshell2> context list                 # show all: prod*, staging
+cshell2> context push prod
+Pushed context 'prod'
+[prod] cshell2> var ACCOUNT=123456 REGION=us-east-1
+[prod] cshell2> context push staging
+Pushed context 'staging'
+[staging] cshell2> var ACCOUNT=789012 REGION=us-west-2
+[staging] cshell2> context pop
+Popped 'staging', now in 'prod'
+[prod] cshell2> context switch staging   # switch directly, prod still on stack
+[staging] cshell2> context list          # show all: staging*, prod
+[staging] cshell2> context kill prod     # send SIGTERM to running process in 'prod'
 ```
 
 Completers can use `ctx.shell_context` to adapt:
@@ -215,14 +289,71 @@ class EC2InstanceCompleter(Completer):
         ...
 ```
 
+### lineedit.py — Line Editor
+
+DIY raw-mode line editor. No prompt_toolkit or readline.
+
+- `LineEditor.prompt()` — read one line; returns the line string, `SWITCH_SENTINEL` on `Ctrl+]`, raises `EOFError` (Ctrl+D on empty) or `KeyboardInterrupt` (Ctrl+C)
+- Key bindings: `Ctrl+A/E`, `Ctrl+B/F`, `Alt+B/F`, `Ctrl+W`, `Ctrl+K`, `Ctrl+U`, `Ctrl+L`, arrow keys, `Ctrl+P/N`, `Ctrl+R`
+- TAB opens an `InlinePicker` (or `InlineMultiPicker` for flags); typing narrows the list; TAB inside the picker extends the common prefix; Backspace can close the picker
+- History search (`Ctrl+R`) opens a filterable picker over all history entries
+- Multi-line wrapping is tracked so `_redraw()` correctly repositions the cursor after wraps
+- VSCode integrated terminal detection: skips reflow-based repositioning, falls back to explicit clear+redraw on resize (`TERM_PROGRAM=vscode`)
+
+### tui.py — Inline TUI Widgets
+
+No alternate screen; all rendering anchored with DECSC/DECRC (`ESC 7` / `ESC 8`). Cancels on SIGWINCH.
+
+- **`InlinePicker`** — single-select list rendered inline below the current line. Supports narrowing by typing, TAB-extend common prefix, scrollbar, optional `meta_fn` for right-aligned labels.
+- **`InlineMultiPicker`** — multi-select list with Space to toggle checkboxes. Jump-to by typing a letter. Returns checked items (or highlighted item if nothing checked).
+- **`InlineArgPrompt`** — single-line text prompt for a flag's argument. Shows an optional description line above.
+
+### process.py — PTY Process Slots
+
+`ProcessSlot` manages a single PTY-backed subprocess with output buffering, enabling context multiplexing.
+
+- `start(argv, env, cwd)` — fork + exec in a new PTY; spawns a reader thread
+- `activate() / deactivate()` — controls whether output is written to stdout
+- `replay_buffer()` — flush buffered output when switching back to a context
+- `write_stdin(data)` — forward raw bytes to the subprocess's PTY
+- `resize(rows, cols)` — update PTY window size (sends SIGWINCH to child process group)
+- `suspend_terminal_modes() / restore_terminal_modes()` — generate escape sequences to undo/redo DEC private modes (alt screen, mouse, app cursor keys) tracked across switches
+- `kill()` — send SIGTERM
+
+### prompt.py — Prompt Function
+
+```python
+def set_prompt(func: Callable[[ContextManager], str] | None) -> None: ...
+def get_prompt_func() -> Callable[[ContextManager], str]: ...
+```
+
+Default prompt shows: `[context] path/cwd HH:MM:SS [bg:N]>` with ANSI colors. The `[context]` prefix is omitted when the context name is `"default"`. `[bg:N]` appears when N other contexts have live processes.
+
+### recipes/ — Completion Recipes for External Commands
+
+Opt-in completion recipes for system commands. Enable in `~/.cshell2/config.py`:
+
+```python
+from cshell2.recipes import enable
+enable("make", "git", "docker", "ssh", "kill", "tail", "ls", "grep", "find", "du", "df", "aws")
+```
+
+Available recipes: `aws`, `df`, `docker`, `du`, `find`, `git`, `grep`, `kill`, `ls`, `make`, `ssh`, `tail`.
+
+Each recipe calls `registry.register_external_completers(name, {...})` with an `OptionsCompleter` under `None` and positional completers as needed.
+
 ### User Config (~/.cshell2/config.py)
 
-Users define their custom commands and completers here. Loaded at shell startup.
+Users define custom commands and completers here. Loaded at shell startup; reloadable with the `reload` command.
 
 ```python
 # ~/.cshell2/config.py
 from cshell2.commands import registry
 from cshell2.completion import Completer, Completion, ChoiceCompleter
+from cshell2.recipes import enable
+
+# Enable recipes for system commands
+enable("make", "git")
 
 class MyInstanceCompleter(Completer):
     def complete(self, ctx):
@@ -240,6 +371,7 @@ class MyInstanceCompleter(Completer):
 )
 def connect(account, region, instance_id):
     """SSH into an EC2 instance."""
+    import os
     os.system(f"ssh {instance_id}")
 ```
 
@@ -252,14 +384,33 @@ cshell2/
 ├── pyproject.toml
 ├── src/
 │   └── cshell2/
-│       ├── __init__.py
-│       ├── __main__.py       # entry point
-│       ├── shell.py          # main loop, input handling
-│       ├── commands.py       # command registry, @command decorator
-│       ├── completion.py     # Completer ABC, CompletionContext, built-in completers
-│       ├── context.py        # Context, ContextManager
-│       ├── history.py        # history storage and search
-│       └── parsing.py        # line tokenization, quote handling
+│       ├── __init__.py         # exports set_prompt
+│       ├── __main__.py         # entry point
+│       ├── shell.py            # main loop, command dispatch, pipeline execution
+│       ├── commands.py         # command registry, @command decorator
+│       ├── completion.py       # Completer ABC, CompletionContext, built-in completers
+│       ├── context.py          # Context, ContextManager, ContextState
+│       ├── history.py          # history storage and search
+│       ├── lineedit.py         # DIY raw-mode line editor, History, TAB completion glue
+│       ├── parsing.py          # line tokenization, quote handling, var expansion
+│       ├── pipeline.py         # quote-aware operator parser: parse_line(), expand_globs()
+│       ├── process.py          # PTY subprocess slots, output buffering, terminal-mode tracking
+│       ├── prompt.py           # set_prompt / get_prompt_func / default_prompt
+│       ├── tui.py              # InlinePicker, InlineMultiPicker, InlineArgPrompt
+│       └── recipes/
+│           ├── __init__.py     # enable(*names) helper
+│           ├── aws.py
+│           ├── df.py
+│           ├── docker.py
+│           ├── du.py
+│           ├── find.py
+│           ├── git.py
+│           ├── grep.py
+│           ├── kill.py
+│           ├── ls.py
+│           ├── make.py
+│           ├── ssh.py
+│           └── tail.py
 └── tests/
     ├── test_commands.py
     ├── test_completion.py
@@ -269,7 +420,7 @@ cshell2/
 
 ## Shell Operator Support
 
-### Planned features (priority order)
+### Implemented
 
 **Tier 1 — Core (share a single pipeline parser):** ✅ all done
 - Pipe `|` — `ls | grep py`
@@ -297,37 +448,31 @@ raw line
      └─ split on && ||  → conditional chain
          └─ split on |  → list of pipeline stages
              └─ each stage: extract redirections (>, >>, <, 2>, 2>&1)
-                 └─ remaining text: expand $(...), expand $VAR, tokenize, glob
+                 └─ remaining text: expand $VAR, tokenize, glob
 ```
 
 Two execution modes in `shell.py`:
 
 | Situation | Execution path |
 |-----------|---------------|
-| Standalone command (no pipe) | PTY via `ProcessSlot` (current) |
+| Standalone command (no pipe, no redirect) | PTY via `ProcessSlot` |
 | Command in a pipeline | `subprocess.Popen` with plain fds |
-| Last stage of pipe, no output redirect | PTY (so interactive pagers work) |
+| Command with redirect (no pipe) | `subprocess.run` with file fds |
 
-Python registered commands (`@registry.command`) in a pipeline have their
-`sys.stdout` temporarily replaced with a `io.BytesIO` to capture output.
-
-### File layout addition
-
-```
-src/cshell2/
-    pipeline.py   # quote-aware operator parser: split_pipeline(), parse_redirects()
-```
+Python registered commands (`@registry.command`) in a pipeline or with redirects have their `sys.stdout`/`sys.stdin`/`sys.stderr` temporarily replaced.
 
 ## Key Design Decisions
 
-1. **prompt_toolkit over raw readline** — gives us multi-line edit, colored completions with descriptions, async completion, and better cross-platform support.
+1. **DIY raw-mode line editor** — `lineedit.py` drives the terminal directly with `termios`/`tty`/`select`. This avoids external dependencies, keeps the codebase self-contained, and gives full control over the completion UI and resize handling.
 
 2. **Completer receives full context** — the `CompletionContext` dataclass carries all parsed state so completers can make decisions based on command name, preceding args, and shell context without global state.
 
-3. **Dict-based positional completers** — using `{arg_index: Completer}` lets each position have independent logic. A completer at position N can inspect `ctx.args[:N]` to see what was already chosen.
+3. **Dict-based positional completers with `None` key for options** — `{arg_index: Completer}` for positional args; `{None: OptionsCompleter(...)}` for flags. A completer at position N can inspect `ctx.args[:N]` to see what was already chosen.
 
-4. **Context as a stack** — push/pop semantics let you temporarily enter a context and return, useful for scripting and nested operations.
+4. **Context as a stack with env+cwd isolation** — push/pop semantics let you temporarily enter a context and return. On every switch, context variables are unapplied from `os.environ` then the new context's variables are applied; CWD is saved and restored.
 
-5. **Config as Python** — `config.py` is just Python that imports cshell2 APIs. No DSL to learn; full language power for defining completers with caching, API calls, etc.
+5. **PTY process multiplexing** — each context can hold a `ProcessSlot` with a live subprocess. `Ctrl+]` switches between contexts without killing the running process. The slot buffers output while inactive and replays it on return.
 
-6. **System command fallback** — anything not registered as a Python command is passed to the system shell, so cshell2 is a drop-in replacement for daily use.
+6. **Config as Python** — `config.py` is just Python that imports cshell2 APIs. No DSL to learn; full language power for defining completers with caching, API calls, etc. The `reload` command reloads the config without restarting the shell.
+
+7. **System command fallback** — anything not registered as a Python command is passed to the system shell via PTY, so cshell2 is a drop-in replacement for daily use.

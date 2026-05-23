@@ -31,6 +31,10 @@ class Completion:
     value: str              # the text inserted on selection
     display: str = ""       # label shown in completion menu (defaults to value)
     description: str = ""   # metadata shown beside the completion
+    multi_select: bool = False   # True → opens InlineMultiPicker instead of InlinePicker
+    combinable: bool = False     # True for single-char flags that can be merged (-a -l → -al)
+    arg_hint: str = ""           # non-empty when flag requires a following argument (e.g. "N")
+    is_arg_hint: bool = False    # True when this IS the hint for a preceding flag's value
 ```
 
 ### Completer Protocol
@@ -59,6 +63,10 @@ Completes filesystem paths relative to the current directory. Handles:
 - Directory suffix (`/` appended to directory completions)
 - Case-insensitive matching
 
+### DirCompleter
+
+Like `FileCompleter` but only returns directories. Used for flags that take a directory path (e.g. `du -C DIR`).
+
 ### CommandNameCompleter
 
 Completes command names from two sources:
@@ -83,6 +91,39 @@ Completes from a function's return value. The function is called on each complet
 CallbackCompleter(lambda: get_current_branches())
 ```
 
+### OptionsCompleter
+
+Completes command-line flags. Registered under the `None` key in a completers dict so it activates at any argument position when the user types a `-`-prefixed token.
+
+```python
+OptionsCompleter(
+    options={
+        "-l": "long format",
+        "-a": "show hidden",
+        "--color": "colorize output",
+        "-d": "max depth",
+    },
+    args={
+        "-d": "N",               # hint only — user types the value
+        "--color": ("WHEN", ChoiceCompleter(["always", "auto", "never"])),
+        # tuple form: (hint, value_completer) → opens a picker for the value
+    },
+)
+```
+
+When all completions returned are `multi_select=True` (which `OptionsCompleter` always sets), the line editor opens `InlineMultiPicker` instead of `InlinePicker`. The user:
+- Navigates with arrows / `Ctrl+P/N`
+- **Space** to toggle a flag's checked state
+- **Enter** to confirm (checked items, or highlighted item if nothing checked)
+- Types a letter to jump to the next flag starting with that letter
+
+Boolean short flags are automatically merged: selecting `-a` and `-l` inserts `-al`. Flags with `arg_hint` are inserted individually followed by a space, then either a value picker or an inline hint line.
+
+`OptionsCompleter` also handles:
+- **Flag deduplication** — flags already present in `ctx.args` are excluded
+- **Short-flag cluster parsing** — `-hs` in `ctx.args` is treated as both `-h` and `-s` already used
+- **Preceding-flag hint** — when the last completed arg is a value-taking flag and the user presses TAB without typing `-`, the engine shows a hint instead of opening a picker
+
 ### ConditionalCompleter
 
 Selects a sub-completer based on the preceding arguments. Useful when argument N's valid values depend on what was chosen for arguments 0..N-1:
@@ -94,40 +135,52 @@ ConditionalCompleter({
 })
 ```
 
-Performs longest-prefix matching on `ctx.args` against the mapping keys.
+Performs longest-prefix matching on `ctx.args` against the mapping keys: tries the full `args` tuple first, then progressively shorter prefixes.
 
-## prompt_toolkit Integration
+## How TAB Completion Works
 
-The `ShellCompleter` class in `shell.py` bridges cshell2's completion engine to prompt_toolkit:
+The line editor (`lineedit.py`) calls `_get_completions(line_before_cursor)` on every TAB press. The shell implements this as:
 
 ```
-prompt_toolkit calls get_completions(document, event)
-  → Extract line text from document
-  → Parse with split_for_completion(line) → (tokens, prefix)
-  → Build CompletionContext
-  → Route to appropriate completer
-  → Convert Completion → PTKCompletion (with start_position, display, display_meta)
+_get_completions(line_before_cursor)
+  → _split_on_operators() → isolate current pipeline stage
+  → split_for_completion(stage) → (tokens, prefix)
+  → No tokens?
+      → CommandNameCompleter
+  → Has tokens?
+      → Look up command in registry (or external completers)
+      → completers[None] present AND prefix starts with "-"?
+          → Check if last arg is a value-taking flag (preceding-flag hint)
+              → Yes, has value_completer → return value_completer.complete(ctx)
+              → Yes, hint only → return [is_arg_hint=True Completion]
+          → options_completer.complete(ctx) if should_activate()
+      → No options matches yet, completers[arg_index] present?
+          → positional_completer.complete(ctx) if should_activate()
+      → Still no matches and no completer registered? → FileCompleter fallback
 ```
 
-### Routing Logic
+Once completions are returned to the line editor:
 
-1. **No tokens parsed** → completing a command name → `CommandNameCompleter`
-2. **Tokens present** → completing an argument:
-   - Look up command in registry
-   - Check `cmd.completers[arg_index]`
-   - If completer exists and `should_activate()` → use it
-   - If no completions and no completer registered → fall back to `FileCompleter`
+| Situation | Behaviour |
+|-----------|-----------|
+| Zero completions | Do nothing |
+| Single `is_arg_hint` completion | Show inline hint below buffer; cleared on next keypress |
+| Single `multi_select` + `arg_hint` completion | Auto-apply the flag (insert `flag `), then loop again to handle the value |
+| Single non-hint completion | Apply immediately; if it has `arg_hint`, then prompt for the value |
+| All `multi_select` | Open `InlineMultiPicker` |
+| Mixed | Open `InlinePicker` (narrows as user types more characters) |
 
-The fallback to `FileCompleter` only triggers when no completer is registered for that position. If a completer is registered but returns empty results, no fallback occurs — this is intentional so commands can explicitly declare "no completions for this argument" by registering a completer that returns `[]`.
+The **fallback to `FileCompleter`** only triggers when **no completer** is registered for that position. If a completer is registered but returns empty results, no fallback occurs — commands can explicitly declare "no completions here" by registering a completer that returns `[]`.
 
 ## Per-Argument Binding
 
-Commands declare completers as a dict mapping argument index to completer:
+Commands declare completers as a dict mapping argument index (or `None` for options) to completer:
 
 ```python
 @registry.command(
     name="deploy",
     completers={
+        None: OptionsCompleter({"-v": "verbose", "--dry-run": "dry run"}),
         0: ChoiceCompleter(["prod", "staging"]),
         1: RegionCompleter(),
         2: ServiceCompleter(),  # can inspect ctx.args[0], ctx.args[1]
@@ -139,8 +192,21 @@ def deploy(env, region, service):
 
 This design means:
 - Each position is independent — no need to declare all positions
-- Gaps are allowed (position 0 and 2 but not 1 → position 1 falls back to file completion)
+- Gaps are allowed (positions 0 and 2 but not 1 → position 1 falls back to file completion)
 - Later completers see earlier args via `ctx.args`
+- `None` key activates at any position when the user types a `-` prefix
+
+For system commands that should not be wrapped as Python functions:
+
+```python
+registry.register_external_completers("rsync", {
+    None: OptionsCompleter({"-a": "archive", "-v": "verbose", "-n": "dry run",
+                            "--exclude": "exclude pattern"},
+                           args={"--exclude": "PATTERN"}),
+    0: FileCompleter(),
+    1: FileCompleter(),
+})
+```
 
 ## Writing Custom Completers
 
@@ -149,7 +215,6 @@ This design means:
 ```python
 class MyCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
-        # Filter by prefix
         return [
             Completion(value=item, description=desc)
             for item, desc in self._get_items()
@@ -180,17 +245,13 @@ For completers that call expensive APIs, cache results keyed on the relevant arg
 ```python
 class CachedCompleter(Completer):
     def __init__(self):
-        self._cache = {}
+        self._cache: dict[tuple, list[Completion]] = {}
 
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         key = tuple(ctx.args[:2])
         if key not in self._cache:
             self._cache[key] = self._fetch(ctx.args[0], ctx.args[1])
-        return [
-            Completion(value=v)
-            for v in self._cache[key]
-            if v.startswith(ctx.prefix)
-        ]
+        return [c for c in self._cache[key] if c.value.startswith(ctx.prefix)]
 ```
 
 ## Parsing for Completion
@@ -198,8 +259,10 @@ class CachedCompleter(Completer):
 `split_for_completion(line)` splits the input line into tokens and a trailing prefix:
 
 - `"git commit "` → `(["git", "commit"], "")`
-- `"git commit -m "hel"` → `(["git", "commit", "-m"], "hel")`
+- `"git commit -m hel"` → `(["git", "commit", "-m"], "hel")`
 - `"git "` → `(["git"], "")`
 - `"gi"` → `([], "gi")`
 
 The distinction between completed tokens (in `args`) and the in-progress token (in `prefix`) is critical for routing completions correctly.
+
+Completion is always scoped to the **current pipeline stage**: for `ls | grep -`, the completion context uses `grep` as the command, not `ls`.
