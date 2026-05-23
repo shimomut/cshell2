@@ -459,9 +459,44 @@ from cshell2.recipes import enable
 enable("make", "git", "docker", "ssh", "kill", "tail", "ls", "grep", "find", "du", "df", "aws")
 ```
 
-Available recipes: `aws`, `df`, `docker`, `du`, `find`, `git`, `grep`, `kill`, `ls`, `make`, `ssh`, `tail`.
+Available built-in recipes: `aws`, `df`, `docker`, `du`, `find`, `git`, `grep`, `kill`, `ls`, `make`, `ssh`, `tail`.
 
 Each recipe calls `registry.register_external_completers(name, {...})` with an `OptionsCompleter` under `None` and positional completers as needed.
+
+#### User-Defined Recipes
+
+`enable()` checks `~/.cshell2/recipes/<name>.py` automatically when no built-in recipe matches. The call site is unchanged — the lookup order is:
+
+1. Built-in package (`cshell2.recipes.<name>`)
+2. User file (`~/.cshell2/recipes/<name>.py`)
+3. `ImportError` with a clear message if neither is found
+
+A user recipe file must define a `register()` function. It has the same shape as the built-in recipes:
+
+```python
+# ~/.cshell2/recipes/my_tool.py
+from cshell2.commands import registry
+from cshell2.completion import OptionsCompleter, ChoiceCompleter, CallbackCompleter
+
+def register():
+    registry.register_external_completers("my-tool", {
+        None: OptionsCompleter(
+            {"-v": "verbose", "--dry-run": "don't apply changes"},
+        ),
+        0: ChoiceCompleter(["deploy", "rollback", "status"]),
+        1: CallbackCompleter(lambda: _list_targets()),
+    })
+
+def _list_targets():
+    return ["web", "worker", "scheduler"]
+```
+
+```python
+# ~/.cshell2/config.py
+from cshell2.recipes import enable
+enable("git")          # built-in
+enable("my_tool")      # loads ~/.cshell2/recipes/my_tool.py
+```
 
 ### User Config (~/.cshell2/config.py)
 
@@ -538,6 +573,12 @@ cshell2/
     ├── test_completion.py
     ├── test_context.py
     └── test_parsing.py
+
+~/.cshell2/
+├── config.py           # user configuration (commands, completers, recipes)
+├── history             # persistent command history
+└── recipes/            # user-defined recipes (loaded by enable("<name>"))
+    └── <name>.py       # must define register()
 ```
 
 ## Shell Operator Support

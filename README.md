@@ -176,6 +176,37 @@ enable("git", "docker", "make", "ssh", "kill", "ls", "grep", "find", "du", "df",
 
 Each recipe registers flag completion (via `OptionsCompleter`) and positional completions (subcommands, files, containers, branches, etc.) for the named command.
 
+#### User-Defined Recipes
+
+You can write your own recipes and place them in `~/.cshell2/recipes/`. `enable()` checks there automatically after the built-ins, so the call site in `config.py` is identical:
+
+```python
+from cshell2.recipes import enable
+enable("git")          # built-in
+enable("my_tool")      # loads ~/.cshell2/recipes/my_tool.py
+```
+
+A recipe file must define a `register()` function:
+
+```python
+# ~/.cshell2/recipes/my_tool.py
+from cshell2.commands import registry
+from cshell2.completion import OptionsCompleter, ChoiceCompleter, CallbackCompleter
+
+def register():
+    registry.register_external_completers("my-tool", {
+        None: OptionsCompleter(
+            {"-v": "verbose", "--dry-run": "don't apply changes"},
+        ),
+        0: ChoiceCompleter(["deploy", "rollback", "status"]),
+        1: CallbackCompleter(lambda: _list_targets()),
+    })
+
+def _list_targets():
+    # Return dynamic values (cached, fetched from an API, etc.)
+    return ["web", "worker", "scheduler"]
+```
+
 ### Writing a Custom Completer
 
 Subclass `Completer` and implement `complete()`. The `CompletionContext` gives you:
@@ -222,3 +253,4 @@ registry.register_external_completers("mytools", {
 |------|---------|
 | `~/.cshell2/config.py` | User configuration |
 | `~/.cshell2/history` | Command history |
+| `~/.cshell2/recipes/<name>.py` | User-defined completion recipes (loaded by `enable("<name>")`) |
