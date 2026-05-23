@@ -266,3 +266,5 @@ class CachedCompleter(Completer):
 The distinction between completed tokens (in `args`) and the in-progress token (in `prefix`) is critical for routing completions correctly.
 
 Completion is always scoped to the **current pipeline stage**: for `ls | grep -`, the completion context uses `grep` as the command, not `ls`.
+
+For a practical guide to adding completions for external commands, see [`doc/recipes.md`](recipes.md).

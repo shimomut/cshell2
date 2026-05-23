@@ -211,6 +211,7 @@ cshell2/
 │   ├── architecture.md
 │   ├── completion.md
 │   ├── context.md
+│   ├── recipes.md
 │   └── terminal-resize.md
 ├── src/
 │   └── cshell2/
