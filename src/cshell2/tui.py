@@ -19,9 +19,18 @@ def _csi(code: str) -> str:
 
 
 def _wcswidth(s: str) -> int:
-    """Terminal display width of s (wide/fullwidth chars count as 2 columns)."""
+    """Terminal display width of s (wide/fullwidth chars count as 2 columns).
+
+    Combining/format characters (Unicode category Mn, Me, Cf) are zero-width
+    and checked BEFORE east_asian_width so that NFD-decomposed characters like
+    voiced katakana (e.g. ガ → カ + U+3099 combining dakuten) are not
+    double-counted.  U+3099 has east_asian_width='W' in Python's unicodedata,
+    but it is a combining mark and must be treated as zero-width.
+    """
     w = 0
     for ch in s:
+        if unicodedata.category(ch) in ("Mn", "Me", "Cf"):
+            continue  # zero-width combining / format char
         if unicodedata.east_asian_width(ch) in ("W", "F"):
             w += 2
         else:
@@ -33,7 +42,12 @@ def _wcs_clip(s: str, max_cols: int) -> str:
     """Return the longest prefix of s that fits within max_cols terminal columns."""
     cols = 0
     for i, ch in enumerate(s):
-        w = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if unicodedata.category(ch) in ("Mn", "Me", "Cf"):
+            w = 0
+        elif unicodedata.east_asian_width(ch) in ("W", "F"):
+            w = 2
+        else:
+            w = 1
         if cols + w > max_cols:
             return s[:i]
         cols += w
@@ -205,7 +219,8 @@ class InlinePicker(Generic[T]):
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
-    _BG = "\033[48;5;236m"  # dark gray background for all rows
+    _BG = "\033[48;5;238m"      # non-selected row background (dark gray, visible on all themes)
+    _SEL = "\033[48;5;24m\033[97m"   # selected: dark-blue bg + bright-white fg
 
     def _scrollbar_char(self, row_index: int) -> str:
         n = len(self._items)
@@ -246,7 +261,7 @@ class InlinePicker(Generic[T]):
         col_move = f"\033[{self._col}C" if self._col > 0 else ""
         if selected:
             inner = label + (f"  {meta}" if meta else "")
-            row = f"\r{col_move}{self._BG}\033[7m{inner}{pad}\033[0m"
+            row = f"\r{col_move}{self._SEL}{inner}{pad}\033[0m"
         else:
             inner = label + (f"  \033[2m{meta}\033[22m" if meta else "")
             row = f"\r{col_move}{self._BG}{inner}{pad}\033[0m"
@@ -623,7 +638,8 @@ class InlineMultiPicker(Generic[T]):
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
-    _BG = "\033[48;5;236m"  # dark gray background — same as InlinePicker
+    _BG = "\033[48;5;238m"          # non-selected background (dark gray, visible on all themes)
+    _SEL = "\033[48;5;24m\033[97m"  # selected: dark-blue bg + bright-white fg
     _CHECK_ON = "[x] "
     _CHECK_OFF = "[ ] "
 
@@ -653,7 +669,7 @@ class InlineMultiPicker(Generic[T]):
 
         if selected:
             inner = check + label_padded + (f"  {meta}" if meta else "")
-            row = f"\r{self._BG}\033[7m{inner}{pad}\033[0m"
+            row = f"\r{self._SEL}{inner}{pad}\033[0m"
         else:
             inner = check + label_padded + (f"  \033[2m{meta}\033[22m" if meta else "")
             row = f"\r{self._BG}{inner}{pad}\033[0m"

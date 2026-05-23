@@ -33,9 +33,18 @@ _ANSI_RE = re.compile(r"\033\[[0-9;]*[A-Za-z]")
 
 
 def _wcswidth(s: str) -> int:
-    """Terminal display width of s (wide/fullwidth chars count as 2 columns)."""
+    """Terminal display width of s (wide/fullwidth chars count as 2 columns).
+
+    Combining/format characters (Unicode category Mn, Me, Cf) are zero-width
+    and checked BEFORE east_asian_width so that NFD-decomposed characters like
+    voiced katakana (e.g. ガ → カ + U+3099 combining dakuten) are not
+    double-counted.  U+3099 has east_asian_width='W' in Python's unicodedata,
+    but it is a combining mark and must be treated as zero-width.
+    """
     w = 0
     for ch in s:
+        if unicodedata.category(ch) in ("Mn", "Me", "Cf"):
+            continue  # zero-width combining / format char
         if unicodedata.east_asian_width(ch) in ("W", "F"):
             w += 2
         else:
