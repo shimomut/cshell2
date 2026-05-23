@@ -12,7 +12,7 @@ import traceback
 import tty
 from pathlib import Path
 
-from .commands import CommandRegistry, registry
+from .commands import arg, CommandRegistry, registry
 from .completion import (
     CommandNameCompleter,
     CompletionContext,
@@ -33,15 +33,14 @@ _DEFAULT_CONFIG = """\
 #
 # ── Simple example: one positional argument ───────────────────────────────────
 #
-# from cshell2.commands import registry
-# from cshell2.completion import ChoiceCompleter
+# from cshell2.commands import registry, arg
 #
 # @registry.command(
 #     name="hello",
 #     help="Greet someone by name.",        # shell-facing description; no docstring needed
-#     completers={0: ChoiceCompleter(["world", "there"])},
+#     params=[arg("name", nargs="?", default="world", choices=["world", "there"])],
 # )
-# def hello(name: str = "world"):
+# def hello(name):
 #     print(f"Hello, {name}!")
 #
 #
@@ -267,10 +266,16 @@ class Shell:
         return completions, prefix
 
     def _register_builtins(self) -> None:
-        from .completion import CallbackCompleter, ChoiceCompleter, Completer, Completion
+        from .completion import (
+            CallbackCompleter, ChoiceCompleter, Completer, Completion, DirCompleter,
+        )
 
-        @self.registry.command(name="cd", help="Change directory.")
-        def cd(path: str = "~"):
+        @self.registry.command(
+            name="cd",
+            help="Change directory.",
+            params=[arg("path", nargs="?", default="~", completer=DirCompleter())],
+        )
+        def cd(path):
             target = os.path.expanduser(path)
             try:
                 os.chdir(target)
@@ -304,10 +309,11 @@ class Shell:
                 "or a plain environment variable.  Registered variables handle their\n"
                 "own set logic (e.g. writing multiple env keys at once)."
             ),
-            completers={0: VarCompleter()},
+            params=[arg("assignments", nargs="*", metavar="NAME[=VALUE]",
+                        completer=VarCompleter())],
         )
-        def var_cmd(*args):
-            if not args:
+        def var_cmd(assignments):
+            if not assignments:
                 # List registered Python-backed vars first, then plain env.
                 py_vars = var_registry.all()
                 if py_vars:
@@ -321,28 +327,29 @@ class Shell:
                 for key, value in sorted(os.environ.items()):
                     print(f"  {key}={value}")
                 return
-            for arg in args:
-                if "=" in arg:
-                    key, _, value = arg.partition("=")
+            for assignment in assignments:
+                if "=" in assignment:
+                    key, _, value = assignment.partition("=")
                     if value == "":
                         self._unset_variable(key)
                     else:
                         self._set_variable(key, value)
-                elif var_registry.get(arg) is not None:
+                elif var_registry.get(assignment) is not None:
                     # 'var NAME' with no '=' → print current value of Python-backed var
-                    v = var_registry.get(arg)
+                    v = var_registry.get(assignment)
                     val = v.get()
-                    print(f"{arg}={val}" if val is not None else f"{arg}=(unset)")
-                elif arg in os.environ:
+                    print(f"{assignment}={val}" if val is not None else f"{assignment}=(unset)")
+                elif assignment in os.environ:
                     # 'var NAME' for a plain env var → print its value
-                    print(f"{arg}={os.environ[arg]}")
+                    print(f"{assignment}={os.environ[assignment]}")
                 else:
-                    print(f"var: invalid argument '{arg}' (expected NAME=VALUE or NAME= to unset)")
+                    print(f"var: invalid argument '{assignment}' (expected NAME=VALUE or NAME= to unset)")
 
         @self.registry.command(
             name="help",
             help="Show help for a command, or list all commands.",
-            completers={0: CallbackCompleter(lambda: sorted(self.registry.list_commands()))},
+            params=[arg("command_name", nargs="?", default="",
+                        completer=CallbackCompleter(lambda: sorted(self.registry.list_commands())))],
         )
         def help_cmd(command_name: str = ""):
             if command_name:
@@ -358,15 +365,14 @@ class Shell:
                     desc = cmd.help_text.split("\n")[0] if cmd.help_text else ""
                     print(f"  {name:20s} {desc}")
 
-        context_subcommands = ChoiceCompleter(["push", "pop", "switch", "list", "kill"])
-        names_after_subcommands = {"switch", "kill"}
+        _names_after_subcommands = {"switch", "kill"}
 
         class ContextNameCompleter(Completer):
             def __init__(self, cm):
                 self._cm = cm
 
             def should_activate(self, ctx: CompletionContext) -> bool:
-                return bool(ctx.args) and ctx.args[0] in names_after_subcommands
+                return bool(ctx.args) and ctx.args[0] in _names_after_subcommands
 
             def complete(self, ctx: CompletionContext) -> list[Completion]:
                 subcmd = ctx.args[0] if ctx.args else ""
@@ -386,10 +392,15 @@ class Shell:
         @self.registry.command(
             name="context",
             help="Manage shell contexts: push, pop, switch, list, kill.",
-            completers={0: context_subcommands, 1: ContextNameCompleter(self.context_manager)},
+            params=[
+                arg("subcommand", nargs="?", default="",
+                    completer=ChoiceCompleter(["push", "pop", "switch", "list", "kill"])),
+                arg("name", nargs="?", default="",
+                    completer=ContextNameCompleter(self.context_manager)),
+            ],
         )
-        def context_cmd(*args):
-            if not args:
+        def context_cmd(subcommand: str = "", name: str = ""):
+            if not subcommand:
                 ctx = self.context_manager.current()
                 if ctx:
                     vars_str = f" {ctx.variables}" if ctx.variables else ""
@@ -398,14 +409,10 @@ class Shell:
                     print("No active context.")
                 return
 
-            subcmd = args[0]
-            rest = args[1:]
-
-            if subcmd == "push":
-                if not rest:
+            if subcommand == "push":
+                if not name:
                     print("Usage: context push <name>")
                     return
-                name = rest[0]
                 if name in self.context_manager.contexts:
                     print(f"Context '{name}' already exists.")
                     return
@@ -415,7 +422,7 @@ class Shell:
                 self.context_manager.push(name)
                 print(f"Pushed context '{name}'")
 
-            elif subcmd == "pop":
+            elif subcommand == "pop":
                 ctx = self.context_manager.current()
                 if ctx is None:
                     print("No active context.")
@@ -423,9 +430,9 @@ class Shell:
                 if len(self.context_manager.list_contexts()) <= 1:
                     print("Cannot remove the last context.")
                     return
-                name = ctx.name
+                popped_name = ctx.name
                 self.context_manager.pop()
-                self.context_manager.remove(name)
+                self.context_manager.remove(popped_name)
                 prev = self.context_manager.current()
                 if prev is None:
                     remaining = self.context_manager.list_contexts()
@@ -433,20 +440,20 @@ class Shell:
                         self.context_manager.switch(remaining[0])
                         prev = self.context_manager.current()
                 if prev:
-                    print(f"Popped '{name}', now in '{prev.name}'")
+                    print(f"Popped '{popped_name}', now in '{prev.name}'")
                 else:
-                    print(f"Popped '{name}'")
+                    print(f"Popped '{popped_name}'")
 
-            elif subcmd == "switch":
-                if not rest:
+            elif subcommand == "switch":
+                if not name:
                     print("Usage: context switch <name>")
                     return
                 try:
-                    self.context_manager.switch(rest[0])
+                    self.context_manager.switch(name)
                 except KeyError as e:
                     print(e)
 
-            elif subcmd == "list":
+            elif subcommand == "list":
                 names = self.context_manager.list_contexts()
                 if not names:
                     print("No contexts defined.")
@@ -467,23 +474,22 @@ class Shell:
                         vars_str = f" {ctx.variables}" if ctx.variables else ""
                         print(f"  {marker} {n}{state_str}{vars_str}")
 
-            elif subcmd == "kill":
-                if not rest:
+            elif subcommand == "kill":
+                if not name:
                     print("Usage: context kill <name>")
                     return
-                target_name = rest[0]
-                if target_name not in self.context_manager.contexts:
-                    print(f"No context named '{target_name}'")
+                if name not in self.context_manager.contexts:
+                    print(f"No context named '{name}'")
                     return
-                target_ctx = self.context_manager.contexts[target_name]
+                target_ctx = self.context_manager.contexts[name]
                 if target_ctx.process_slot and target_ctx.process_slot.is_alive():
                     target_ctx.process_slot.kill()
-                    print(f"Sent SIGTERM to process in context '{target_name}'")
+                    print(f"Sent SIGTERM to process in context '{name}'")
                 else:
-                    print(f"Context '{target_name}' has no running process.")
+                    print(f"Context '{name}' has no running process.")
 
             else:
-                print(f"Unknown subcommand: {subcmd}")
+                print(f"Unknown subcommand: {subcommand}")
 
     def _load_user_config(self) -> None:
         config_path = Path.home() / ".cshell2" / "config.py"

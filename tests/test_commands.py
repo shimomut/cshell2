@@ -37,8 +37,8 @@ def test_command_with_completers():
     reg = CommandRegistry()
     completer = ChoiceCompleter(["a", "b"])
 
-    @reg.command(name="test", completers={0: completer})
-    def test_cmd(arg):
+    @reg.command(name="test", params=[arg("x", completer=completer)])
+    def test_cmd(x):
         pass
 
     cmd = reg.get("test")
@@ -355,14 +355,14 @@ def test_registry_auto_derives_completers_from_params():
     assert "-v" in cmd.completers[None].options
 
 
-def test_registry_explicit_completers_override_derived():
+def test_registry_explicit_completer_on_arg_overrides_choices():
+    """arg(completer=) wins over the ChoiceCompleter auto-derived from choices=."""
     reg = CommandRegistry()
     override = ChoiceCompleter(["override"])
 
     @reg.command(
         name="over",
-        params=[arg("x", choices=["auto"])],
-        completers={0: override},          # explicit overrides the auto-derived one
+        params=[arg("x", choices=["auto"], completer=override)],
     )
     def over(x):
         pass

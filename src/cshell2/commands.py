@@ -101,7 +101,7 @@ def arg(*names: str, completer: Completer | None = None, **kwargs) -> Arg:
 
     The resulting :class:`Arg` is passed to ``@registry.command(params=[…])``.
     The registry derives both the argparse parser **and** the TAB-completion
-    dict from the same list, so no separate ``completers=`` is needed.
+    dict from the same list.
     """
     return Arg(names=names, kwargs=kwargs, completer=completer)
 
@@ -298,7 +298,6 @@ class CommandRegistry:
     def command(
         self,
         name: str | None = None,
-        completers: dict[int | None, Completer] | None = None,
         params: list[Arg] | None = None,
         help: str | None = None,
     ):
@@ -327,12 +326,11 @@ class CommandRegistry:
         """
         def decorator(func: Callable) -> Callable:
             cmd_name = name or func.__name__
-            derived = _build_completers(params) if params else {}
-            merged = {**derived, **(completers or {})}
+            completers = _build_completers(params) if params else {}
             cmd = Command(
                 name=cmd_name,
                 func=func,
-                completers=merged,
+                completers=completers,
                 help_text=_build_help_text(help, func, cmd_name, params),
                 params=params,
                 description=_effective_description(help, func),
@@ -345,18 +343,16 @@ class CommandRegistry:
         self,
         func: Callable,
         name: str | None = None,
-        completers: dict[int | None, Completer] | None = None,
         params: list[Arg] | None = None,
         help: str | None = None,
     ) -> None:
         """Imperative registration (alternative to decorator)."""
         cmd_name = name or func.__name__
-        derived = _build_completers(params) if params else {}
-        merged = {**derived, **(completers or {})}
+        completers = _build_completers(params) if params else {}
         cmd = Command(
             name=cmd_name,
             func=func,
-            completers=merged,
+            completers=completers,
             help_text=_build_help_text(help, func, cmd_name, params),
             params=params,
             description=_effective_description(help, func),
