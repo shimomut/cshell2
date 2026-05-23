@@ -557,13 +557,29 @@ class InlineMultiPicker(Generic[T]):
         sys.stdout.write(_csi(f"{self._height}A") + "\r\0337")
         sys.stdout.flush()
 
+    def _compute_panel_w(self) -> int:
+        """Minimum width that fits all rows, bounded by available columns."""
+        has_scrollbar = len(self._items) > self._height
+        avail = max(1, self._cols - (1 if has_scrollbar else 0))
+        check_w = len(self._CHECK_ON)
+        content_avail = max(0, avail - check_w)
+        label_col = min(self._label_col_w, content_avail)
+        max_meta = 0
+        if self._meta_fn:
+            for item in self._items:
+                max_meta = max(max_meta, len(self._meta_fn(item)))
+        meta_cap = min(max_meta, max(0, content_avail - label_col - 2))
+        panel_w = check_w + label_col + (2 + meta_cap if meta_cap else 0)
+        return min(panel_w, avail)
+
     def _render(self) -> None:
         visible = self._items[self._offset : self._offset + self._height]
         out: list[str] = ["\0338\r\033[J"]
 
+        panel_w = self._compute_panel_w()
         for i, item in enumerate(visible):
             abs_i = self._offset + i
-            out.append(self._format_row(item, checked=(abs_i in self._checked), selected=(abs_i == self._selected)))
+            out.append(self._format_row(item, checked=(abs_i in self._checked), selected=(abs_i == self._selected), row_index=i, panel_w=panel_w))
             if i < len(visible) - 1:
                 out.append("\n")
 
@@ -578,27 +594,46 @@ class InlineMultiPicker(Generic[T]):
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
+    _BG = "\033[48;5;236m"  # dark gray background — same as InlinePicker
     _CHECK_ON = "[x] "
     _CHECK_OFF = "[ ] "
 
-    def _format_row(self, item: T, *, checked: bool, selected: bool) -> str:
+    def _scrollbar_char(self, row_index: int) -> str:
+        n = len(self._items)
+        thumb_start = self._offset * self._height // n
+        thumb_end = max(thumb_start + 1, (self._offset + self._height) * self._height // n)
+        if thumb_start <= row_index < thumb_end:
+            return "\033[38;5;244m█\033[0m"
+        return "\033[38;5;240m│\033[0m"
+
+    def _format_row(self, item: T, *, checked: bool, selected: bool, row_index: int = 0, panel_w: int = 0) -> str:
         label = self._display_fn(item)
         meta = self._meta_fn(item) if self._meta_fn else ""
 
         check = self._CHECK_ON if checked else self._CHECK_OFF
-        avail = self._cols - len(check)
+        has_scrollbar = len(self._items) > self._height
+        content_avail = max(1, panel_w - len(check))
         # Align all labels to the widest one; give everything left to the description.
-        label_col = min(self._label_col_w, avail)
-        meta_w = max(0, avail - label_col - 2)
+        label_col = min(self._label_col_w, content_avail)
+        meta_w = max(0, content_avail - label_col - 2)
         label_padded = label[:label_col].ljust(label_col)
         meta = meta[:meta_w]
 
+        content_w = len(check) + label_col + (2 + len(meta) if meta else 0)
+        pad = " " * max(0, panel_w - content_w)
+
         if selected:
             inner = check + label_padded + (f"  {meta}" if meta else "")
-            return f"\r\033[K\033[7m{inner}\033[K\033[0m"
+            row = f"\r{self._BG}\033[7m{inner}{pad}\033[0m"
         else:
-            inner = check + label_padded + (f"  \033[2m{meta}\033[0m" if meta else "")
-            return f"\r\033[K{inner}"
+            inner = check + label_padded + (f"  \033[2m{meta}\033[22m" if meta else "")
+            row = f"\r{self._BG}{inner}{pad}\033[0m"
+
+        if has_scrollbar:
+            sb_col = panel_w + 1  # 1-indexed terminal column
+            row += f"\033[{sb_col}G{self._scrollbar_char(row_index)}"
+
+        return row
 
     def _cleanup(self) -> None:
         sys.stdout.write("\0338\r\033[J")
