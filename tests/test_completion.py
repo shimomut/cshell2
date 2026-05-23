@@ -9,6 +9,7 @@ from cshell2.completion import (
     OptionsCompleter,
 )
 from cshell2.context import Context
+from cshell2.shell import _positional_index
 
 
 def make_ctx(prefix="", args=None, command="test"):
@@ -95,6 +96,46 @@ def test_options_completer_shows_value_taking_flags():
     # Value-taking flags are not combinable
     assert not t.combinable
     assert not b.combinable
+
+
+def _make_options_completer():
+    return OptionsCompleter(
+        {"-n": "dry run", "-v": "verbose"},
+        args={
+            "-t": ("SECONDS", ChoiceCompleter(["30", "60"])),
+            "-b": "BRANCH",
+        },
+    )
+
+
+def test_positional_index_no_flags():
+    assert _positional_index([], None) == 0
+    assert _positional_index(["prod"], None) == 1
+    assert _positional_index(["prod", "api"], None) == 2
+
+
+def test_positional_index_boolean_flags_skipped():
+    oc = _make_options_completer()
+    # "deploy -n <TAB>" → first positional not yet given
+    assert _positional_index(["-n"], oc) == 0
+    # "deploy -n -v <TAB>" → still 0
+    assert _positional_index(["-n", "-v"], oc) == 0
+    # "deploy prod -n <TAB>" → one positional seen
+    assert _positional_index(["prod", "-n"], oc) == 1
+    # "deploy prod -n api <TAB>" → two positionals seen
+    assert _positional_index(["prod", "-n", "api"], oc) == 2
+
+
+def test_positional_index_value_taking_flags_consume_value_token():
+    oc = _make_options_completer()
+    # "deploy -t 60 <TAB>" → -t + 60 skipped, positional = 0
+    assert _positional_index(["-t", "60"], oc) == 0
+    # "deploy prod -t 60 <TAB>" → positional = 1
+    assert _positional_index(["prod", "-t", "60"], oc) == 1
+    # "deploy -b main prod <TAB>" → -b + main skipped, prod counted
+    assert _positional_index(["-b", "main", "prod"], oc) == 1
+    # mixed: "deploy -n prod -t 60 api <TAB>" → positional = 2
+    assert _positional_index(["-n", "prod", "-t", "60", "api"], oc) == 2
 
 
 def test_completer_receives_shell_context():

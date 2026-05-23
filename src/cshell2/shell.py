@@ -167,6 +167,30 @@ _DEFAULT_CONFIG = """\
 """
 
 
+def _positional_index(args: list[str], options_completer) -> int:
+    """Return the number of positional (non-flag) arguments in *args*.
+
+    Flags are skipped without counting: boolean flags advance by 1 token;
+    value-taking flags (those listed in ``options_completer.args``) advance
+    by 2 tokens because they consume the following token as their value.
+    """
+    pos = 0
+    i = 0
+    value_taking = (
+        set(options_completer.args)
+        if options_completer and hasattr(options_completer, "args")
+        else set()
+    )
+    while i < len(args):
+        token = args[i]
+        if token.startswith("-"):
+            i += 2 if token in value_taking else 1
+        else:
+            pos += 1
+            i += 1
+    return pos
+
+
 class Shell:
     def __init__(self):
         self.registry = registry
@@ -244,7 +268,9 @@ class Shell:
 
         if completers_dict is not None:
             options_completer = completers_dict.get(None)
-            positional_completer = completers_dict.get(arg_index)
+            positional_completer = completers_dict.get(
+                _positional_index(args, options_completer)
+            )
 
             # When the last arg is a value-taking flag (e.g. "du -d <TAB>"),
             # suppress positional/file completion and return a hint instead.
