@@ -38,25 +38,23 @@ _DEFAULT_CONFIG = """\
 #
 # @registry.command(
 #     name="hello",
+#     help="Greet someone by name.",        # shell-facing description; no docstring needed
 #     completers={0: ChoiceCompleter(["world", "there"])},
 # )
 # def hello(name: str = "world"):
-#     '''Greet someone by name.'''
 #     print(f"Hello, {name}!")
 #
 #
 # ── Complex example: multiple positional args, flags with/without values, ─────
 # ── and a long-running task that supports Ctrl+] context switching mid-run ────
 #
-# Each arg() call in params= serves double duty:
-#   • The kwargs are forwarded to argparse to build the parser (validation,
-#     type coercion, defaults, --help text).
-#   • choices= on positional args and completer= on any arg drive TAB
-#     completion — no separate completers= dict is needed.
-#
-# The registry builds both the parser and the TAB-completion index from the
-# same params list, then calls the function with typed keyword arguments.
-# The function body contains zero argument-parsing code.
+# • help=       sets the description shown by 'help deploy' and 'deploy --help'.
+#               Usage is auto-generated from params= — no need to write it.
+# • params=     each arg() call configures argparse (validation, type coercion,
+#               defaults) AND TAB completion in one place.  choices= on a
+#               positional and completer= on any arg drive TAB completion;
+#               help= on an arg appears in the completion menu description.
+# • Function    receives typed keyword arguments — zero parsing code in body.
 #
 # from cshell2.commands import registry, arg
 # from cshell2.completion import ChoiceCompleter  # only needed for completer=
@@ -64,12 +62,13 @@ _DEFAULT_CONFIG = """\
 #
 # @registry.command(
 #     name="deploy",
+#     help="Deploy a service to an environment.",
 #     params=[
 #         # choices= drives argparse validation AND TAB completion simultaneously.
 #         arg("environment", choices=["prod", "staging", "dev"]),
 #         arg("service",     nargs="?", default="all",
 #                            choices=["api", "web", "worker"]),
-#         # Boolean flags: help= text appears in --help output and the completion menu.
+#         # Boolean flags: help= text appears in 'deploy --help' and completion menu.
 #         # Combined short flags (-nv) are expanded automatically by argparse.
 #         arg("-n", "--dry-run",  action="store_true",
 #                                 help="show steps, skip execution"),
@@ -84,22 +83,12 @@ _DEFAULT_CONFIG = """\
 #     ],
 # )
 # def deploy(environment, service, dry_run, verbose, timeout, branch):
-#     '''Deploy a service to an environment.
-#
-#     Usage: deploy <environment> [service] [-n] [-v] [-t SECONDS] [-b BRANCH]
-#
-#     This is a long-running command. While it executes, press Ctrl+] to open
-#     the context picker and switch to (or create) another context without
-#     interrupting the deployment. Switch back to this context at any time to
-#     resume watching its output.
-#     '''
 #     import time
-#
 #     # All arguments arrive pre-parsed and typed — no manual parsing needed.
+#     # While this runs, press Ctrl+] to switch context without killing the deploy.
 #     prefix = "[DRY RUN] " if dry_run else ""
 #     print(f"{prefix}Deploying '{service}' to '{environment}'  "
 #           f"branch={branch!r}  timeout={timeout}s")
-#
 #     for step, secs in [("Build image",       2),
 #                        ("Push to registry",   3),
 #                        ("Update deployment",  2),
@@ -108,7 +97,7 @@ _DEFAULT_CONFIG = """\
 #         if verbose:
 #             print(f"  -> {step} ...", flush=True)
 #         if not dry_run:
-#             time.sleep(secs)   # <- Ctrl+] here switches context without killing this
+#             time.sleep(secs)
 #         print(f"  ok {step}")
 #     print(f"{prefix}Done.")
 #
@@ -280,45 +269,44 @@ class Shell:
     def _register_builtins(self) -> None:
         from .completion import CallbackCompleter, ChoiceCompleter, Completer, Completion
 
-        @self.registry.command(name="cd")
+        @self.registry.command(name="cd", help="Change directory.")
         def cd(path: str = "~"):
-            """Change directory."""
             target = os.path.expanduser(path)
             try:
                 os.chdir(target)
             except OSError as e:
                 print(f"cd: {e}")
 
-        @self.registry.command(name="exit")
+        @self.registry.command(name="exit", help="Exit the shell.")
         def exit_shell():
-            """Exit the shell."""
             running = self._running_contexts()
             if running and not self._confirm_exit(running):
                 return
             raise SystemExit(0)
 
-        @self.registry.command(name="reload")
+        @self.registry.command(name="reload", help="Reload ~/.cshell2/config.py.")
         def reload_config():
-            """Reload ~/.cshell2/config.py."""
             self.registry.clear_user_commands()
             var_registry.clear_user_vars()
             set_prompt(None)
             self._load_user_config()
             print("Config reloaded.")
 
-        @self.registry.command(name="var", completers={0: VarCompleter()})
+        @self.registry.command(
+            name="var",
+            help=(
+                "Set, unset, or list context variables.\n\n"
+                "  var              list all registered vars and env vars\n"
+                "  var NAME         print current value of NAME\n"
+                "  var NAME=VALUE   set NAME to VALUE\n"
+                "  var NAME=        unset NAME (remove from env)\n\n"
+                "NAME may be a registered Python-backed variable (e.g. 'aws_region')\n"
+                "or a plain environment variable.  Registered variables handle their\n"
+                "own set logic (e.g. writing multiple env keys at once)."
+            ),
+            completers={0: VarCompleter()},
+        )
         def var_cmd(*args):
-            """Set, unset, or list context variables.
-
-            var                  - list all registered vars and env vars
-            var NAME             - print current value of NAME
-            var NAME=VALUE       - set NAME to VALUE
-            var NAME=            - unset NAME (remove from env / context)
-
-            NAME may be a registered Python-backed variable (e.g. 'aws_region')
-            or a plain environment variable name.  Registered variables handle
-            their own set logic (e.g. writing multiple env keys at once).
-            """
             if not args:
                 # List registered Python-backed vars first, then plain env.
                 py_vars = var_registry.all()
@@ -353,10 +341,10 @@ class Shell:
 
         @self.registry.command(
             name="help",
+            help="Show help for a command, or list all commands.",
             completers={0: CallbackCompleter(lambda: sorted(self.registry.list_commands()))},
         )
         def help_cmd(command_name: str = ""):
-            """Show help for a command, or list all commands."""
             if command_name:
                 cmd = self.registry.get(command_name)
                 if cmd:
@@ -397,10 +385,10 @@ class Shell:
 
         @self.registry.command(
             name="context",
+            help="Manage shell contexts: push, pop, switch, list, kill.",
             completers={0: context_subcommands, 1: ContextNameCompleter(self.context_manager)},
         )
         def context_cmd(*args):
-            """Manage contexts: push, pop, switch, list."""
             if not args:
                 ctx = self.context_manager.current()
                 if ctx:

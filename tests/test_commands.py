@@ -1,5 +1,8 @@
 import pytest
-from cshell2.commands import CommandRegistry, CmdParser, arg, _build_completers
+from cshell2.commands import (
+    CommandRegistry, CmdParser, arg,
+    _build_completers, _build_usage, _build_help_text,
+)
 from cshell2.completion import ChoiceCompleter, OptionsCompleter
 
 
@@ -155,6 +158,120 @@ def test_params_dispatch_returns_none_on_error(capsys):
     reg.get("strict").invoke([])   # missing required arg
     assert not called              # function must NOT have been called
     assert "error" in capsys.readouterr().err.lower()
+
+
+DEPLOY_PARAMS = [
+    arg("environment", choices=["prod", "dev"]),
+    arg("service", nargs="?", default="all"),
+    arg("-n", "--dry-run", action="store_true", help="dry run"),
+    arg("-t", "--timeout", type=int, default=60, metavar="SECONDS",
+        help="timeout"),
+]
+
+
+# ── _build_usage ──────────────────────────────────────────────────────────────
+
+def test_build_usage_required_positional():
+    assert _build_usage("cmd", [arg("name")]) == "Usage: cmd <name>"
+
+
+def test_build_usage_optional_positional():
+    assert _build_usage("cmd", [arg("x", nargs="?")]) == "Usage: cmd [x]"
+
+
+def test_build_usage_boolean_flag_short_form():
+    usage = _build_usage("cmd", [arg("-n", "--dry-run", action="store_true")])
+    assert "[-n]" in usage
+    assert "--dry-run" not in usage   # compact: only short form
+
+
+def test_build_usage_value_taking_flag_with_metavar():
+    usage = _build_usage("cmd", [arg("-t", "--timeout", type=int, metavar="SECONDS")])
+    assert "[-t SECONDS]" in usage
+
+
+def test_build_usage_value_taking_flag_metavar_derived():
+    # No metavar= → derived from --long-name → uppercased
+    usage = _build_usage("cmd", [arg("-o", "--output")])
+    assert "[-o OUTPUT]" in usage
+
+
+def test_build_usage_full_deploy():
+    usage = _build_usage("deploy", DEPLOY_PARAMS)
+    assert usage == "Usage: deploy <environment> [service] [-n] [-t SECONDS]"
+
+
+# ── _build_help_text ──────────────────────────────────────────────────────────
+
+def _noop(): pass
+
+
+def test_build_help_text_help_only():
+    ht = _build_help_text("Do something.", _noop, "cmd", None)
+    assert ht == "Do something."
+
+
+def test_build_help_text_params_only():
+    ht = _build_help_text(None, _noop, "cmd", [arg("name")])
+    assert ht == "Usage: cmd <name>"
+
+
+def test_build_help_text_help_and_params():
+    ht = _build_help_text("Do something.", _noop, "cmd", [arg("name")])
+    lines = ht.splitlines()
+    assert lines[0] == "Do something."
+    assert any("Usage:" in l for l in lines)
+
+
+def test_build_help_text_first_line_is_description():
+    """Command listing uses only the first line — it must be the description."""
+    ht = _build_help_text("Short desc.", _noop, "deploy", DEPLOY_PARAMS)
+    assert ht.split("\n")[0] == "Short desc."
+
+
+def test_build_help_text_docstring_fallback():
+    def func_with_doc():
+        """Docstring description."""
+    ht = _build_help_text(None, func_with_doc, "cmd", None)
+    assert ht == "Docstring description."
+
+
+def test_build_help_text_explicit_help_wins_over_docstring():
+    def func_with_doc():
+        """Should be ignored."""
+    ht = _build_help_text("Explicit wins.", func_with_doc, "cmd", None)
+    assert ht == "Explicit wins."
+
+
+# ── registry.command(help=) integration ──────────────────────────────────────
+
+def test_registry_help_param_stored():
+    reg = CommandRegistry()
+
+    @reg.command(name="greet", help="Say hello.")
+    def greet(*args): pass
+
+    assert reg.get("greet").help_text == "Say hello."
+
+
+def test_registry_help_and_params_combined():
+    reg = CommandRegistry()
+
+    @reg.command(name="demo", help="Run demo.", params=[arg("x")])
+    def demo(x): pass
+
+    ht = reg.get("demo").help_text
+    assert ht.startswith("Run demo.")
+    assert "Usage: demo <x>" in ht
+
+
+def test_registry_description_field_matches_help():
+    reg = CommandRegistry()
+
+    @reg.command(name="thing", help="Does a thing.")
+    def thing(*args): pass
+
+    assert reg.get("thing").description == "Does a thing."
 
 
 def test_build_completers_positional_choices():

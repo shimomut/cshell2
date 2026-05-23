@@ -167,6 +167,69 @@ def _build_completers(params: list[Arg]) -> dict[int | None, Completer]:
     return result
 
 
+def _build_usage(cmd_name: str, params: list[Arg]) -> str:
+    """Generate a compact usage line from a params list.
+
+    Format mirrors conventional shell usage notation:
+
+    * Required positional → ``<name>``
+    * Optional positional (``nargs="?"`` or ``"*"``) → ``[name]``
+    * Boolean flag → ``[-n]``  (shortest form)
+    * Value-taking flag → ``[-n METAVAR]``  (shortest form + metavar)
+    """
+    parts = [cmd_name]
+    for a in params:
+        is_flag = a.names[0].startswith("-")
+        if not is_flag:
+            is_optional = a.kwargs.get("nargs") in ("?", "*")
+            dest = a.names[0]
+            parts.append(f"[{dest}]" if is_optional else f"<{dest}>")
+        else:
+            short = next((n for n in a.names if len(n) == 2), a.names[0])
+            action = a.kwargs.get("action", "store")
+            if action in _VALUE_ACTIONS:
+                long_names = [n for n in a.names if n.startswith("--")]
+                dest = (long_names[0].lstrip("-").replace("-", "_")
+                        if long_names else a.names[0].lstrip("-"))
+                metavar = a.kwargs.get("metavar", dest.upper())
+                parts.append(f"[{short} {metavar}]")
+            else:
+                parts.append(f"[{short}]")
+    return "Usage: " + " ".join(parts)
+
+
+def _effective_description(help: str | None, func: Callable) -> str:
+    """Return the description string: explicit *help* wins, then the docstring."""
+    if help is not None:
+        return help
+    return inspect.getdoc(func) or ""
+
+
+def _build_help_text(
+    help: str | None,
+    func: Callable,
+    cmd_name: str,
+    params: list[Arg] | None,
+) -> str:
+    """Assemble the full help text stored on a Command.
+
+    Structure when both *help* and *params* are present::
+
+        <description>
+
+        Usage: cmd <pos> [opt] [-f] [-v VAL]
+
+    The first line is always the short description (used in command listings).
+    When neither *help* nor *params* is given, falls back to the function
+    signature as a minimal hint (legacy behaviour).
+    """
+    desc = _effective_description(help, func)
+    if params is not None:
+        usage = _build_usage(cmd_name, params)
+        return (desc + "\n\n" + usage).strip() if desc else usage
+    return desc or _signature_help(func, cmd_name)
+
+
 def _signature_help(func: Callable, cmd_name: str) -> str:
     """Generate a ``Usage: cmd_name [args]`` hint from the function signature.
 
@@ -202,6 +265,7 @@ class Command:
     completers: dict[int | None, Completer] = field(default_factory=dict)
     help_text: str = ""
     params: list[Arg] | None = None
+    description: str = ""  # raw description line (from help=), used as CmdParser description
 
     def invoke(self, args: list[str] | tuple[str, ...]) -> None:
         """Dispatch a command invocation.
@@ -214,7 +278,7 @@ class Command:
         behaviour is preserved for full backward compatibility.
         """
         if self.params is not None:
-            parser = CmdParser(self.name)
+            parser = CmdParser(self.name, description=self.description or None)
             for a in self.params:
                 parser.add_argument(*a.names, **a.kwargs)
             ns = parser.parse_args(args)
@@ -236,16 +300,20 @@ class CommandRegistry:
         name: str | None = None,
         completers: dict[int | None, Completer] | None = None,
         params: list[Arg] | None = None,
+        help: str | None = None,
     ):
         """Decorator to register a Python function as a shell command.
 
-        When *params* is provided (a list of :func:`arg` descriptors), the
-        registry auto-parses raw tokens before the function is called and
-        passes the result as keyword arguments.  The function body then
-        receives typed, validated values with no manual parsing needed::
+        *help* is the shell-facing description shown by the ``help`` command.
+        The function's docstring is **not** used; put all user-visible text in
+        *help* instead (the docstring is still fine for Python-level docs).
+
+        When *params* is provided the registry auto-generates a ``Usage:``
+        line and appends it after the *help* text::
 
             @registry.command(
                 name="greet",
+                help="Greet a person by name.",
                 params=[
                     arg("name"),
                     arg("-u", "--upper", action="store_true", help="uppercase"),
@@ -259,17 +327,15 @@ class CommandRegistry:
         """
         def decorator(func: Callable) -> Callable:
             cmd_name = name or func.__name__
-            # Auto-derive completers from params, then let explicit completers=
-            # override specific keys (useful for dynamic / context-aware completers
-            # that can't be expressed as a static Arg).
             derived = _build_completers(params) if params else {}
             merged = {**derived, **(completers or {})}
             cmd = Command(
                 name=cmd_name,
                 func=func,
                 completers=merged,
-                help_text=inspect.getdoc(func) or _signature_help(func, cmd_name),
+                help_text=_build_help_text(help, func, cmd_name, params),
                 params=params,
+                description=_effective_description(help, func),
             )
             self._commands[cmd_name] = cmd
             return func
@@ -281,6 +347,7 @@ class CommandRegistry:
         name: str | None = None,
         completers: dict[int | None, Completer] | None = None,
         params: list[Arg] | None = None,
+        help: str | None = None,
     ) -> None:
         """Imperative registration (alternative to decorator)."""
         cmd_name = name or func.__name__
@@ -290,8 +357,9 @@ class CommandRegistry:
             name=cmd_name,
             func=func,
             completers=merged,
-            help_text=inspect.getdoc(func) or _signature_help(func, cmd_name),
+            help_text=_build_help_text(help, func, cmd_name, params),
             params=params,
+            description=_effective_description(help, func),
         )
         self._commands[cmd_name] = cmd
 
