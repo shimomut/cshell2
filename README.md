@@ -178,12 +178,12 @@ Each recipe registers flag completion (via `OptionsCompleter`) and positional co
 
 #### User-Defined Recipes
 
-You can write your own recipes and place them in `~/.cshell2/recipes/`. `enable()` checks there automatically after the built-ins, so the call site in `config.py` is identical:
+You can write your own recipes and place them in `~/.cshell2/recipes/` (or any directory you add to the search path). `enable()` checks the search path automatically after the built-ins, so the call site in `config.py` is identical:
 
 ```python
 from cshell2.recipes import enable
 enable("git")          # built-in
-enable("my_tool")      # loads ~/.cshell2/recipes/my_tool.py
+enable("my_tool")      # found in ~/.cshell2/recipes/my_tool.py
 ```
 
 A recipe file must define a `register()` function:
@@ -206,6 +206,25 @@ def _list_targets():
     # Return dynamic values (cached, fetched from an API, etc.)
     return ["web", "worker", "scheduler"]
 ```
+
+#### Recipe Search Path
+
+The default search path contains only `~/.cshell2/recipes/`. Call `add_recipe_path()` to add more directories — useful for sharing recipes across a team:
+
+```python
+from cshell2.recipes import add_recipe_path, enable
+
+add_recipe_path("/team/shared/recipes")   # checked after ~/.cshell2/recipes/
+enable("my_tool")   # found in whichever directory contains my_tool.py first
+```
+
+Lookup order for every `enable()` call:
+
+1. Built-in package (`cshell2.recipes.<name>`) — always highest priority
+2. `~/.cshell2/recipes/<name>.py` — personal recipes
+3. Additional paths in the order they were added via `add_recipe_path()`
+
+You can also read or modify `recipe_search_path` directly (it is a plain `list[Path]`).
 
 ### Writing a Custom Completer
 

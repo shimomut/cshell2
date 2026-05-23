@@ -465,13 +465,15 @@ Each recipe calls `registry.register_external_completers(name, {...})` with an `
 
 #### User-Defined Recipes
 
-`enable()` checks `~/.cshell2/recipes/<name>.py` automatically when no built-in recipe matches. The call site is unchanged — the lookup order is:
+`enable()` searches `recipe_search_path` (a `list[Path]`) when no built-in recipe matches. The default list contains only `~/.cshell2/recipes/`; call `add_recipe_path()` to append more directories. The call site in `config.py` is unchanged.
 
-1. Built-in package (`cshell2.recipes.<name>`)
-2. User file (`~/.cshell2/recipes/<name>.py`)
-3. `ImportError` with a clear message if neither is found
+Lookup order for every `enable()` call:
 
-A user recipe file must define a `register()` function. It has the same shape as the built-in recipes:
+1. Built-in package (`cshell2.recipes.<name>`) — always highest priority.
+2. Each directory in `recipe_search_path` in order — first match wins.
+3. `ImportError` with the searched directories listed if nothing is found.
+
+A user recipe file must define a `register()` function with the same shape as built-in recipes:
 
 ```python
 # ~/.cshell2/recipes/my_tool.py
@@ -493,10 +495,14 @@ def _list_targets():
 
 ```python
 # ~/.cshell2/config.py
-from cshell2.recipes import enable
+from cshell2.recipes import add_recipe_path, enable
+
+add_recipe_path("/team/shared/recipes")  # optional extra directory
 enable("git")          # built-in
-enable("my_tool")      # loads ~/.cshell2/recipes/my_tool.py
+enable("my_tool")      # found in ~/.cshell2/recipes/ or /team/shared/recipes/
 ```
+
+`recipe_search_path` is a plain `list[Path]` and can be read or manipulated directly when finer control is needed.
 
 ### User Config (~/.cshell2/config.py)
 
