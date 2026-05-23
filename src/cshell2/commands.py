@@ -9,6 +9,34 @@ from typing import Callable
 from .completion import Completer
 
 
+def _signature_help(func: Callable, cmd_name: str) -> str:
+    """Generate a ``Usage: cmd_name [args]`` hint from the function signature.
+
+    Shown as the fallback help text when a command has no docstring.
+    Required parameters are shown as ``<name>``, optional ones as ``[name]``,
+    and ``*args`` as ``[args...]``.  Returns an empty string when the signature
+    cannot be determined.
+    """
+    try:
+        sig = inspect.signature(func)
+    except (ValueError, TypeError):
+        return ""
+
+    parts: list[str] = []
+    for param_name, param in sig.parameters.items():
+        if param.kind == param.VAR_POSITIONAL:
+            parts.append(f"[{param_name}...]")
+        elif param.kind == param.VAR_KEYWORD:
+            pass  # **kwargs — not useful to surface in usage
+        elif param.default is inspect.Parameter.empty:
+            parts.append(f"<{param_name}>")
+        else:
+            parts.append(f"[{param_name}]")
+
+    usage = " ".join([cmd_name] + parts)
+    return f"Usage: {usage}"
+
+
 @dataclass
 class Command:
     name: str
@@ -35,7 +63,7 @@ class CommandRegistry:
                 name=cmd_name,
                 func=func,
                 completers=completers or {},
-                help_text=inspect.getdoc(func) or "",
+                help_text=inspect.getdoc(func) or _signature_help(func, cmd_name),
             )
             self._commands[cmd_name] = cmd
             return func
@@ -53,7 +81,7 @@ class CommandRegistry:
             name=cmd_name,
             func=func,
             completers=completers or {},
-            help_text=inspect.getdoc(func) or "",
+            help_text=inspect.getdoc(func) or _signature_help(func, cmd_name),
         )
         self._commands[cmd_name] = cmd
 

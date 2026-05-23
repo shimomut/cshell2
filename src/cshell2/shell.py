@@ -41,6 +41,7 @@ _DEFAULT_CONFIG = """\
 #     completers={0: ChoiceCompleter(["world", "there"])},
 # )
 # def hello(name: str = "world"):
+#     '''Greet someone by name.'''
 #     print(f"Hello, {name}!")
 #
 # Enable completion recipes for external commands:
