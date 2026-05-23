@@ -9,6 +9,7 @@ import signal
 import sys
 import termios
 import tty
+import unicodedata
 from pathlib import Path
 from typing import Callable
 
@@ -31,22 +32,34 @@ def _shell_quote(s: str) -> str:
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[A-Za-z]")
 
 
+def _wcswidth(s: str) -> int:
+    """Terminal display width of s (wide/fullwidth chars count as 2 columns)."""
+    w = 0
+    for ch in s:
+        if unicodedata.east_asian_width(ch) in ("W", "F"):
+            w += 2
+        else:
+            w += 1
+    return w
+
+
 def _visible_len(s: str) -> int:
-    """Length of s after stripping ANSI escape codes."""
-    return len(_ANSI_RE.sub("", s))
+    """Display width of s after stripping ANSI escape codes (wide chars count as 2)."""
+    return _wcswidth(_ANSI_RE.sub("", s))
 
 
 def _display_col_offset(prefix: str, completions: list[Completion]) -> int:
-    """Return how many chars of prefix appear at the start of every display value.
+    """Return how many terminal columns of prefix appear at the start of every display value.
 
     The picker should open this many columns to the LEFT of the caret so that
     the candidate text aligns with the already-typed partial token.
     E.g. prefix="doc/co", displays=["completion.md","context.md"] → 2 ("co").
+    Wide chars in the prefix count as 2 columns each.
     """
     for start in range(len(prefix) + 1):
         suffix = prefix[start:]
         if all(c.display.startswith(suffix) for c in completions):
-            return len(suffix)
+            return _wcswidth(suffix)
     return 0
 
 
@@ -196,7 +209,7 @@ class LineEditor:
     def _on_resize(self, _sig, _frame) -> None:
         old_cursor_row = self._cursor_row
         self._update_cols()
-        cursor_char = self._prompt_len + self._cursor
+        cursor_char = self._prompt_len + _wcswidth(self._buf[:self._cursor])
         if self._terminal_reflows:
             # Terminal reflows content and moves the cursor to the correct
             # position in the new geometry; just update our tracking.
@@ -216,8 +229,8 @@ class LineEditor:
     def _redraw(self) -> None:
         """Rewrite the prompt and buffer, handling multi-line wrapping."""
         cols = self._cols
-        cursor_char = self._prompt_len + self._cursor
-        total_char = self._prompt_len + len(self._buf)
+        cursor_char = self._prompt_len + _wcswidth(self._buf[:self._cursor])
+        total_char = self._prompt_len + _wcswidth(self._buf)
 
         # Go up to the render top, then clear to end of screen.
         if self._cursor_row > 0:
@@ -439,14 +452,14 @@ class LineEditor:
         Returns True if the new context has a running process (caller should
         exit prompt so the run loop can enter forwarding mode).
         """
-        caret_char = self._prompt_len + self._cursor
+        caret_char = self._prompt_len + _wcswidth(self._buf[:self._cursor])
         caret_row = _pending_wrap_row(caret_char, self._cols)
-        end_row = _pending_wrap_row(self._prompt_len + len(self._buf), self._cols)
+        end_row = _pending_wrap_row(self._prompt_len + _wcswidth(self._buf), self._cols)
         rows_above = end_row - caret_row + 1
 
-        chars_from_end = len(self._buf) - self._cursor
-        if chars_from_end > 0:
-            sys.stdout.write(f"\033[{chars_from_end}C")
+        cols_from_end = _wcswidth(self._buf[self._cursor:])
+        if cols_from_end > 0:
+            sys.stdout.write(f"\033[{cols_from_end}C")
         sys.stdout.write("\n")
         sys.stdout.flush()
 
@@ -516,26 +529,27 @@ class LineEditor:
 
             # Move to the end of the visible content, then go one line down.
             # The prompt line stays visible above the picker during interaction.
-            caret_char = self._prompt_len + self._cursor
+            caret_char = self._prompt_len + _wcswidth(self._buf[:self._cursor])
             caret_col = _pending_wrap_col(caret_char, self._cols)
             caret_row = _pending_wrap_row(caret_char, self._cols)
-            end_row = _pending_wrap_row(self._prompt_len + len(self._buf), self._cols)
+            end_row = _pending_wrap_row(self._prompt_len + _wcswidth(self._buf), self._cols)
             rows_above = end_row - caret_row + 1
             display_offset = _display_col_offset(prefix, completions)
             col = caret_col - display_offset
 
-            chars_from_end = len(self._buf) - self._cursor
-            if chars_from_end > 0:
-                sys.stdout.write(f"\033[{chars_from_end}C")
+            cols_from_end = _wcswidth(self._buf[self._cursor:])
+            if cols_from_end > 0:
+                sys.stdout.write(f"\033[{cols_from_end}C")
             sys.stdout.write("\n")
             sys.stdout.flush()
 
             buf_at_tab = self._buf[: self._cursor]
+            caret_char_at_tab = caret_char
 
             def refresh(typed: str) -> tuple[list[Completion], int]:
                 new_completions, new_prefix = self._get_completions(buf_at_tab + typed)
                 new_caret_col = _pending_wrap_col(
-                    self._prompt_len + self._cursor + len(typed), self._cols
+                    caret_char_at_tab + len(typed), self._cols  # typed is always ASCII
                 )
                 new_col = new_caret_col - _display_col_offset(new_prefix, new_completions)
                 return new_completions, new_col
@@ -583,15 +597,15 @@ class LineEditor:
         """Run the multi-select options picker."""
         from .tui import InlineMultiPicker
 
-        caret_char = self._prompt_len + self._cursor
+        caret_char = self._prompt_len + _wcswidth(self._buf[:self._cursor])
         caret_col = _pending_wrap_col(caret_char, self._cols)
         caret_row = _pending_wrap_row(caret_char, self._cols)
-        end_row = _pending_wrap_row(self._prompt_len + len(self._buf), self._cols)
+        end_row = _pending_wrap_row(self._prompt_len + _wcswidth(self._buf), self._cols)
         rows_above = end_row - caret_row + 1
 
-        chars_from_end = len(self._buf) - self._cursor
-        if chars_from_end > 0:
-            sys.stdout.write(f"\033[{chars_from_end}C")
+        cols_from_end = _wcswidth(self._buf[self._cursor:])
+        if cols_from_end > 0:
+            sys.stdout.write(f"\033[{cols_from_end}C")
         sys.stdout.write("\n")
         sys.stdout.flush()
 
@@ -778,7 +792,7 @@ class LineEditor:
         raw_completions, prefix = self._get_completions(self._buf[: self._cursor])
         completions = [c for c in raw_completions if not c.multi_select and not c.is_arg_hint]
 
-        end_char = self._prompt_len + len(self._buf)
+        end_char = self._prompt_len + _wcswidth(self._buf)
         end_row = _pending_wrap_row(end_char, self._cols)
         end_col = _pending_wrap_col(end_char, self._cols)
         caret_row = self._cursor_row  # updated by _redraw()
@@ -815,19 +829,19 @@ class LineEditor:
         # Loop mirrors _complete()'s while-True structure to handle tab-extend
         # (picker.reopen) and backspace (picker.apply_backspace).
         while True:
-            caret_char = self._prompt_len + self._cursor
+            caret_char = self._prompt_len + _wcswidth(self._buf[:self._cursor])
             caret_col = _pending_wrap_col(caret_char, self._cols)
             caret_row = _pending_wrap_row(caret_char, self._cols)
-            end_char = self._prompt_len + len(self._buf)
+            end_char = self._prompt_len + _wcswidth(self._buf)
             end_row = _pending_wrap_row(end_char, self._cols)
             rows_above = end_row - caret_row + 1
             display_offset = _display_col_offset(prefix, completions)
             col = caret_col - display_offset
 
             # Move cursor to the end of the buffer content, then one line below.
-            chars_from_end = len(self._buf) - self._cursor
-            if chars_from_end > 0:
-                sys.stdout.write(f"\033[{chars_from_end}C")
+            cols_from_end = _wcswidth(self._buf[self._cursor:])
+            if cols_from_end > 0:
+                sys.stdout.write(f"\033[{cols_from_end}C")
             sys.stdout.write("\n")
             sys.stdout.flush()
 
@@ -838,7 +852,7 @@ class LineEditor:
                 new_raw, new_prefix = self._get_completions(buf_at_open + typed)
                 new_completions = [c for c in new_raw if not c.multi_select]
                 new_caret_col = _pending_wrap_col(
-                    caret_char_at_open + len(typed), self._cols
+                    caret_char_at_open + len(typed), self._cols  # typed is always ASCII
                 )
                 new_col = new_caret_col - _display_col_offset(new_prefix, new_completions)
                 return new_completions, new_col

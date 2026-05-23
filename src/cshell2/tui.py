@@ -8,6 +8,7 @@ import signal
 import sys
 import termios
 import tty
+import unicodedata
 from typing import Callable, Generic, TypeVar
 
 T = TypeVar("T")
@@ -15,6 +16,33 @@ T = TypeVar("T")
 
 def _csi(code: str) -> str:
     return f"\033[{code}"
+
+
+def _wcswidth(s: str) -> int:
+    """Terminal display width of s (wide/fullwidth chars count as 2 columns)."""
+    w = 0
+    for ch in s:
+        if unicodedata.east_asian_width(ch) in ("W", "F"):
+            w += 2
+        else:
+            w += 1
+    return w
+
+
+def _wcs_clip(s: str, max_cols: int) -> str:
+    """Return the longest prefix of s that fits within max_cols terminal columns."""
+    cols = 0
+    for i, ch in enumerate(s):
+        w = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if cols + w > max_cols:
+            return s[:i]
+        cols += w
+    return s
+
+
+def _wcs_ljust(s: str, width: int) -> str:
+    """Left-justify s in a field of width terminal columns, padding with spaces."""
+    return s + " " * max(0, width - _wcswidth(s))
 
 
 def _common_prefix(strings: list[str]) -> str:
@@ -195,8 +223,8 @@ class InlinePicker(Generic[T]):
         for item in self._items:
             label = self._display_fn(item)
             meta = self._meta_fn(item) if self._meta_fn else ""
-            meta_clip = min(len(meta), min(20, avail // 4))
-            label_clip = min(len(label), max(1, avail - (meta_clip + 2 if meta_clip else 0)))
+            meta_clip = min(_wcswidth(meta), min(20, avail // 4))
+            label_clip = min(_wcswidth(label), max(1, avail - (meta_clip + 2 if meta_clip else 0)))
             row_w = label_clip + (2 + meta_clip if meta_clip else 0)
             max_w = max(max_w, row_w)
         return min(max_w, avail)
@@ -207,12 +235,12 @@ class InlinePicker(Generic[T]):
 
         has_scrollbar = len(self._items) > self._height
         avail = max(1, self._cols - self._col - (1 if has_scrollbar else 0))
-        meta_w = min(len(meta), min(20, avail // 4))
-        label_w = min(len(label), max(1, panel_w - (meta_w + 2 if meta_w else 0)))
-        label = label[:label_w]
-        meta = meta[:meta_w]
+        meta_w = min(_wcswidth(meta), min(20, avail // 4))
+        label_w = min(_wcswidth(label), max(1, panel_w - (meta_w + 2 if meta_w else 0)))
+        label = _wcs_clip(label, label_w)
+        meta = _wcs_clip(meta, meta_w)
 
-        content_w = len(label) + (2 + len(meta) if meta else 0)
+        content_w = _wcswidth(label) + (2 + _wcswidth(meta) if meta else 0)
         pad = " " * max(0, panel_w - content_w)
 
         col_move = f"\033[{self._col}C" if self._col > 0 else ""
@@ -481,7 +509,7 @@ class InlineMultiPicker(Generic[T]):
         self._cols = 80
         self._height = min(max_height, len(items))
         self._cancelled = False
-        self._label_col_w = max((len(display_fn(item)) for item in items), default=4)
+        self._label_col_w = max((_wcswidth(display_fn(item)) for item in items), default=4)
 
     def run(self) -> list[T] | None:
         """Return checked items (or [highlighted] if none), or None on cancel."""
@@ -563,11 +591,12 @@ class InlineMultiPicker(Generic[T]):
         avail = max(1, self._cols - (1 if has_scrollbar else 0))
         check_w = len(self._CHECK_ON)
         content_avail = max(0, avail - check_w)
+        # label_col_w is already in display columns (computed via _wcswidth in __init__)
         label_col = min(self._label_col_w, content_avail)
         max_meta = 0
         if self._meta_fn:
             for item in self._items:
-                max_meta = max(max_meta, len(self._meta_fn(item)))
+                max_meta = max(max_meta, _wcswidth(self._meta_fn(item)))
         meta_cap = min(max_meta, max(0, content_avail - label_col - 2))
         panel_w = check_w + label_col + (2 + meta_cap if meta_cap else 0)
         return min(panel_w, avail)
@@ -613,13 +642,13 @@ class InlineMultiPicker(Generic[T]):
         check = self._CHECK_ON if checked else self._CHECK_OFF
         has_scrollbar = len(self._items) > self._height
         content_avail = max(1, panel_w - len(check))
-        # Align all labels to the widest one; give everything left to the description.
+        # Align all labels to the widest one (in display columns); give the rest to the description.
         label_col = min(self._label_col_w, content_avail)
         meta_w = max(0, content_avail - label_col - 2)
-        label_padded = label[:label_col].ljust(label_col)
-        meta = meta[:meta_w]
+        label_padded = _wcs_ljust(_wcs_clip(label, label_col), label_col)
+        meta = _wcs_clip(meta, meta_w)
 
-        content_w = len(check) + label_col + (2 + len(meta) if meta else 0)
+        content_w = len(check) + label_col + (2 + _wcswidth(meta) if meta else 0)
         pad = " " * max(0, panel_w - content_w)
 
         if selected:
