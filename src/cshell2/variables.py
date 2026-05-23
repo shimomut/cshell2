@@ -218,15 +218,30 @@ class VarCompleter(Completer):
                     for c in var.value_completer.complete(sub_ctx)
                 ]
         else:
-            # Complete the logical variable name — append '=' ready for value
-            return [
-                Completion(
-                    value=f"{v.name}=",
-                    display=f"{v.name}=",
-                    description=v.description,
-                )
-                for v in var_registry.all()
-                if v.name.startswith(prefix)
-            ]
+            results: list[Completion] = []
+            seen: set[str] = set()
+
+            # Registered Python-backed vars first (richer descriptions).
+            for v in var_registry.all():
+                if v.name.startswith(prefix):
+                    results.append(Completion(
+                        value=f"{v.name}=",
+                        display=f"{v.name}=",
+                        description=v.description,
+                    ))
+                    seen.add(v.name)
+
+            # All os.environ keys, skipping names already covered above.
+            for key in sorted(os.environ):
+                if key.startswith(prefix) and key not in seen:
+                    val = os.environ[key]
+                    desc = val[:60] + "…" if len(val) > 60 else val
+                    results.append(Completion(
+                        value=f"{key}=",
+                        display=f"{key}=",
+                        description=desc,
+                    ))
+
+            return results
 
         return []

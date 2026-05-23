@@ -86,6 +86,7 @@ class Shell:
 
         self._command_completer = CommandNameCompleter(self.registry)
         self._file_completer = FileCompleter()
+        self._var_completer = VarCompleter()
 
     def _get_completions(self, line_before_cursor: str) -> tuple[list[Completion], str]:
         # Isolate the current pipeline stage so completions for `ls | grep -`
@@ -94,6 +95,19 @@ class Shell:
         tokens, prefix = split_for_completion(stage_line)
 
         if not tokens:
+            # Bare KEY=VALUE assignment (e.g. "aws_region=us-<TAB>"): delegate
+            # to VarCompleter for value-side completion.
+            if "=" in prefix:
+                ctx = CompletionContext(
+                    command=None,
+                    args=[],
+                    arg_index=0,
+                    prefix=prefix,
+                    line=line_before_cursor,
+                    shell_context=self.context_manager.current(),
+                )
+                return self._var_completer.complete(ctx), prefix
+
             ctx = CompletionContext(
                 command=None,
                 args=[],
@@ -220,30 +234,15 @@ class Shell:
             for arg in args:
                 if "=" in arg:
                     key, _, value = arg.partition("=")
-                    py_var = var_registry.get(key)
-                    if py_var is not None:
-                        # Register each actual env key with the context manager
-                        # BEFORE calling set(), so the original values are captured
-                        # as the backup for context save/restore.
-                        for env_key in py_var.env_keys:
-                            if env_key not in os.environ:
-                                # Key doesn't exist yet; backup as absent.
-                                self.context_manager.set_variable(env_key, value)
-                            else:
-                                self.context_manager.set_variable(env_key, os.environ[env_key])
-                        py_var.set(value)
-                        # Sync context's stored value to what set() actually wrote.
-                        for env_key in py_var.env_keys:
-                            ctx = self.context_manager.current()
-                            if ctx is not None:
-                                ctx.variables[env_key] = os.environ.get(env_key, value)
-                    else:
-                        self.context_manager.set_variable(key, value)
+                    self._set_variable(key, value)
                 elif var_registry.get(arg) is not None:
-                    # 'var NAME' with no '=' → print current value
+                    # 'var NAME' with no '=' → print current value of Python-backed var
                     v = var_registry.get(arg)
                     val = v.get()
                     print(f"{arg}={val}" if val is not None else f"{arg}=(unset)")
+                elif arg in os.environ:
+                    # 'var NAME' for a plain env var → print its value
+                    print(f"{arg}={os.environ[arg]}")
                 else:
                     print(f"var: invalid argument '{arg}' (expected NAME=VALUE)")
 
@@ -425,6 +424,26 @@ class Shell:
 
     _ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)")
 
+    def _set_variable(self, key: str, value: str) -> None:
+        """Dispatch a KEY=VALUE assignment through var_registry, or fall back to plain os.environ.
+
+        When a registered Var handles the key its env_keys are registered with
+        the context manager first (so original values are captured as the
+        save/restore backup), then Var.set() is called to apply the change.
+        """
+        py_var = var_registry.get(key)
+        if py_var is not None:
+            for env_key in py_var.env_keys:
+                self.context_manager.set_variable(env_key, os.environ.get(env_key, value))
+            py_var.set(value)
+            # Sync context's stored value to what set() actually wrote.
+            ctx = self.context_manager.current()
+            if ctx is not None:
+                for env_key in py_var.env_keys:
+                    ctx.variables[env_key] = os.environ.get(env_key, value)
+        else:
+            self.context_manager.set_variable(key, value)
+
     def _execute(self, line: str) -> None:
         seq = parse_line(expand_vars(line))
         last_exit = 0
@@ -539,7 +558,7 @@ class Shell:
         if all(self._ASSIGNMENT_RE.match(t) for t in tokens):
             for token in tokens:
                 m = self._ASSIGNMENT_RE.match(token)
-                self.context_manager.set_variable(m.group(1), m.group(2))
+                self._set_variable(m.group(1), m.group(2))
             return 0
 
         command_name = tokens[0]

@@ -1,6 +1,7 @@
 """Tests for variables.py — Var ABC, VarRegistry, EnvVar, VarCompleter."""
 
 import os
+from unittest.mock import patch
 
 from cshell2.completion import ChoiceCompleter, CompletionContext
 from cshell2.variables import (
@@ -154,8 +155,54 @@ class TestVarCompleter:
     def test_complete_name_no_match(self):
         reg, c = self._make_registry_and_completer()
         reg.register(EnvVar("aws_profile", "AWS_PROFILE"))
-        results = c.complete(make_ctx(prefix="gcp_"))
+        # Use an isolated env so no system variable accidentally starts with "zz_unique_"
+        with patch.dict(os.environ, {}, clear=True):
+            results = c.complete(make_ctx(prefix="zz_unique_"))
         assert results == []
+
+    def test_complete_name_includes_env_vars(self):
+        reg, c = self._make_registry_and_completer()
+        with patch.dict(os.environ, {"MY_TOKEN": "secret", "MY_OTHER": "val"}, clear=True):
+            results = c.complete(make_ctx(prefix="MY_"))
+        values = [r.value for r in results]
+        assert "MY_TOKEN=" in values
+        assert "MY_OTHER=" in values
+
+    def test_complete_name_env_var_description_is_current_value(self):
+        reg, c = self._make_registry_and_completer()
+        with patch.dict(os.environ, {"MY_VAR": "hello"}, clear=True):
+            results = c.complete(make_ctx(prefix="MY_"))
+        match = next(r for r in results if r.value == "MY_VAR=")
+        assert match.description == "hello"
+
+    def test_complete_name_env_var_long_value_truncated(self):
+        reg, c = self._make_registry_and_completer()
+        long_val = "x" * 80
+        with patch.dict(os.environ, {"MY_LONG": long_val}, clear=True):
+            results = c.complete(make_ctx(prefix="MY_"))
+        match = next(r for r in results if r.value == "MY_LONG=")
+        assert match.description.endswith("…")
+        assert len(match.description) < len(long_val)
+
+    def test_complete_name_py_var_comes_before_env_var(self):
+        reg, c = self._make_registry_and_completer()
+        reg.register(EnvVar("aws_region", "AWS_REGION", description="region"))
+        with patch.dict(os.environ, {"AWS_REGION": "us-east-1", "AWS_PROFILE": "prod"}, clear=True):
+            results = c.complete(make_ctx(prefix=""))
+        values = [r.value for r in results]
+        # Python-backed var (lowercase) appears before env vars (uppercase)
+        assert values.index("aws_region=") < values.index("AWS_PROFILE=")
+
+    def test_complete_name_py_var_not_duplicated_by_env(self):
+        # If a Python-backed var's name happens to match an env key, it should
+        # appear only once (as the Python-backed entry, not again as env).
+        reg, c = self._make_registry_and_completer()
+        reg.register(EnvVar("MY_VAR", "MY_VAR", description="managed"))
+        with patch.dict(os.environ, {"MY_VAR": "current"}, clear=True):
+            results = c.complete(make_ctx(prefix="MY_"))
+        assert sum(1 for r in results if r.value == "MY_VAR=") == 1
+        match = next(r for r in results if r.value == "MY_VAR=")
+        assert match.description == "managed"  # description from Var, not from env value
 
     def test_complete_value_delegates_to_value_completer(self):
         reg, c = self._make_registry_and_completer()
@@ -185,9 +232,16 @@ class TestVarCompleter:
         results = c.complete(make_ctx(prefix="UNKNOWN_VAR=val"))
         assert results == []
 
-    def test_complete_empty_registry(self):
+    def test_complete_empty_registry_returns_env_vars(self):
         _, c = self._make_registry_and_completer()
-        results = c.complete(make_ctx(prefix=""))
+        with patch.dict(os.environ, {"SOME_VAR": "val"}, clear=True):
+            results = c.complete(make_ctx(prefix=""))
+        assert any(r.value == "SOME_VAR=" for r in results)
+
+    def test_complete_empty_registry_and_empty_env(self):
+        _, c = self._make_registry_and_completer()
+        with patch.dict(os.environ, {}, clear=True):
+            results = c.complete(make_ctx(prefix=""))
         assert results == []
 
 
