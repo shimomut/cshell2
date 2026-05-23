@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .process import ProcessSlot
@@ -30,7 +30,7 @@ class Context:
     name: str
     variables: dict[str, str] = field(default_factory=dict)
     cwd: str = field(default_factory=os.getcwd)
-    process_slot: ProcessSlot | None = field(default=None, repr=False)
+    process_slot: Any = field(default=None, repr=False)  # ProcessSlot | PythonCommandSlot
 
     @property
     def state(self) -> ContextState:

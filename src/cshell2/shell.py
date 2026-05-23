@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import ctypes
+import io
 import os
 import re
 import select
 import signal
 import sys
 import termios
+import threading
 import traceback
 import tty
 from pathlib import Path
@@ -26,6 +29,220 @@ from .parsing import expand_vars, split_for_completion, tokenize
 from .pipeline import Redirect, Sequence, Stage, Pipeline, expand_globs, parse_line, _split_on_operators
 from .process import ProcessSlot
 from .prompt import get_prompt_func, set_prompt
+
+# ---------------------------------------------------------------------------
+# Thread-local stdout routing + per-slot buffering proxy
+# ---------------------------------------------------------------------------
+
+class _ThreadLocalStdout(io.TextIOBase):
+    """A sys.stdout replacement that routes writes per thread.
+
+    The main thread (no override set) writes directly to *real*.
+    A Python-command thread sets an override via set_override() so its
+    print() calls go to a _StdoutProxy, keeping them separate from the
+    main thread's terminal output.
+    """
+
+    def __init__(self, real: io.TextIOBase) -> None:
+        self._real = real
+        self._local = threading.local()
+
+    @property
+    def _target(self) -> io.TextIOBase:
+        return getattr(self._local, "override", None) or self._real
+
+    def write(self, s: str) -> int:
+        return self._target.write(s)
+
+    def flush(self) -> None:
+        self._target.flush()
+
+    def fileno(self) -> int:
+        return self._real.fileno()
+
+    @property
+    def encoding(self) -> str:
+        return getattr(self._real, "encoding", "utf-8")
+
+    @property
+    def errors(self) -> str:
+        return getattr(self._real, "errors", "strict")
+
+    def set_override(self, proxy: "_StdoutProxy") -> None:
+        self._local.override = proxy
+
+    def clear_override(self) -> None:
+        self._local.override = None
+
+
+class _StdoutProxy(io.TextIOBase):
+    """Per-command buffering proxy.
+
+    Starts inactive (buffering).  Call activate(raw_mode=True) once the
+    terminal is in raw mode: it replays the buffer (converting \\n → \\r\\n)
+    and then forwards subsequent writes directly.  deactivate() resumes
+    buffering (used when the user switches away).
+    """
+
+    def __init__(self, real: io.TextIOBase) -> None:
+        self._real = real
+        self._buf = io.StringIO()
+        self._active = False
+        self._raw_mode = False
+        self._lock = threading.Lock()
+
+    @property
+    def encoding(self) -> str:
+        return getattr(self._real, "encoding", "utf-8")
+
+    @property
+    def errors(self) -> str:
+        return getattr(self._real, "errors", "strict")
+
+    def write(self, s: str) -> int:
+        with self._lock:
+            if self._active:
+                if self._raw_mode:
+                    s = s.replace("\n", "\r\n")
+                return self._real.write(s)
+            return self._buf.write(s)
+
+    def flush(self) -> None:
+        with self._lock:
+            if self._active:
+                self._real.flush()
+
+    def fileno(self) -> int:
+        return self._real.fileno()
+
+    def activate(self, raw_mode: bool = False) -> None:
+        """Replay buffer to real stdout and start writing live."""
+        with self._lock:
+            self._raw_mode = raw_mode
+            content = self._buf.getvalue()
+            if content:
+                if raw_mode:
+                    content = content.replace("\n", "\r\n")
+                self._real.write(content)
+                self._real.flush()
+                self._buf = io.StringIO()
+            self._active = True
+
+    def deactivate(self) -> None:
+        with self._lock:
+            self._active = False
+            self._raw_mode = False
+
+    def replay(self) -> None:
+        """Drain buffer to real stdout (called on switch-back, cooked mode)."""
+        with self._lock:
+            content = self._buf.getvalue()
+            if content:
+                self._real.write(content)
+                self._real.flush()
+                self._buf = io.StringIO()
+
+
+class _NullBuffer:
+    """Stub matching OutputBuffer.drain() used in the run() loop."""
+    def drain(self) -> list:
+        return []
+
+
+class PythonCommandSlot:
+    """Manages a Python @registry.command running in a background thread.
+
+    Implements the same runtime interface as ProcessSlot so the shell's
+    run() loop and context machinery can treat both uniformly.
+    """
+
+    def __init__(self, cmd, raw_args: list[str]) -> None:
+        self._cmd = cmd
+        self._raw_args = raw_args
+        self.argv: list[str] = [cmd.name] + raw_args
+        self._thread: threading.Thread | None = None
+        self._proxy: _StdoutProxy | None = None
+        self._exit_exception: BaseException | None = None
+        self._finished = threading.Event()
+        # Stub attributes expected by the run() loop
+        self.buffer = _NullBuffer()
+        self.exit_code: int | None = None
+
+    # --- lifecycle -----------------------------------------------------------
+
+    def start(self) -> None:
+        """Spawn the command thread.  stdout starts buffered (inactive)."""
+        real = getattr(sys.stdout, "_real", sys.stdout)
+        self._proxy = _StdoutProxy(real)
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"pycmd-{self._cmd.name}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        if hasattr(sys.stdout, "set_override"):
+            sys.stdout.set_override(self._proxy)
+        try:
+            self._cmd.invoke(self._raw_args)
+        except SystemExit as e:
+            self._exit_exception = e
+        except KeyboardInterrupt as e:
+            self._exit_exception = e
+        except Exception as e:
+            self._exit_exception = e
+        finally:
+            if hasattr(sys.stdout, "clear_override"):
+                sys.stdout.clear_override()
+            self.exit_code = self._compute_exit_code()
+            self._finished.set()
+
+    def _compute_exit_code(self) -> int:
+        exc = self._exit_exception
+        if exc is None:
+            return 0
+        if isinstance(exc, SystemExit):
+            code = exc.code
+            return code if isinstance(code, int) else (1 if code else 0)
+        if isinstance(exc, KeyboardInterrupt):
+            return 130
+        return 1
+
+    # --- ProcessSlot-compatible interface ------------------------------------
+
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def activate(self, raw_mode: bool = False) -> None:
+        if self._proxy:
+            self._proxy.activate(raw_mode=raw_mode)
+
+    def deactivate(self) -> None:
+        if self._proxy:
+            self._proxy.deactivate()
+
+    def replay_buffer(self) -> None:
+        if self._proxy:
+            self._proxy.replay()
+
+    def kill(self) -> None:
+        """Inject KeyboardInterrupt into the command thread."""
+        if self._thread and self._thread.is_alive():
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_ulong(self._thread.ident),
+                ctypes.py_object(KeyboardInterrupt),
+            )
+
+    def restore_terminal_modes(self) -> str:
+        return ""
+
+    def suspend_terminal_modes(self) -> str:
+        return ""
+
+    def write_stdin(self, data: bytes) -> None:
+        pass  # stdin forwarding not yet implemented for Python commands
+
 
 _DEFAULT_CONFIG = """\
 # cshell2 user configuration
@@ -155,6 +372,10 @@ class Shell:
         self.registry.mark_builtins()
         var_registry.mark_builtins()
         self._load_user_config()
+        # Install thread-local stdout router so Python command threads can
+        # write to a buffering proxy without disturbing the main thread.
+        if not isinstance(sys.stdout, _ThreadLocalStdout):
+            sys.stdout = _ThreadLocalStdout(sys.stdout)
 
         history_path = Path.home() / ".cshell2" / "history"
         history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -681,43 +902,62 @@ class Shell:
 
         cmd = self.registry.get(command_name)
         if cmd:
-            # Python command — redirect sys.stdout/stdin if needed
-            import io as _io
-            old_stdout = sys.stdout
-            old_stdin = sys.stdin
-            old_stderr = sys.stderr
-            try:
-                if stdout_override:
-                    sys.stdout = _io.TextIOWrapper(stdout_override)
-                if stdin_override:
-                    sys.stdin = _io.TextIOWrapper(stdin_override)
-                if stderr_override == "stdout":
-                    sys.stderr = sys.stdout
-                elif stderr_override:
-                    sys.stderr = _io.TextIOWrapper(stderr_override)
-                cmd.invoke(args)
-            except SystemExit:
-                raise
-            except TypeError as e:
-                print(f"{command_name}: {e}")
-            except Exception as e:
-                print(f"{command_name}: error: {e}")
-                traceback.print_exc()
-            finally:
-                sys.stdout = old_stdout
-                sys.stdin = old_stdin
-                sys.stderr = old_stderr
-                for f in (stdout_override, stdin_override):
-                    if f:
+            if has_redirects:
+                # Redirected Python command — run synchronously with overridden streams.
+                old_stdout = sys.stdout
+                old_stdin = sys.stdin
+                old_stderr = sys.stderr
+                try:
+                    if stdout_override:
+                        sys.stdout = io.TextIOWrapper(stdout_override)
+                    if stdin_override:
+                        sys.stdin = io.TextIOWrapper(stdin_override)
+                    if stderr_override == "stdout":
+                        sys.stderr = sys.stdout
+                    elif stderr_override:
+                        sys.stderr = io.TextIOWrapper(stderr_override)
+                    cmd.invoke(args)
+                except SystemExit:
+                    raise
+                except TypeError as e:
+                    print(f"{command_name}: {e}")
+                except Exception as e:
+                    print(f"{command_name}: error: {e}")
+                    traceback.print_exc()
+                finally:
+                    sys.stdout = old_stdout
+                    sys.stdin = old_stdin
+                    sys.stderr = old_stderr
+                    for f in (stdout_override, stdin_override):
+                        if f:
+                            try:
+                                f.close()
+                            except Exception:
+                                pass
+                    if stderr_override and stderr_override != "stdout":
                         try:
-                            f.close()
+                            stderr_override.close()
                         except Exception:
                             pass
-                if stderr_override and stderr_override != "stdout":
-                    try:
-                        stderr_override.close()
-                    except Exception:
-                        pass
+            else:
+                # Interactive Python command — run in a thread so Ctrl+] works.
+                ctx = self.context_manager.current()
+                slot = PythonCommandSlot(cmd, args)
+                slot.start()
+                result = self._enter_python_forwarding_mode(slot)
+                if result == "switched":
+                    slot.deactivate()
+                    if ctx is not None:
+                        ctx.process_slot = slot
+                    self._handle_switch()
+                else:
+                    slot.deactivate()
+                    exc = slot._exit_exception
+                    if isinstance(exc, SystemExit):
+                        raise exc
+                    if exc is not None and not isinstance(exc, KeyboardInterrupt):
+                        print(f"{command_name}: error: {exc}")
+                        traceback.print_exc()
             return 0
 
         # External command
@@ -845,6 +1085,49 @@ class Shell:
                     sys.stdout.write(suspend_seq)
                     sys.stdout.flush()
 
+    def _enter_python_forwarding_mode(self, slot: PythonCommandSlot) -> str:
+        """Monitor stdin while a Python command runs in a background thread.
+
+        Sets the terminal to raw mode, activates the slot's stdout proxy
+        (replaying any buffered output), then loops:
+          • Ctrl+C  (\\x03) — inject KeyboardInterrupt into the command thread
+          • Ctrl+]  (\\x1d) — return 'switched' so caller can store the slot
+          • normal keys     — forwarded to slot.write_stdin (no-op currently)
+
+        Returns 'exited' when the thread finishes, 'switched' on Ctrl+].
+        """
+        fd = sys.stdin.fileno()
+        old_attrs = termios.tcgetattr(fd)
+        old_sigint = signal.getsignal(signal.SIGINT)
+        old_sigwinch = signal.getsignal(signal.SIGWINCH)
+        result = "exited"
+        try:
+            tty.setraw(fd)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            signal.signal(signal.SIGWINCH, signal.SIG_IGN)
+            # Replay any output buffered before raw mode was set
+            slot.activate(raw_mode=True)
+
+            while slot.is_alive():
+                rlist, _, _ = select.select([fd], [], [], 0.1)
+                if fd in rlist:
+                    data = os.read(fd, 1024)
+                    if not data:
+                        break
+                    if b"\x1d" in data:
+                        result = "switched"
+                        break
+                    if b"\x03" in data:
+                        slot.kill()
+                        # keep looping — thread will finish shortly
+                    else:
+                        slot.write_stdin(data)
+            return result
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+            signal.signal(signal.SIGINT, old_sigint)
+            signal.signal(signal.SIGWINCH, old_sigwinch)
+
     _NEW_CTX_SENTINEL = "\x00new"
 
     def _show_switch_menu(self) -> tuple[str, bool] | None:
@@ -948,23 +1231,43 @@ class Shell:
                 ctx = self.context_manager.current()
 
                 if ctx and ctx.process_slot and ctx.process_slot.is_alive():
-                    ctx.process_slot.buffer.drain()
-                    restore_seq = ctx.process_slot.restore_terminal_modes()
-                    if restore_seq:
-                        sys.stdout.write(restore_seq)
-                        sys.stdout.flush()
-                    ctx.process_slot.activate()
-                    result = self._enter_forwarding_mode(ctx.process_slot, force_redraw=True)
-                    ctx.process_slot.deactivate()
-                    if result == "switched":
-                        self._handle_switch()
-                        continue
+                    slot = ctx.process_slot
+                    if isinstance(slot, PythonCommandSlot):
+                        # Resume a backgrounded Python command.
+                        result = self._enter_python_forwarding_mode(slot)
+                        slot.deactivate()
+                        if result == "switched":
+                            self._handle_switch()
+                            continue
+                        else:
+                            exc = slot._exit_exception
+                            ctx.process_slot = None
+                            if isinstance(exc, SystemExit):
+                                raise exc
+                            if exc is not None and not isinstance(exc, KeyboardInterrupt):
+                                print(f"\n[Python command error: {exc}]")
+                            elif slot.exit_code and slot.exit_code != 0:
+                                print(f"\n[Process exited with code {slot.exit_code}]")
+                            continue
                     else:
-                        exit_code = ctx.process_slot.exit_code
-                        ctx.process_slot = None
-                        if exit_code and exit_code != 0:
-                            print(f"\n[Process exited with code {exit_code}]")
-                        continue
+                        # Resume a PTY subprocess.
+                        slot.buffer.drain()
+                        restore_seq = slot.restore_terminal_modes()
+                        if restore_seq:
+                            sys.stdout.write(restore_seq)
+                            sys.stdout.flush()
+                        slot.activate()
+                        result = self._enter_forwarding_mode(slot, force_redraw=True)
+                        slot.deactivate()
+                        if result == "switched":
+                            self._handle_switch()
+                            continue
+                        else:
+                            exit_code = slot.exit_code
+                            ctx.process_slot = None
+                            if exit_code and exit_code != 0:
+                                print(f"\n[Process exited with code {exit_code}]")
+                            continue
 
                 if ctx and ctx.process_slot and not ctx.process_slot.is_alive():
                     ctx.process_slot.replay_buffer()
