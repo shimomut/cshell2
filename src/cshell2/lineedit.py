@@ -797,6 +797,9 @@ class LineEditor:
                 completions = [c for c in completions if not c.multi_select]
                 if not completions:
                     return True  # typed chars committed; no further completions
+                if len(completions) == 1:
+                    self._apply(completions[0], prefix)
+                    return True  # single completion; close like _complete() does
                 continue
 
             if picker.apply_backspace:
