@@ -48,32 +48,42 @@ _DEFAULT_CONFIG = """\
 # ── Complex example: multiple positional args, flags with/without values, ─────
 # ── and a long-running task that supports Ctrl+] context switching mid-run ────
 #
-# from cshell2.commands import registry
-# from cshell2.completion import ChoiceCompleter, OptionsCompleter
+# Each arg() call in params= serves double duty:
+#   • The kwargs are forwarded to argparse to build the parser (validation,
+#     type coercion, defaults, --help text).
+#   • choices= on positional args and completer= on any arg drive TAB
+#     completion — no separate completers= dict is needed.
+#
+# The registry builds both the parser and the TAB-completion index from the
+# same params list, then calls the function with typed keyword arguments.
+# The function body contains zero argument-parsing code.
+#
+# from cshell2.commands import registry, arg
+# from cshell2.completion import ChoiceCompleter  # only needed for completer=
 # import time
 #
 # @registry.command(
 #     name="deploy",
-#     completers={
-#         # None key → flag/option completer; activates whenever the user types "-..."
-#         None: OptionsCompleter(
-#             {
-#                 # Boolean flags (no value)
-#                 "-n": "dry run — show steps, skip execution",
-#                 "-v": "verbose — print details for each step",
-#             },
-#             args={
-#                 # Value-taking flags: value is "METAVAR" or ("METAVAR", completer).
-#                 "-t": ("SECONDS", ChoiceCompleter(["30", "60", "120", "300"])),
-#                 "-b": "BRANCH",   # no completer — user types the branch name
-#             },
-#         ),
-#         # Positional completers keyed by argument index (0-based, after command name).
-#         0: ChoiceCompleter(["prod", "staging", "dev"]),
-#         1: ChoiceCompleter(["api", "web", "worker"]),
-#     },
+#     params=[
+#         # choices= drives argparse validation AND TAB completion simultaneously.
+#         arg("environment", choices=["prod", "staging", "dev"]),
+#         arg("service",     nargs="?", default="all",
+#                            choices=["api", "web", "worker"]),
+#         # Boolean flags: help= text appears in --help output and the completion menu.
+#         # Combined short flags (-nv) are expanded automatically by argparse.
+#         arg("-n", "--dry-run",  action="store_true",
+#                                 help="show steps, skip execution"),
+#         arg("-v", "--verbose",  action="store_true",
+#                                 help="print details for each step"),
+#         # Value-taking flags: completer= drives TAB completion for the value.
+#         arg("-t", "--timeout",  type=int, default=60,  metavar="SECONDS",
+#                                 help="deployment timeout in seconds",
+#                                 completer=ChoiceCompleter(["30", "60", "120", "300"])),
+#         arg("-b", "--branch",   default="main",        metavar="BRANCH",
+#                                 help="git branch to deploy"),
+#     ],
 # )
-# def deploy(*args):
+# def deploy(environment, service, dry_run, verbose, timeout, branch):
 #     '''Deploy a service to an environment.
 #
 #     Usage: deploy <environment> [service] [-n] [-v] [-t SECONDS] [-b BRANCH]
@@ -85,59 +95,16 @@ _DEFAULT_CONFIG = """\
 #     '''
 #     import time
 #
-#     # All tokens (positional args AND flags) arrive flat in *args.
-#     # Parse them manually: collect positional args and handle flags.
-#     env     = None
-#     service = "all"
-#     dry_run = False
-#     verbose = False
-#     timeout = 60
-#     branch  = "main"
-#     positional = []
-#     i = 0
-#     while i < len(args):
-#         token = args[i]
-#         if token in ("-n", "--dry-run"):
-#             dry_run = True
-#         elif token in ("-v", "--verbose"):
-#             verbose = True
-#         elif token in ("-t", "--timeout"):
-#             i += 1
-#             if i < len(args):
-#                 try:
-#                     timeout = int(args[i])
-#                 except ValueError:
-#                     print(f"deploy: --timeout expects an integer, got '{args[i]}'")
-#                     return
-#         elif token in ("-b", "--branch"):
-#             i += 1
-#             if i < len(args):
-#                 branch = args[i]
-#         elif token.startswith("-"):
-#             print(f"deploy: unknown option '{token}'")
-#             return
-#         else:
-#             positional.append(token)
-#         i += 1
-#
-#     if not positional:
-#         print("deploy: usage: deploy <environment> [service] [options]")
-#         return
-#     env = positional[0]
-#     if len(positional) > 1:
-#         service = positional[1]
-#
+#     # All arguments arrive pre-parsed and typed — no manual parsing needed.
 #     prefix = "[DRY RUN] " if dry_run else ""
-#     print(f"{prefix}Deploying '{service}' to '{env}'  branch={branch!r}  timeout={timeout}s")
+#     print(f"{prefix}Deploying '{service}' to '{environment}'  "
+#           f"branch={branch!r}  timeout={timeout}s")
 #
-#     steps = [
-#         ("Build image",       2),
-#         ("Push to registry",  3),
-#         ("Update deployment", 2),
-#         ("Wait for rollout",  4),
-#         ("Health checks",     2),
-#     ]
-#     for step, secs in steps:
+#     for step, secs in [("Build image",       2),
+#                        ("Push to registry",   3),
+#                        ("Update deployment",  2),
+#                        ("Wait for rollout",   4),
+#                        ("Health checks",      2)]:
 #         if verbose:
 #             print(f"  -> {step} ...", flush=True)
 #         if not dry_run:
@@ -734,7 +701,7 @@ class Shell:
                     sys.stderr = sys.stdout
                 elif stderr_override:
                     sys.stderr = _io.TextIOWrapper(stderr_override)
-                cmd.func(*args)
+                cmd.invoke(args)
             except SystemExit:
                 raise
             except TypeError as e:
