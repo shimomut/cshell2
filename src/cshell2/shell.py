@@ -182,7 +182,7 @@ class Shell:
         return completions, prefix
 
     def _register_builtins(self) -> None:
-        from .completion import ChoiceCompleter, Completer, Completion
+        from .completion import CallbackCompleter, ChoiceCompleter, Completer, Completion
 
         @self.registry.command(name="cd")
         def cd(path: str = "~"):
@@ -262,7 +262,10 @@ class Shell:
                 else:
                     self.context_manager.unset_variable(key)
 
-        @self.registry.command(name="help")
+        @self.registry.command(
+            name="help",
+            completers={0: CallbackCompleter(lambda: sorted(self.registry.list_commands()))},
+        )
         def help_cmd(command_name: str = ""):
             """Show help for a command, or list all commands."""
             if command_name:
