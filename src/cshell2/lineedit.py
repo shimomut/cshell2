@@ -459,7 +459,14 @@ class LineEditor:
     def _complete(self, fd: int) -> None:
         from .tui import InlinePicker
 
+        buf_changed = False
         while True:
+            # Redraw if a previous iteration modified the buffer (e.g. auto-applied a
+            # flag), so the prompt reflects the new content before the next picker opens.
+            if buf_changed:
+                self._redraw()
+                buf_changed = False
+
             completions, prefix = self._get_completions(self._buf[: self._cursor])
 
             if not completions:
@@ -476,18 +483,15 @@ class LineEditor:
                 self._hint = text  # rendered by _redraw(); cleared on next keypress
                 return
 
-            # Single value-taking option: auto-apply and show hint, same as
-            # when the user typed the flag manually and pressed TAB after a space.
+            # Single value-taking option: auto-apply then re-run the loop.
+            # The next iteration will either open a value picker (when a
+            # value_completer is registered) or set self._hint (is_arg_hint).
             if (len(completions) == 1
                     and completions[0].multi_select
                     and completions[0].arg_hint):
-                comp = completions[0]
-                self._apply(comp, prefix)
-                text = f"  {comp.value} <{comp.arg_hint}>"
-                if comp.description:
-                    text += f"  —  {comp.description}"
-                self._hint = text
-                return
+                self._apply(completions[0], prefix)
+                buf_changed = True
+                continue
 
             if len(completions) == 1:
                 self._apply(completions[0], prefix)
@@ -566,6 +570,7 @@ class LineEditor:
             return
 
     def _complete_multi(self, completions: list[Completion], prefix: str) -> None:
+        """Run the multi-select options picker."""
         from .tui import InlineMultiPicker
 
         caret_char = self._prompt_len + self._cursor
@@ -612,17 +617,34 @@ class LineEditor:
         self._buf = pre + bool_str + post
         self._cursor = len(pre) + len(bool_str)
 
-        # For each arg-taking option, insert the flag and show a hint.
-        # Only the last one's hint is visible; the user fills in values one at a time.
+        # For each arg-taking flag, insert it then handle its value:
+        #   • flags with a value completer (e.g. -C DIR) → picker via _prompt_for_arg
+        #   • hint-only flags (e.g. -j N)               → hint line, return to user
         for opt in arg_sel:
             sep = " " if self._cursor > 0 and self._buf[self._cursor - 1] != " " else ""
             ins = f"{sep}{opt.value} "
             self._buf = self._buf[: self._cursor] + ins + self._buf[self._cursor :]
             self._cursor += len(ins)
-            text = f"  {opt.value} <{opt.arg_hint}>"
-            if opt.description:
-                text += f"  —  {opt.description}"
-            self._hint = text
+
+            value_comps, _ = self._get_completions(self._buf[: self._cursor])
+            has_value_picker = any(
+                not c.multi_select and not c.is_arg_hint for c in value_comps
+            )
+
+            if has_value_picker:
+                # Value completer available: open picker, then continue to next flag.
+                if not self._prompt_for_arg(opt):
+                    break
+            else:
+                # Hint-only: show hint below and hand control back to the user.
+                # They type the value directly; any remaining flags wait for next TAB.
+                hint_comp = next((c for c in value_comps if c.is_arg_hint), None)
+                if hint_comp:
+                    text = f"  {hint_comp.value} <{hint_comp.arg_hint}>"
+                    if hint_comp.description:
+                        text += f"  —  {hint_comp.description}"
+                    self._hint = text
+                break
 
     def _history_search(self, fd: int) -> None:
         from .tui import InlinePicker
@@ -741,9 +763,10 @@ class LineEditor:
         self._redraw()
 
         # Ask the completion engine what's available for this argument position.
-        # Filter out multi_select entries (flag pickers) — those aren't value completions.
+        # Filter out multi_select entries (flag pickers) and is_arg_hint entries
+        # (hint-only flags with no value completer) — only real value completions remain.
         raw_completions, prefix = self._get_completions(self._buf[: self._cursor])
-        completions = [c for c in raw_completions if not c.multi_select]
+        completions = [c for c in raw_completions if not c.multi_select and not c.is_arg_hint]
 
         end_char = self._prompt_len + len(self._buf)
         end_row = _pending_wrap_row(end_char, self._cols)

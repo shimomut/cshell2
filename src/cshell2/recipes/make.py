@@ -6,7 +6,7 @@ import os
 import re
 
 from ..commands import CommandRegistry
-from ..completion import Completer, Completion, CompletionContext, FileCompleter, OptionsCompleter
+from ..completion import Completer, Completion, CompletionContext, DirCompleter, FileCompleter, OptionsCompleter
 
 
 MAKE_OPTIONS: dict[str, str] = {
@@ -34,13 +34,13 @@ MAKE_OPTIONS: dict[str, str] = {
     "--warn-undefined-variables": "warn when an undefined variable is referenced",
 }
 
-MAKE_ARGS: dict[str, str] = {
-    "-C": "DIR",
-    "-f": "FILE",
+MAKE_ARGS = {
+    "-C": ("DIR", DirCompleter()),
+    "-f": ("FILE", FileCompleter()),
     "-j": "N",
     "-l": "N",
-    "-o": "FILE",
-    "-W": "FILE",
+    "-o": ("FILE", FileCompleter()),
+    "-W": ("FILE", FileCompleter()),
 }
 
 

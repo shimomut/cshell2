@@ -44,6 +44,38 @@ class Completer(ABC):
         return True
 
 
+class DirCompleter(Completer):
+    """Completes directory paths only (no files)."""
+
+    def complete(self, ctx: CompletionContext) -> list[Completion]:
+        prefix = ctx.prefix
+        if prefix:
+            expanded = os.path.expanduser(prefix)
+            directory = os.path.dirname(expanded) or "."
+            partial = os.path.basename(expanded)
+        else:
+            directory = "."
+            partial = ""
+        try:
+            entries = os.listdir(directory)
+        except OSError:
+            return []
+        result = []
+        for entry in sorted(entries):
+            if entry.startswith(".") and not partial.startswith("."):
+                continue
+            if entry.lower().startswith(partial.lower()):
+                full_path = os.path.join(directory, entry)
+                if os.path.isdir(full_path):
+                    display_path = (
+                        os.path.join(os.path.dirname(prefix), entry)
+                        if prefix and os.path.dirname(prefix)
+                        else entry
+                    )
+                    result.append(Completion(value=display_path + "/", display=entry + "/"))
+        return result
+
+
 class FileCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         prefix = ctx.prefix
@@ -148,9 +180,23 @@ class OptionsCompleter(Completer):
         })
     """
 
-    def __init__(self, options: dict[str, str], args: dict[str, str] | None = None):
+    def __init__(
+        self,
+        options: dict[str, str],
+        args: dict[str, str | tuple[str, Completer]] | None = None,
+    ):
         self.options = options
-        self.args = args or {}  # maps flag → argument hint, e.g. {"-d": "N", "--max-depth": "N"}
+        # args values may be a plain hint string ("N") or a (hint, value_completer)
+        # tuple when a specific completer should be used for that flag's value.
+        self.args: dict[str, str] = {}
+        self._value_completers: dict[str, Completer] = {}
+        for flag, spec in (args or {}).items():
+            if isinstance(spec, tuple):
+                hint, vc = spec
+                self.args[flag] = hint
+                self._value_completers[flag] = vc
+            else:
+                self.args[flag] = spec
 
     def should_activate(self, ctx: CompletionContext) -> bool:
         return ctx.prefix.startswith("-")
@@ -176,11 +222,12 @@ class OptionsCompleter(Completer):
 
     def get_preceding_flag_hint(
         self, ctx: CompletionContext
-    ) -> tuple[str, str, str] | None:
-        """Return (flag, hint, description) if the last completed arg is a value-taking flag.
+    ) -> tuple[str, str, str, Completer | None] | None:
+        """Return (flag, hint, description, value_completer) if the last completed arg is a value-taking flag.
 
-        E.g. for ``du -d <TAB>``, returns ``("-d", "N", "print the total...")``.
-        Returns None when the preceding arg is not a known value-taking flag.
+        ``value_completer`` is a :class:`Completer` when the flag has a registered
+        value completer (e.g. ``"-C": ("DIR", DirCompleter())``), otherwise ``None``.
+        Returns ``None`` entirely when the preceding arg is not a known value-taking flag.
         """
         if not ctx.args:
             return None
@@ -191,7 +238,8 @@ class OptionsCompleter(Completer):
         if not hint:
             return None
         description = self.options.get(last_arg, "")
-        return (last_arg, hint, description)
+        value_completer = self._value_completers.get(last_arg)
+        return (last_arg, hint, description, value_completer)
 
     def _used_flags(self, ctx: CompletionContext) -> set[str]:
         """Return the set of option flags already present in ctx.args."""

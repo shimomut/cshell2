@@ -134,7 +134,11 @@ class Shell:
                     and hasattr(options_completer, "get_preceding_flag_hint")):
                 hint_info = options_completer.get_preceding_flag_hint(ctx)
                 if hint_info:
-                    flag, arg_hint, description = hint_info
+                    flag, arg_hint, description, value_completer = hint_info
+                    if value_completer:
+                        # Flag has a dedicated value completer (e.g. -C DIR → DirCompleter).
+                        return value_completer.complete(ctx), ctx.prefix
+                    # No value completer: suppress file fallback and show an inline hint.
                     return [Completion(
                         value=flag,
                         display=f"<{arg_hint}>",
