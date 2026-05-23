@@ -205,11 +205,16 @@ class OptionsCompleter(Completer):
         prefix = ctx.prefix
         used = self._used_flags(ctx)
         result = []
-        for flag, desc in sorted(self.options.items()):
+        # Iterate the union of options and args so that value-taking flags
+        # registered only in `args` (without a description in `options`) are
+        # still shown as completions.
+        all_flags = sorted(set(self.options) | set(self.args))
+        for flag in all_flags:
             if not flag.startswith(prefix):
                 continue
             if flag in used:
                 continue
+            desc = self.options.get(flag, "")
             arg_hint = self.args.get(flag, "")
             result.append(Completion(
                 value=flag,

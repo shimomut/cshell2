@@ -6,6 +6,7 @@ from cshell2.completion import (
     CompletionContext,
     ConditionalCompleter,
     FileCompleter,
+    OptionsCompleter,
 )
 from cshell2.context import Context
 
@@ -67,6 +68,33 @@ def test_conditional_completer():
     results = c.complete(make_ctx(prefix="", args=["staging"]))
     assert len(results) == 1
     assert results[0].value == "eu-west-1"
+
+
+def test_options_completer_shows_value_taking_flags():
+    """Flags registered only in `args` (not in `options`) must still appear."""
+    c = OptionsCompleter(
+        {"-n": "dry run", "-v": "verbose"},
+        args={
+            "-t": ("SECONDS", ChoiceCompleter(["30", "60"])),
+            "-b": "BRANCH",
+        },
+    )
+    results = c.complete(make_ctx(prefix="-"))
+    values = [r.value for r in results]
+    # Boolean flags
+    assert "-n" in values
+    assert "-v" in values
+    # Value-taking flags must also be present
+    assert "-t" in values, "-t (args-only flag) missing from completions"
+    assert "-b" in values, "-b (args-only flag) missing from completions"
+    # arg_hints are set correctly
+    t = next(r for r in results if r.value == "-t")
+    assert t.arg_hint == "SECONDS"
+    b = next(r for r in results if r.value == "-b")
+    assert b.arg_hint == "BRANCH"
+    # Value-taking flags are not combinable
+    assert not t.combinable
+    assert not b.combinable
 
 
 def test_completer_receives_shell_context():

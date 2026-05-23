@@ -31,10 +31,10 @@ _DEFAULT_CONFIG = """\
 # cshell2 user configuration
 # Define custom commands and completers here.
 #
-# Example:
+# ── Simple example: one positional argument ───────────────────────────────────
 #
 # from cshell2.commands import registry
-# from cshell2.completion import Completer, Completion, ChoiceCompleter
+# from cshell2.completion import ChoiceCompleter
 #
 # @registry.command(
 #     name="hello",
@@ -44,12 +44,115 @@ _DEFAULT_CONFIG = """\
 #     '''Greet someone by name.'''
 #     print(f"Hello, {name}!")
 #
-# Enable completion recipes for external commands:
+#
+# ── Complex example: multiple positional args, flags with/without values, ─────
+# ── and a long-running task that supports Ctrl+] context switching mid-run ────
+#
+# from cshell2.commands import registry
+# from cshell2.completion import ChoiceCompleter, OptionsCompleter
+# import time
+#
+# @registry.command(
+#     name="deploy",
+#     completers={
+#         # None key → flag/option completer; activates whenever the user types "-..."
+#         None: OptionsCompleter(
+#             {
+#                 # Boolean flags (no value)
+#                 "-n": "dry run — show steps, skip execution",
+#                 "-v": "verbose — print details for each step",
+#             },
+#             args={
+#                 # Value-taking flags: value is "METAVAR" or ("METAVAR", completer).
+#                 "-t": ("SECONDS", ChoiceCompleter(["30", "60", "120", "300"])),
+#                 "-b": "BRANCH",   # no completer — user types the branch name
+#             },
+#         ),
+#         # Positional completers keyed by argument index (0-based, after command name).
+#         0: ChoiceCompleter(["prod", "staging", "dev"]),
+#         1: ChoiceCompleter(["api", "web", "worker"]),
+#     },
+# )
+# def deploy(*args):
+#     '''Deploy a service to an environment.
+#
+#     Usage: deploy <environment> [service] [-n] [-v] [-t SECONDS] [-b BRANCH]
+#
+#     This is a long-running command. While it executes, press Ctrl+] to open
+#     the context picker and switch to (or create) another context without
+#     interrupting the deployment. Switch back to this context at any time to
+#     resume watching its output.
+#     '''
+#     import time
+#
+#     # All tokens (positional args AND flags) arrive flat in *args.
+#     # Parse them manually: collect positional args and handle flags.
+#     env     = None
+#     service = "all"
+#     dry_run = False
+#     verbose = False
+#     timeout = 60
+#     branch  = "main"
+#     positional = []
+#     i = 0
+#     while i < len(args):
+#         token = args[i]
+#         if token in ("-n", "--dry-run"):
+#             dry_run = True
+#         elif token in ("-v", "--verbose"):
+#             verbose = True
+#         elif token in ("-t", "--timeout"):
+#             i += 1
+#             if i < len(args):
+#                 try:
+#                     timeout = int(args[i])
+#                 except ValueError:
+#                     print(f"deploy: --timeout expects an integer, got '{args[i]}'")
+#                     return
+#         elif token in ("-b", "--branch"):
+#             i += 1
+#             if i < len(args):
+#                 branch = args[i]
+#         elif token.startswith("-"):
+#             print(f"deploy: unknown option '{token}'")
+#             return
+#         else:
+#             positional.append(token)
+#         i += 1
+#
+#     if not positional:
+#         print("deploy: usage: deploy <environment> [service] [options]")
+#         return
+#     env = positional[0]
+#     if len(positional) > 1:
+#         service = positional[1]
+#
+#     prefix = "[DRY RUN] " if dry_run else ""
+#     print(f"{prefix}Deploying '{service}' to '{env}'  branch={branch!r}  timeout={timeout}s")
+#
+#     steps = [
+#         ("Build image",       2),
+#         ("Push to registry",  3),
+#         ("Update deployment", 2),
+#         ("Wait for rollout",  4),
+#         ("Health checks",     2),
+#     ]
+#     for step, secs in steps:
+#         if verbose:
+#             print(f"  -> {step} ...", flush=True)
+#         if not dry_run:
+#             time.sleep(secs)   # <- Ctrl+] here switches context without killing this
+#         print(f"  ok {step}")
+#     print(f"{prefix}Done.")
+#
+#
+# ── Enable completion recipes for external commands ───────────────────────────
 #
 # from cshell2.recipes import enable
-# enable("make")
+# enable("make", "git")
 #
-# Customize the prompt:
+#
+# ── Customize the prompt ──────────────────────────────────────────────────────
 #
 # import os
 # from cshell2 import set_prompt
