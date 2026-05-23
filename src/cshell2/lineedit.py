@@ -688,37 +688,127 @@ class LineEditor:
         self._cursor = len(pre) + len(value)
 
     def _prompt_for_arg(self, opt: Completion) -> bool:
-        """Show an inline prompt for opt's argument, insert the value, return False if cancelled."""
-        from .tui import InlineArgPrompt
+        """Show an inline prompt for opt's argument, insert the value, return False if cancelled.
+
+        If the completion engine returns candidates for the current buffer state
+        (i.e. a completer is registered for the flag's value), an InlinePicker is
+        shown instead of the plain InlineArgPrompt text input.
+        """
+        from .tui import InlineArgPrompt, InlinePicker
 
         self._redraw()
 
-        # Navigate from the caret to one line below the end of the buffer.
+        # Ask the completion engine what's available for this argument position.
+        # Filter out multi_select entries (flag pickers) — those aren't value completions.
+        raw_completions, prefix = self._get_completions(self._buf[: self._cursor])
+        completions = [c for c in raw_completions if not c.multi_select]
+
         end_char = self._prompt_len + len(self._buf)
         end_row = _pending_wrap_row(end_char, self._cols)
         end_col = _pending_wrap_col(end_char, self._cols)
         caret_row = self._cursor_row  # updated by _redraw()
 
-        rows_to_end = end_row - caret_row
-        if rows_to_end > 0:
-            sys.stdout.write(f"\033[{rows_to_end}B")
-        sys.stdout.write("\r")
-        if end_col > 0:
-            sys.stdout.write(f"\033[{end_col}C")
-        sys.stdout.write("\n")
-        sys.stdout.flush()
+        if not completions:
+            # ── free-text fallback: InlineArgPrompt (original behaviour) ──────
+            rows_to_end = end_row - caret_row
+            if rows_to_end > 0:
+                sys.stdout.write(f"\033[{rows_to_end}B")
+            sys.stdout.write("\r")
+            if end_col > 0:
+                sys.stdout.write(f"\033[{end_col}C")
+            sys.stdout.write("\n")
+            sys.stdout.flush()
 
-        arg_prompt = InlineArgPrompt(label=f"{opt.value} <{opt.arg_hint}>", description=opt.description)
-        value = arg_prompt.run()
+            arg_prompt = InlineArgPrompt(
+                label=f"{opt.value} <{opt.arg_hint}>",
+                description=opt.description,
+            )
+            value = arg_prompt.run()
 
-        # InlineArgPrompt._cleanup() left the cursor at anchor (col 0 of the prompt
-        # line, which is end_row + 1 below render-top). Move back to caret_row.
-        sys.stdout.write(f"\033[{end_row + 1 - caret_row}A")
-        sys.stdout.flush()
+            # InlineArgPrompt._cleanup() left the cursor at anchor (col 0 of the
+            # prompt line, end_row + 1 below render-top). Move back to caret_row.
+            sys.stdout.write(f"\033[{end_row + 1 - caret_row}A")
+            sys.stdout.flush()
 
-        if value is None:
-            return False
+            if value is None:
+                return False
+            self._buf = self._buf[: self._cursor] + value + self._buf[self._cursor :]
+            self._cursor += len(value)
+            return True
 
-        self._buf = self._buf[: self._cursor] + value + self._buf[self._cursor :]
-        self._cursor += len(value)
-        return True
+        # ── picker path: completions are available for the flag value ──────────
+        # Loop mirrors _complete()'s while-True structure to handle tab-extend
+        # (picker.reopen) and backspace (picker.apply_backspace).
+        while True:
+            caret_char = self._prompt_len + self._cursor
+            caret_col = _pending_wrap_col(caret_char, self._cols)
+            caret_row = _pending_wrap_row(caret_char, self._cols)
+            end_char = self._prompt_len + len(self._buf)
+            end_row = _pending_wrap_row(end_char, self._cols)
+            rows_above = end_row - caret_row + 1
+            display_offset = _display_col_offset(prefix, completions)
+            col = caret_col - display_offset
+
+            # Move cursor to the end of the buffer content, then one line below.
+            chars_from_end = len(self._buf) - self._cursor
+            if chars_from_end > 0:
+                sys.stdout.write(f"\033[{chars_from_end}C")
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+            buf_at_open = self._buf[: self._cursor]
+            caret_char_at_open = caret_char
+
+            def refresh(typed: str) -> tuple[list[Completion], int]:
+                new_raw, new_prefix = self._get_completions(buf_at_open + typed)
+                new_completions = [c for c in new_raw if not c.multi_select]
+                new_caret_col = _pending_wrap_col(
+                    caret_char_at_open + len(typed), self._cols
+                )
+                new_col = new_caret_col - _display_col_offset(new_prefix, new_completions)
+                return new_completions, new_col
+
+            picker = InlinePicker(
+                completions,
+                display_fn=lambda c: c.display or c.value,
+                meta_fn=lambda c: c.description,
+                max_height=10,
+                col=col,
+                initial_offset=display_offset,
+                rows_above=rows_above,
+                refresh_fn=refresh,
+                value_fn=lambda c: c.value,
+                completion_prefix=prefix,
+            )
+            selected = picker.run()
+
+            # Picker cleanup left cursor at col 0 of (end_row + 1).
+            # Go back up to where the caret was before the picker opened.
+            sys.stdout.write(f"\033[{rows_above}A")
+            sys.stdout.flush()
+
+            if picker.reopen:
+                # TAB was pressed inside the picker: extend the typed chars into
+                # the buffer and reopen with a refreshed completion list.
+                typed = picker._typed
+                self._buf = self._buf[: self._cursor] + typed + self._buf[self._cursor :]
+                self._cursor += len(typed)
+                completions, prefix = self._get_completions(self._buf[: self._cursor])
+                completions = [c for c in completions if not c.multi_select]
+                if not completions:
+                    return True  # typed chars committed; no further completions
+                continue
+
+            if picker.apply_backspace:
+                # Backspace with nothing typed: remove the trailing space the flag
+                # inserted and let the user continue editing freely.
+                if self._cursor > 0:
+                    self._buf = self._buf[: self._cursor - 1] + self._buf[self._cursor :]
+                    self._cursor -= 1
+                return True
+
+            if selected is None:
+                return False
+
+            self._apply(selected, prefix)
+            return True

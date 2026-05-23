@@ -385,9 +385,13 @@ class AwsArgCompleter(Completer):
     _s3_path = S3PathCompleter()
 
     def complete(self, ctx: CompletionContext) -> list[Completion]:
-        # Priority 1: complete the *value* of a value-taking flag.
-        if ctx.args and ctx.args[-1] in _FLAG_VALUE_COMPLETERS:
-            return _FLAG_VALUE_COMPLETERS[ctx.args[-1]].complete(ctx)
+        # Priority 1: complete the *value* of a value-taking global flag.
+        # Flags with a specific completer (--region, --profile) get one;
+        # flags without (--endpoint-url, --output, --color) return nothing so
+        # InlineArgPrompt is used for free-text entry instead.
+        if ctx.args and ctx.args[-1] in _GLOBAL_VALUE_FLAGS:
+            completer = _FLAG_VALUE_COMPLETERS.get(ctx.args[-1])
+            return completer.complete(ctx) if completer else []
 
         # Strip flag+value pairs to get the "logical" positional args.
         positionals = _positional_args(ctx.args)

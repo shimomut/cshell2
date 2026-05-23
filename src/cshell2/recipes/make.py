@@ -6,7 +6,7 @@ import os
 import re
 
 from ..commands import CommandRegistry
-from ..completion import Completer, Completion, CompletionContext, OptionsCompleter
+from ..completion import Completer, Completion, CompletionContext, FileCompleter, OptionsCompleter
 
 
 MAKE_OPTIONS: dict[str, str] = {
@@ -44,17 +44,70 @@ MAKE_ARGS: dict[str, str] = {
 }
 
 
+def _complete_dirs(ctx: CompletionContext) -> list[Completion]:
+    """Return only directory completions (for -C <dir> argument)."""
+    prefix = ctx.prefix
+    if prefix:
+        expanded = os.path.expanduser(prefix)
+        directory = os.path.dirname(expanded) or "."
+        partial = os.path.basename(expanded)
+    else:
+        directory = "."
+        partial = ""
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return []
+    result = []
+    for entry in sorted(entries):
+        if entry.startswith(".") and not partial.startswith("."):
+            continue
+        if entry.lower().startswith(partial.lower()):
+            full_path = os.path.join(directory, entry)
+            if os.path.isdir(full_path):
+                display = (
+                    os.path.join(os.path.dirname(prefix), entry)
+                    if prefix and os.path.dirname(prefix)
+                    else entry
+                )
+                result.append(Completion(value=display + "/", display=entry + "/"))
+    return result
+
+
+def _find_dash_c_dir(args: list[str]) -> str | None:
+    """Return the directory passed via -C in args, or None."""
+    for i, arg in enumerate(args):
+        if arg == "-C" and i + 1 < len(args):
+            return args[i + 1]
+    return None
+
+
 class MakeTargetCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
-        targets = self._parse_targets()
+        # If the immediately preceding arg is a flag that takes an argument,
+        # delegate to the appropriate completer instead of showing targets.
+        if ctx.args:
+            prev = ctx.args[-1]
+            hint = MAKE_ARGS.get(prev)
+            if hint == "DIR":
+                return _complete_dirs(ctx)
+            elif hint == "FILE":
+                return FileCompleter().complete(ctx)
+            elif hint is not None:
+                # Numeric argument (e.g. -j N, -l N) — no useful completions.
+                return []
+
+        # Find -C <dir> anywhere in the preceding args so we look in the right place.
+        makefile_dir = _find_dash_c_dir(ctx.args)
+        targets = self._parse_targets(makefile_dir)
         return [
             Completion(value=t)
             for t in targets
             if t.startswith(ctx.prefix)
         ]
 
-    def _parse_targets(self) -> list[str]:
-        makefile = self._find_makefile()
+    def _parse_targets(self, directory: str | None = None) -> list[str]:
+        makefile = self._find_makefile(directory)
         if not makefile:
             return []
         try:
@@ -69,17 +122,21 @@ class MakeTargetCompleter(Completer):
                 targets.append(m.group(1))
         return sorted(set(targets))
 
-    def _find_makefile(self) -> str | None:
+    def _find_makefile(self, directory: str | None = None) -> str | None:
+        base = directory or "."
         for name in ("Makefile", "makefile", "GNUmakefile"):
-            if os.path.isfile(name):
-                return name
+            path = os.path.join(base, name)
+            if os.path.isfile(path):
+                return path
         return None
 
 
 def register(registry: CommandRegistry) -> None:
+    # Register at enough positions to handle several flag+value pairs before
+    # the target name (each pair uses 2 slots: flag + value).
+    # Positions 0–7 covers up to 4 flag+value pairs.
+    target_completer = MakeTargetCompleter()
     registry.register_external_completers("make", {
         None: OptionsCompleter(MAKE_OPTIONS, args=MAKE_ARGS),
-        0: MakeTargetCompleter(),
-        1: MakeTargetCompleter(),
-        2: MakeTargetCompleter(),
+        **{i: target_completer for i in range(8)},
     })
