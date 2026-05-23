@@ -612,14 +612,17 @@ class LineEditor:
         self._buf = pre + bool_str + post
         self._cursor = len(pre) + len(bool_str)
 
-        # For each arg-taking option, insert the flag then prompt for its value.
+        # For each arg-taking option, insert the flag and show a hint.
+        # Only the last one's hint is visible; the user fills in values one at a time.
         for opt in arg_sel:
             sep = " " if self._cursor > 0 and self._buf[self._cursor - 1] != " " else ""
             ins = f"{sep}{opt.value} "
             self._buf = self._buf[: self._cursor] + ins + self._buf[self._cursor :]
             self._cursor += len(ins)
-            if not self._prompt_for_arg(opt):
-                break
+            text = f"  {opt.value} <{opt.arg_hint}>"
+            if opt.description:
+                text += f"  —  {opt.description}"
+            self._hint = text
 
     def _history_search(self, fd: int) -> None:
         from .tui import InlinePicker
