@@ -136,6 +136,7 @@ class LineEditor:
         # cursor stays at the same row (clamped column). Detect it so we
         # re-render explicitly instead of relying on terminal reflow.
         self._terminal_reflows = os.environ.get("TERM_PROGRAM", "") != "vscode"
+        self._hint: str = ""  # transient hint shown after TAB; cleared on next keypress
 
     def prompt(self) -> str:
         self._buf = ""
@@ -217,13 +218,23 @@ class LineEditor:
         # Compute cursor position within the render for next resize.
         self._cursor_row = _pending_wrap_row(cursor_char, cols)
 
-        # Navigate from end of content back to where the cursor belongs.
+        # After writing the buffer the cursor is at the end of content.
         end_row = _pending_wrap_row(total_char, cols)
-        rows_up = end_row - self._cursor_row
-        if rows_up > 0:
-            sys.stdout.write(f"\033[{rows_up}A")
+
+        if self._hint:
+            # Append the hint on the line below the buffer (starting at col 0).
+            sys.stdout.write(f"\n\r\033[2m{self._hint}\033[0m")
+            # Move back up to the caret row.
+            rows_up = end_row + 1 - self._cursor_row
+            sys.stdout.write(f"\r\033[{rows_up}A")
+        else:
+            # Navigate from end of content back to where the cursor belongs.
+            rows_up = end_row - self._cursor_row
+            if rows_up > 0:
+                sys.stdout.write(f"\033[{rows_up}A")
+            sys.stdout.write("\r")
+
         cursor_col = _pending_wrap_col(cursor_char, cols)
-        sys.stdout.write("\r")
         if cursor_col > 0:
             sys.stdout.write(f"\033[{cursor_col}C")
 
@@ -241,6 +252,7 @@ class LineEditor:
 
     def _handle_key(self, key: bytes, fd: int) -> str | None:
         """Return a result string to finish, or None to keep editing."""
+        self._hint = ""  # any keypress dismisses the hint; TAB may re-set it
 
         # Enter
         if key in (b"\r", b"\n"):
@@ -451,6 +463,30 @@ class LineEditor:
             completions, prefix = self._get_completions(self._buf[: self._cursor])
 
             if not completions:
+                return
+
+            # Arg-hint: the preceding flag needs a typed value (e.g. "-d N").
+            # Show an informational hint below the buffer without opening a
+            # picker or modifying the buffer — cleared by the next _redraw().
+            if len(completions) == 1 and completions[0].is_arg_hint:
+                hint = completions[0]
+                text = f"  {hint.value} <{hint.arg_hint}>"
+                if hint.description:
+                    text += f"  —  {hint.description}"
+                self._hint = text  # rendered by _redraw(); cleared on next keypress
+                return
+
+            # Single value-taking option: auto-apply and show hint, same as
+            # when the user typed the flag manually and pressed TAB after a space.
+            if (len(completions) == 1
+                    and completions[0].multi_select
+                    and completions[0].arg_hint):
+                comp = completions[0]
+                self._apply(comp, prefix)
+                text = f"  {comp.value} <{comp.arg_hint}>"
+                if comp.description:
+                    text += f"  —  {comp.description}"
+                self._hint = text
                 return
 
             if len(completions) == 1:
@@ -667,6 +703,9 @@ class LineEditor:
             else:
                 i += 1
         return last_start
+
+
+        sys.stdout.flush()
 
     def _apply(self, completion: Completion, prefix: str) -> None:  # noqa: ARG002
         # Find where the raw token starts in the buffer.  We cannot use

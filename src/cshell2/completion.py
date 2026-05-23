@@ -28,6 +28,7 @@ class Completion:
     multi_select: bool = False
     combinable: bool = False  # True for single-char flags that can be merged (-a -l → -al)
     arg_hint: str = ""        # non-empty when the flag requires a following argument (e.g. "N")
+    is_arg_hint: bool = False  # True when this completion IS the hint for a preceding flag's value
 
     def __post_init__(self):
         if not self.display:
@@ -172,6 +173,25 @@ class OptionsCompleter(Completer):
                 arg_hint=arg_hint,
             ))
         return result
+
+    def get_preceding_flag_hint(
+        self, ctx: CompletionContext
+    ) -> tuple[str, str, str] | None:
+        """Return (flag, hint, description) if the last completed arg is a value-taking flag.
+
+        E.g. for ``du -d <TAB>``, returns ``("-d", "N", "print the total...")``.
+        Returns None when the preceding arg is not a known value-taking flag.
+        """
+        if not ctx.args:
+            return None
+        last_arg = ctx.args[-1]
+        if not last_arg.startswith("-"):
+            return None
+        hint = self.args.get(last_arg)
+        if not hint:
+            return None
+        description = self.options.get(last_arg, "")
+        return (last_arg, hint, description)
 
     def _used_flags(self, ctx: CompletionContext) -> set[str]:
         """Return the set of option flags already present in ctx.args."""

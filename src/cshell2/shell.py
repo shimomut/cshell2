@@ -126,6 +126,23 @@ class Shell:
             options_completer = completers_dict.get(None)
             positional_completer = completers_dict.get(arg_index)
 
+            # When the last arg is a value-taking flag (e.g. "du -d <TAB>"),
+            # suppress positional/file completion and return a hint instead.
+            # Skip when the user is already typing another flag (prefix starts
+            # with "-") — they should see the options picker, not the hint.
+            if (options_completer and ctx.args and not ctx.prefix.startswith("-")
+                    and hasattr(options_completer, "get_preceding_flag_hint")):
+                hint_info = options_completer.get_preceding_flag_hint(ctx)
+                if hint_info:
+                    flag, arg_hint, description = hint_info
+                    return [Completion(
+                        value=flag,
+                        display=f"<{arg_hint}>",
+                        description=description,
+                        arg_hint=arg_hint,
+                        is_arg_hint=True,
+                    )], ctx.prefix
+
             # Options completer takes priority when typing a "-"-prefixed token.
             if options_completer and ctx.prefix.startswith("-"):
                 has_completer = True
