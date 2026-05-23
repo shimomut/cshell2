@@ -75,7 +75,7 @@ class Var(ABC):
         ...
 
     def unset(self) -> None:
-        """Remove the variable (called by ``unset NAME``).
+        """Remove the variable (called by ``var NAME=``).
 
         Default implementation removes every key returned by :attr:`env_keys`
         from ``os.environ``.  Override for custom teardown logic.

@@ -212,7 +212,12 @@ class Shell:
 
         @self.registry.command(name="var", completers={0: VarCompleter()})
         def var_cmd(*args):
-            """Set or list context variables: var NAME=VALUE [NAME=VALUE ...]
+            """Set, unset, or list context variables.
+
+            var                  - list all registered vars and env vars
+            var NAME             - print current value of NAME
+            var NAME=VALUE       - set NAME to VALUE
+            var NAME=            - unset NAME (remove from env / context)
 
             NAME may be a registered Python-backed variable (e.g. 'aws_region')
             or a plain environment variable name.  Registered variables handle
@@ -235,7 +240,10 @@ class Shell:
             for arg in args:
                 if "=" in arg:
                     key, _, value = arg.partition("=")
-                    self._set_variable(key, value)
+                    if value == "":
+                        self._unset_variable(key)
+                    else:
+                        self._set_variable(key, value)
                 elif var_registry.get(arg) is not None:
                     # 'var NAME' with no '=' → print current value of Python-backed var
                     v = var_registry.get(arg)
@@ -245,22 +253,7 @@ class Shell:
                     # 'var NAME' for a plain env var → print its value
                     print(f"{arg}={os.environ[arg]}")
                 else:
-                    print(f"var: invalid argument '{arg}' (expected NAME=VALUE)")
-
-        @self.registry.command(name="unset")
-        def unset_cmd(*args):
-            """Unset context variables: unset NAME [NAME ...]"""
-            if not args:
-                print("Usage: unset NAME [NAME ...]")
-                return
-            for key in args:
-                py_var = var_registry.get(key)
-                if py_var is not None:
-                    py_var.unset()
-                    for env_key in py_var.env_keys:
-                        self.context_manager.unset_variable(env_key)
-                else:
-                    self.context_manager.unset_variable(key)
+                    print(f"var: invalid argument '{arg}' (expected NAME=VALUE or NAME= to unset)")
 
         @self.registry.command(
             name="help",
@@ -427,6 +420,16 @@ class Shell:
                 print(f"Error loading config: {e}", file=sys.stderr)
 
     _ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)")
+
+    def _unset_variable(self, key: str) -> None:
+        """Remove a variable via var_registry, or fall back to plain os.environ / context removal."""
+        py_var = var_registry.get(key)
+        if py_var is not None:
+            py_var.unset()
+            for env_key in py_var.env_keys:
+                self.context_manager.unset_variable(env_key)
+        else:
+            self.context_manager.unset_variable(key)
 
     def _set_variable(self, key: str, value: str) -> None:
         """Dispatch a KEY=VALUE assignment through var_registry, or fall back to plain os.environ.
