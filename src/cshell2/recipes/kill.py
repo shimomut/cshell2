@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 
-from ..commands import CommandRegistry
+from ..commands import registry
 from ..completion import Completer, Completion, CompletionContext, OptionsCompleter
 
 KILL_OPTIONS: dict[str, str] = {
@@ -78,7 +78,7 @@ class ProcessNameCompleter(Completer):
         return sorted(completions, key=lambda c: c.value)
 
 
-def register(registry: CommandRegistry) -> None:
+def register() -> None:
     registry.register_external_completers("kill", {
         None: OptionsCompleter(KILL_OPTIONS),
         0: ProcessCompleter(),

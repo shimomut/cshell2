@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 
-from ..commands import CommandRegistry
+from ..commands import registry
 from ..completion import Completer, Completion, CompletionContext, DirCompleter, FileCompleter, OptionsCompleter
 
 
@@ -131,7 +131,7 @@ class MakeTargetCompleter(Completer):
         return None
 
 
-def register(registry: CommandRegistry) -> None:
+def register() -> None:
     # Register at enough positions to handle several flag+value pairs before
     # the target name (each pair uses 2 slots: flag + value).
     # Positions 0–7 covers up to 4 flag+value pairs.

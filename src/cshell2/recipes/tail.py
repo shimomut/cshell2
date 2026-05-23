@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..commands import CommandRegistry
+from ..commands import registry
 from ..completion import FileCompleter, OptionsCompleter
 
 TAIL_OPTIONS: dict[str, str] = {
@@ -21,7 +21,7 @@ TAIL_ARGS: dict[str, str] = {
 }
 
 
-def register(registry: CommandRegistry) -> None:
+def register() -> None:
     registry.register_external_completers("tail", {
         None: OptionsCompleter(TAIL_OPTIONS, args=TAIL_ARGS),
         0: FileCompleter(),

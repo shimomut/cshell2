@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..commands import CommandRegistry
+from ..commands import registry
 from ..completion import FileCompleter, OptionsCompleter
 
 GREP_OPTIONS: dict[str, str] = {
@@ -50,7 +50,7 @@ GREP_ARGS: dict[str, str] = {
 }
 
 
-def register(registry: CommandRegistry) -> None:
+def register() -> None:
     completers = {
         None: OptionsCompleter(GREP_OPTIONS, args=GREP_ARGS),
         0: FileCompleter(),

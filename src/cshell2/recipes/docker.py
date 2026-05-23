@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import subprocess
 
-from ..commands import CommandRegistry
+from ..commands import registry
 from ..completion import Completer, Completion, CompletionContext, OptionsCompleter
 
 # Management command groups (docker <group> <subcmd>)
@@ -489,7 +489,7 @@ class DockerSubcommandOptionsCompleter(Completer):
         ]
 
 
-def register(registry: CommandRegistry) -> None:
+def register() -> None:
     registry.register_external_completers("docker", {
         None: DockerSubcommandOptionsCompleter(),
         0: DockerSubcommandCompleter(),

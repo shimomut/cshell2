@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..commands import CommandRegistry
+from ..commands import registry
 from ..completion import FileCompleter, OptionsCompleter
 
 DU_OPTIONS: dict[str, str] = {
@@ -39,7 +39,7 @@ DU_ARGS: dict[str, str] = {
 }
 
 
-def register(registry: CommandRegistry) -> None:
+def register() -> None:
     registry.register_external_completers("du", {
         None: OptionsCompleter(DU_OPTIONS, args=DU_ARGS),
         0: FileCompleter(),

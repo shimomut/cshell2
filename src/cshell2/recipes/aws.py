@@ -19,7 +19,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from ..commands import CommandRegistry
+from ..commands import registry
 from ..completion import Completer, Completion, CompletionContext, FileCompleter
 from ..variables import EnvVar, Var, var_registry
 
@@ -503,7 +503,7 @@ class AwsRegionVar(Var):
         return AwsRegionCompleter()
 
 
-def register(registry: CommandRegistry) -> None:
+def register() -> None:
     # Register AwsArgCompleter at enough positions to handle several global
     # flag+value pairs before the service name (each pair uses 2 slots).
     # Positions 0–7 covers up to 4 global flag+value pairs before "s3".

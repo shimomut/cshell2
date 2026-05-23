@@ -27,11 +27,8 @@ from __future__ import annotations
 
 from importlib import import_module
 
-from ..commands import registry
-
-
 def enable(*recipe_names: str) -> None:
     """Enable one or more completion recipes by name."""
     for name in recipe_names:
         module = import_module(f".{name}", package=__package__)
-        module.register(registry)
+        module.register()

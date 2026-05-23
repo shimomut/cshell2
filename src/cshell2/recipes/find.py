@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..commands import CommandRegistry
+from ..commands import registry
 from ..completion import FileCompleter, OptionsCompleter
 
 FIND_OPTIONS: dict[str, str] = {
@@ -76,7 +76,7 @@ FIND_ARGS: dict[str, str] = {
 }
 
 
-def register(registry: CommandRegistry) -> None:
+def register() -> None:
     registry.register_external_completers("find", {
         None: OptionsCompleter(FIND_OPTIONS, args=FIND_ARGS),
         0: FileCompleter(),

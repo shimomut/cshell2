@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..commands import CommandRegistry
+from ..commands import registry
 from ..completion import FileCompleter, OptionsCompleter
 
 LS_OPTIONS: dict[str, str] = {
@@ -37,7 +37,7 @@ LS_OPTIONS: dict[str, str] = {
 }
 
 
-def register(registry: CommandRegistry) -> None:
+def register() -> None:
     registry.register_external_completers("ls", {
         None: OptionsCompleter(LS_OPTIONS),
         0: FileCompleter(),

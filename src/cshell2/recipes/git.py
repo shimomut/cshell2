@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 
-from ..commands import CommandRegistry
+from ..commands import registry
 from ..completion import Completer, Completion, CompletionContext, FileCompleter, OptionsCompleter
 
 GIT_SUBCOMMANDS: dict[str, str] = {
@@ -287,7 +287,7 @@ class GitSubcommandOptionsCompleter(Completer):
         ]
 
 
-def register(registry: CommandRegistry) -> None:
+def register() -> None:
     registry.register_external_completers("git", {
         None: GitSubcommandOptionsCompleter(),
         0: GitSubcommandCompleter(),
