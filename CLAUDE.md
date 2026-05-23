@@ -21,6 +21,12 @@ A lightweight but powerful terminal shell environment implemented in Python.
 │  ├── External completer registration               │
 │  └── System command passthrough                    │
 ├─────────────────────────────────────────────────────┤
+│  Variable Registry (variables.py)                   │
+│  ├── Var ABC — Python-backed shell variables       │
+│  ├── VarRegistry + var_registry singleton          │
+│  ├── EnvVar / MultiEnvVar convenience subclasses   │
+│  └── VarCompleter — KEY=VALUE completion for var   │
+├─────────────────────────────────────────────────────┤
 │  Completion Engine (completion.py)                  │
 │  ├── Command name completion                       │
 │  ├── Argument completion (per-command completers)  │
@@ -94,6 +100,135 @@ Dispatch order:
 1. Built-in commands (cd, exit, reload, var, unset, help, context)
 2. Registered Python function commands
 3. System commands (via PTY subprocess)
+
+### variables.py — Variable Registry
+
+Python-backed shell variables that mirror the `CommandRegistry` pattern. Users subclass `Var` and register instances with `var_registry`; the built-in `var` command dispatches through the registry instead of writing directly to `os.environ`.
+
+#### `Var` ABC
+
+```python
+class Var(ABC):
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Logical name as seen in the shell (e.g. 'aws_region')."""
+        ...
+
+    @abstractmethod
+    def get(self) -> str | None:
+        """Return current display value (shown by 'var' with no args)."""
+        ...
+
+    @abstractmethod
+    def set(self, value: str) -> None:
+        """Called when the user runs 'var aws_region=us-east-1'."""
+        ...
+
+    @property
+    def value_completer(self) -> Completer | None:
+        """Optional completer for the value side of KEY=VALUE."""
+        return None
+
+    @property
+    def description(self) -> str:
+        return ""
+```
+
+#### Built-in Convenience Subclasses
+
+```python
+class EnvVar(Var):
+    """1-to-1 passthrough to a single os.environ key, with an optional completer."""
+    def __init__(self, name: str, env_var: str | None = None,
+                 completer: Completer | None = None, description: str = ""): ...
+
+class MultiEnvVar(Var):
+    """One logical name → multiple os.environ keys set simultaneously."""
+    def __init__(self, name: str, env_vars: list[str],
+                 completer: Completer | None = None, description: str = ""): ...
+```
+
+#### Registry
+
+```python
+var_registry = VarRegistry()   # module-level singleton, like `registry`
+
+# Methods:
+var_registry.register(var: Var) -> None
+var_registry.get(name: str) -> Var | None
+var_registry.all() -> list[Var]
+```
+
+#### `var` Command Dispatch
+
+When the user runs `var NAME=VALUE`, the `var` built-in checks `var_registry` first. If a `Var` is found for `NAME`, its `set()` method is called; otherwise the value is written directly to `os.environ` (legacy behaviour). Reading (`var NAME` with no `=`) calls `Var.get()`.
+
+```
+var                          → list all env vars + registered Vars with their get() values
+var aws_region               → print current value via AwsRegionVar.get()
+var aws_region=us-east-1     → dispatch to AwsRegionVar.set("us-east-1")
+var AWS_SESSION_TOKEN=abc    → plain os.environ set (no Var registered — fallback)
+```
+
+#### `VarCompleter` — `=`-Aware Completion for `var`
+
+Registered as the positional completer on the `var` command. It splits the current token at `=` to handle both phases:
+
+- Typing `var aws_<TAB>` → list registered `Var` names (with `=` appended)
+- Typing `var aws_region=<TAB>` → delegate to `AwsRegionVar.value_completer`
+- Typing `var aws_region=us-<TAB>` → narrow the value list by prefix
+
+The split is local to `VarCompleter`; the global tokenizer is not changed.
+
+#### Example: Custom `Var` Subclass
+
+```python
+class AwsRegionVar(Var):
+    name = "aws_region"
+    description = "AWS region — sets AWS_REGION + AWS_DEFAULT_REGION"
+
+    def get(self) -> str | None:
+        return os.environ.get("AWS_REGION")
+
+    def set(self, value: str) -> None:
+        os.environ["AWS_REGION"] = value
+        os.environ["AWS_DEFAULT_REGION"] = value
+
+    @property
+    def value_completer(self) -> Completer:
+        return ChoiceCompleter(["us-east-1", "us-west-2", "eu-west-1", "ap-northeast-1"])
+
+var_registry.register(AwsRegionVar())
+```
+
+Or with the convenience subclass:
+
+```python
+var_registry.register(MultiEnvVar(
+    name="aws_region",
+    env_vars=["AWS_REGION", "AWS_DEFAULT_REGION"],
+    completer=ChoiceCompleter(["us-east-1", "us-west-2", "eu-west-1", "ap-northeast-1"]),
+    description="AWS region",
+))
+```
+
+#### Recipe Integration
+
+Variable recipes follow the same `enable()` pattern as command completion recipes:
+
+```python
+# recipes/aws_vars.py
+def _enable():
+    var_registry.register(MultiEnvVar("aws_region", ["AWS_REGION", "AWS_DEFAULT_REGION"], ...))
+    var_registry.register(EnvVar("aws_profile", "AWS_PROFILE", CallbackCompleter(list_profiles)))
+```
+
+```python
+# ~/.cshell2/config.py
+from cshell2.recipes import enable
+enable("aws_vars")
+```
 
 ### completion.py — Completion Engine
 
@@ -388,6 +523,7 @@ cshell2/
 │       ├── __main__.py         # entry point
 │       ├── shell.py            # main loop, command dispatch, pipeline execution
 │       ├── commands.py         # command registry, @command decorator
+│       ├── variables.py        # Var ABC, VarRegistry, EnvVar, MultiEnvVar, VarCompleter
 │       ├── completion.py       # Completer ABC, CompletionContext, built-in completers
 │       ├── context.py          # Context, ContextManager, ContextState
 │       ├── history.py          # history storage and search
@@ -476,3 +612,5 @@ Python registered commands (`@registry.command`) in a pipeline or with redirects
 6. **Config as Python** — `config.py` is just Python that imports cshell2 APIs. No DSL to learn; full language power for defining completers with caching, API calls, etc. The `reload` command reloads the config without restarting the shell.
 
 7. **System command fallback** — anything not registered as a Python command is passed to the system shell via PTY, so cshell2 is a drop-in replacement for daily use.
+
+8. **Python-backed variables mirror the command registry pattern** — `Var` subclasses handle `get`/`set` logic, enabling one logical name (`aws_region`) to drive multiple `os.environ` keys simultaneously. The `var` command dispatches through `VarRegistry` before falling back to plain env writes, so the shell surface (`var KEY=VALUE`) is unchanged. `VarCompleter` handles `=`-split completion locally without touching the global tokenizer.
