@@ -504,13 +504,17 @@ class AwsRegionVar(Var):
 
 
 def register() -> None:
-    # Register AwsArgCompleter at enough positions to handle several global
-    # flag+value pairs before the service name (each pair uses 2 slots).
-    # Positions 0–7 covers up to 4 global flag+value pairs before "s3".
+    # _positional_index() in shell.py strips global flags and their values
+    # before looking up the positional completer, so the four slots here map
+    # directly to the four *actual* positional arguments:
+    #   0 → service (e.g. s3)
+    #   1 → subcommand (e.g. ls, cp)
+    #   2 → first path/URI argument
+    #   3 → second path/URI argument (cp, mv, sync take src + dst)
     arg_completer = AwsArgCompleter()
     registry.register_external_completers("aws", {
         None: AwsOptionsCompleter(),
-        **{i: arg_completer for i in range(8)},
+        **{i: arg_completer for i in range(4)},
     })
 
     var_registry.register(AwsRegionVar())

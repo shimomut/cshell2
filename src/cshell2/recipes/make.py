@@ -44,36 +44,6 @@ MAKE_ARGS = {
 }
 
 
-def _complete_dirs(ctx: CompletionContext) -> list[Completion]:
-    """Return only directory completions (for -C <dir> argument)."""
-    prefix = ctx.prefix
-    if prefix:
-        expanded = os.path.expanduser(prefix)
-        directory = os.path.dirname(expanded) or "."
-        partial = os.path.basename(expanded)
-    else:
-        directory = "."
-        partial = ""
-    try:
-        entries = os.listdir(directory)
-    except OSError:
-        return []
-    result = []
-    for entry in sorted(entries):
-        if entry.startswith(".") and not partial.startswith("."):
-            continue
-        if entry.lower().startswith(partial.lower()):
-            full_path = os.path.join(directory, entry)
-            if os.path.isdir(full_path):
-                display = (
-                    os.path.join(os.path.dirname(prefix), entry)
-                    if prefix and os.path.dirname(prefix)
-                    else entry
-                )
-                result.append(Completion(value=display + "/", display=entry + "/"))
-    return result
-
-
 def _find_dash_c_dir(args: list[str]) -> str | None:
     """Return the directory passed via -C in args, or None."""
     for i, arg in enumerate(args):
@@ -84,19 +54,6 @@ def _find_dash_c_dir(args: list[str]) -> str | None:
 
 class MakeTargetCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
-        # If the immediately preceding arg is a flag that takes an argument,
-        # delegate to the appropriate completer instead of showing targets.
-        if ctx.args:
-            prev = ctx.args[-1]
-            hint = MAKE_ARGS.get(prev)
-            if hint == "DIR":
-                return _complete_dirs(ctx)
-            elif hint == "FILE":
-                return FileCompleter().complete(ctx)
-            elif hint is not None:
-                # Numeric argument (e.g. -j N, -l N) — no useful completions.
-                return []
-
         # Find -C <dir> anywhere in the preceding args so we look in the right place.
         makefile_dir = _find_dash_c_dir(ctx.args)
         targets = self._parse_targets(makefile_dir)
@@ -132,11 +89,11 @@ class MakeTargetCompleter(Completer):
 
 
 def register() -> None:
-    # Register at enough positions to handle several flag+value pairs before
-    # the target name (each pair uses 2 slots: flag + value).
-    # Positions 0–7 covers up to 4 flag+value pairs.
+    # _positional_index() in shell.py strips flags and their values before
+    # looking up the positional completer, so positions 0–2 here refer to
+    # the 1st, 2nd, and 3rd *actual* targets — flags never inflate the index.
     target_completer = MakeTargetCompleter()
     registry.register_external_completers("make", {
         None: OptionsCompleter(MAKE_OPTIONS, args=MAKE_ARGS),
-        **{i: target_completer for i in range(8)},
+        **{i: target_completer for i in range(3)},
     })
