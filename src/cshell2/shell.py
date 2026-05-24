@@ -956,6 +956,8 @@ class Shell:
                     if ctx is not None:
                         ctx.process_slot = slot
                     self._handle_switch()
+                elif result == "interrupted":
+                    print(f"{command_name}: interrupted")
                 else:
                     slot.deactivate()
                     exc = slot._exit_exception
@@ -1133,6 +1135,7 @@ class Shell:
                         # terminal after we return.
                         slot.deactivate()
                         slot.kill()
+                        result = "interrupted"
                         break
                     else:
                         slot.write_stdin(data)
@@ -1273,6 +1276,10 @@ class Shell:
                         if result == "switched":
                             self._handle_switch()
                             continue
+                        elif result == "interrupted":
+                            ctx.process_slot = None
+                            print(f"{slot.argv[0]}: interrupted")
+                            continue
                         else:
                             exc = slot._exit_exception
                             ctx.process_slot = None
@@ -1304,10 +1311,13 @@ class Shell:
                             continue
 
                 if ctx and ctx.process_slot and not ctx.process_slot.is_alive():
-                    ctx.process_slot.replay_buffer()
-                    exit_code = ctx.process_slot.exit_code
+                    slot = ctx.process_slot
+                    slot.replay_buffer()
+                    exit_code = slot.exit_code
                     ctx.process_slot = None
-                    if exit_code and exit_code != 0:
+                    if isinstance(slot, PythonCommandSlot) and exit_code == 130:
+                        print(f"{slot.argv[0]}: killed")
+                    elif exit_code and exit_code != 0:
                         print(f"\n[Process exited with code {exit_code}]")
 
                 text = self._line_editor.prompt()
