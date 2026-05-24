@@ -164,18 +164,33 @@ class LineEditor:
         self._prompt_str = ""
         self._prompt_len = 0
         self._cursor_row = 0  # rows below render-top where cursor sits
+        self._add_to_history = True
         # VSCode integrated terminal does not reflow content on resize;
         # cursor stays at the same row (clamped column). Detect it so we
         # re-render explicitly instead of relying on terminal reflow.
         self._terminal_reflows = os.environ.get("TERM_PROGRAM", "") != "vscode"
         self._hint: str = ""  # transient hint shown after TAB; cleared on next keypress
 
-    def prompt(self) -> str:
+    def add_to_history(self, line: str) -> None:
+        """Add *line* to history from outside the editor (e.g. after joining continuation lines)."""
+        self._history.add(line)
+
+    def prompt(self, prompt_str: str | None = None, add_to_history: bool = True) -> str:
+        """Read one line.
+
+        Args:
+            prompt_str: If given, display this string instead of calling _get_prompt().
+                        Useful for continuation prompts (e.g. ``"> "``).
+            add_to_history: When False the entered line is *not* added to history.
+                            Use this when the caller will join multiple lines and add
+                            the combined command to history itself.
+        """
         self._buf = ""
         self._cursor = 0
         self._hist_idx = 0
         self._saved_buf = ""
-        self._prompt_str = self._get_prompt()
+        self._add_to_history = add_to_history
+        self._prompt_str = prompt_str if prompt_str is not None else self._get_prompt()
         self._prompt_len = _visible_len(self._prompt_str)
 
         fd = sys.stdin.fileno()
@@ -289,7 +304,8 @@ class LineEditor:
         # Enter
         if key in (b"\r", b"\n"):
             result = self._buf
-            self._history.add(result)
+            if self._add_to_history:
+                self._history.add(result)
             return result
 
         # Ctrl+D — EOF if buffer empty

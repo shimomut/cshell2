@@ -345,6 +345,37 @@ _DEFAULT_CONFIG = """\
 """
 
 
+def _is_continuation(line: str) -> bool:
+    """Return True if *line* ends with an unescaped backslash (line continuation).
+
+    An even number of trailing backslashes means the last one is escaped (e.g.
+    ``echo \\\\`` has two backslashes, none of which continue the line).
+    Trailing spaces/tabs after the backslash are ignored so that accidental
+    trailing whitespace does not prevent continuation from being recognised.
+    """
+    s = line.rstrip(" \t")
+    count = 0
+    for ch in reversed(s):
+        if ch == "\\":
+            count += 1
+        else:
+            break
+    return count % 2 == 1
+
+
+def _strip_continuation(line: str) -> str:
+    """Remove the trailing continuation backslash (and any trailing whitespace before it).
+
+    The result is ready to be concatenated with the next continuation line.
+    Leading whitespace in the next line is preserved so indented continuations
+    (the common style) work naturally::
+
+        docker run --rm \\
+          -v /foo:/bar      →  joined as  "docker run --rm   -v /foo:/bar"
+    """
+    return line.rstrip(" \t")[:-1]
+
+
 def _positional_index(args: list[str], options_completer) -> int:
     """Return the number of positional (non-flag) arguments in *args*.
 
@@ -1320,14 +1351,32 @@ class Shell:
                     elif exit_code and exit_code != 0:
                         print(f"\n[Process exited with code {exit_code}]")
 
-                text = self._line_editor.prompt()
+                # Collect the primary line (history managed here, not inside the editor).
+                text = self._line_editor.prompt(add_to_history=False)
                 if text == SWITCH_SENTINEL:
                     self._handle_switch()
                     continue
                 if text == CONTEXT_CHANGED_SENTINEL:
                     continue
-                if text.strip():
-                    self._execute(text.strip())
+
+                # Handle backslash line continuation: keep prompting with "> "
+                # until a line that does NOT end with an unescaped backslash.
+                # Ctrl+C propagates as KeyboardInterrupt and abandons the command.
+                # A context-switch (Ctrl+]) during continuation also abandons it.
+                full_text = text
+                while _is_continuation(full_text):
+                    partial = _strip_continuation(full_text)
+                    cont = self._line_editor.prompt(prompt_str="> ", add_to_history=False)
+                    if cont in (SWITCH_SENTINEL, CONTEXT_CHANGED_SENTINEL):
+                        if cont == SWITCH_SENTINEL:
+                            self._handle_switch()
+                        full_text = ""
+                        break
+                    full_text = partial + cont
+
+                if full_text.strip():
+                    self._line_editor.add_to_history(full_text)
+                    self._execute(full_text.strip())
             except KeyboardInterrupt:
                 continue
             except EOFError:
