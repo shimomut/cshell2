@@ -61,6 +61,10 @@ class _ThreadLocalStdout(io.TextIOBase):
         return self._real.fileno()
 
     @property
+    def buffer(self):
+        return self._real.buffer
+
+    @property
     def encoding(self) -> str:
         return getattr(self._real, "encoding", "utf-8")
 
@@ -313,7 +317,9 @@ _DEFAULT_CONFIG = """\
 #         if verbose:
 #             print(f"  -> {step} ...", flush=True)
 #         if not dry_run:
-#             time.sleep(secs)
+#             # Use short sleep intervals so Ctrl-C is handled promptly.
+#             for _ in range(secs * 10):
+#                 time.sleep(0.1)
 #         print(f"  ok {step}")
 #     print(f"{prefix}Done.")
 #
@@ -1118,8 +1124,16 @@ class Shell:
                         result = "switched"
                         break
                     if b"\x03" in data:
+                        # Inject KeyboardInterrupt into the command thread, then
+                        # return immediately.  PyThreadState_SetAsyncExc only fires
+                        # at bytecode boundaries, so the thread may still be blocked
+                        # in time.sleep() — waiting for it would delay the response
+                        # by the full remaining sleep duration.  Deactivating the
+                        # proxy first prevents any stray output from reaching the
+                        # terminal after we return.
+                        slot.deactivate()
                         slot.kill()
-                        # keep looping — thread will finish shortly
+                        break
                     else:
                         slot.write_stdin(data)
             return result
