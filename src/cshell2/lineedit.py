@@ -200,7 +200,11 @@ class LineEditor:
         try:
             self._update_cols()
             self._cursor_row = 0
-            tty.setraw(fd)
+            # Use TCSADRAIN (not the default TCSAFLUSH) so that bytes already
+            # buffered in the kernel's input queue — e.g. the remainder of a
+            # pasted multi-line block after the first \r was consumed — are
+            # preserved rather than discarded when entering raw mode.
+            tty.setraw(fd, termios.TCSADRAIN)
             signal.signal(signal.SIGWINCH, self._on_resize)
             self._redraw()
 
