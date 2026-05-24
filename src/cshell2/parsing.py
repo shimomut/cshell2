@@ -2,15 +2,95 @@
 
 import os
 import shlex
+import subprocess
+
+
+def _find_cmd_sub_end(line: str, start: int) -> int:
+    """Given *line* and *start* pointing at the '(' in ``$(...)``, return the
+    index of the matching closing ')'.  Returns -1 if unmatched.
+
+    Handles:
+    - Nested ``$(...)`` (and bare sub-shells via ``(...)``)
+    - Single-quoted regions (no special chars inside)
+    - Double-quoted regions (only backslash escapes active)
+    - Backslash escapes outside quotes
+    """
+    depth = 1
+    i = start + 1  # first character after the opening '('
+    n = len(line)
+
+    while i < n:
+        ch = line[i]
+
+        if ch == '\\' and i + 1 < n:
+            i += 2  # skip escaped character
+            continue
+
+        if ch == "'":
+            # Single-quoted region — pass through until closing '
+            i += 1
+            while i < n and line[i] != "'":
+                i += 1
+            if i < n:
+                i += 1  # skip closing quote
+            continue
+
+        if ch == '"':
+            # Double-quoted region — only backslash escapes matter
+            i += 1
+            while i < n:
+                c = line[i]
+                if c == '"':
+                    i += 1
+                    break
+                if c == '\\' and i + 1 < n:
+                    i += 2
+                else:
+                    i += 1
+            continue
+
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                return i
+
+        i += 1
+
+    return -1  # unmatched
+
+
+def _run_cmd_sub(cmd_text: str) -> str:
+    """Execute *cmd_text* in a subshell and return its stdout with trailing
+    newlines stripped — standard POSIX command-substitution semantics.
+    """
+    try:
+        result = subprocess.run(
+            cmd_text,
+            shell=True,
+            capture_output=True,
+            text=True,
+            env=os.environ,
+        )
+        return result.stdout.rstrip('\n')
+    except Exception:
+        return ""
 
 
 def expand_vars(line: str) -> str:
-    """Expand $VAR and ${VAR} in line, leaving single-quoted regions unexpanded."""
+    """Expand ``$VAR``, ``${VAR}``, and ``$(cmd)`` in *line*.
+
+    Single-quoted regions are passed through verbatim (no expansion).
+    Double-quoted regions are treated the same as bare text for expansion
+    purposes (quote stripping happens later in the tokenizer).
+    """
     result = []
     i = 0
     while i < len(line):
         ch = line[i]
         if ch == "'":
+            # Single-quoted region — no expansion
             j = line.find("'", i + 1)
             if j == -1:
                 result.append(line[i:])
@@ -18,16 +98,29 @@ def expand_vars(line: str) -> str:
             result.append(line[i : j + 1])
             i = j + 1
         elif ch == "$":
-            if i + 1 < len(line) and line[i + 1] == "{":
-                end = line.find("}", i + 2)
+            next_i = i + 1
+            if next_i < len(line) and line[next_i] == "(":
+                # Command substitution: $(...)
+                end = _find_cmd_sub_end(line, next_i)
                 if end != -1:
-                    name = line[i + 2 : end]
+                    cmd_text = line[next_i + 1 : end]
+                    result.append(_run_cmd_sub(cmd_text))
+                    i = end + 1
+                else:
+                    result.append(ch)
+                    i += 1
+            elif next_i < len(line) and line[next_i] == "{":
+                # Brace-quoted variable: ${VAR}
+                end = line.find("}", next_i + 1)
+                if end != -1:
+                    name = line[next_i + 1 : end]
                     result.append(os.environ.get(name, ""))
                     i = end + 1
                 else:
                     result.append(ch)
                     i += 1
             else:
+                # Plain variable: $VAR
                 j = i + 1
                 while j < len(line) and (line[j].isalnum() or line[j] == "_"):
                     j += 1

@@ -578,7 +578,12 @@ cshell2/
     ├── test_commands.py
     ├── test_completion.py
     ├── test_context.py
-    └── test_parsing.py
+    ├── test_parsing.py
+    ├── test_pipeline.py
+    ├── test_process.py
+    ├── test_recipes.py
+    ├── test_shell_continuation.py
+    └── test_variables.py
 
 ~/.cshell2/
 ├── config.py           # user configuration (commands, completers, recipes)
@@ -600,6 +605,7 @@ cshell2/
 **Tier 2 — High value, independent:**
 - Glob expansion `*` `?` `**` ✅ — `expand_globs` with `recursive=True` for `**`
 - Stderr redirect `2>` `2>>` `2>&1` ✅
+- Backslash line continuation `\` ✅ — handled in `shell.py` before execution; continuation lines collected with `"> "` prompt; full joined command stored as one history entry
 - Command substitution `$(…)` ❌ — not yet implemented
 
 **Tier 3 — Nice to have:** ❌ none yet
@@ -609,15 +615,16 @@ cshell2/
 
 ### Implementation design
 
-Parse order (all quote-aware, implemented in `pipeline.py`):
+Parse order (all quote-aware, implemented in `pipeline.py` and `shell.py`):
 
 ```
-raw line
- └─ split on ;          → list of statements
-     └─ split on && ||  → conditional chain
-         └─ split on |  → list of pipeline stages
-             └─ each stage: extract redirections (>, >>, <, 2>, 2>&1)
-                 └─ remaining text: expand $VAR, tokenize, glob
+raw input (one or more physical lines joined in shell.py)
+ └─ backslash-continuation joining (shell.py — before any parsing)
+     └─ split on ;          → list of statements
+         └─ split on && ||  → conditional chain
+             └─ split on |  → list of pipeline stages
+                 └─ each stage: extract redirections (>, >>, <, 2>, 2>&1)
+                     └─ remaining text: expand $VAR, tokenize, glob
 ```
 
 Two execution modes in `shell.py`:
