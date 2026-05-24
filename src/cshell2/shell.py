@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import ctypes
+import io
 import os
 import re
 import select
 import signal
 import sys
 import termios
+import threading
 import traceback
 import tty
 from pathlib import Path
 
-from .commands import CommandRegistry, registry
+from .commands import arg, CommandRegistry, registry
 from .completion import (
     CommandNameCompleter,
     CompletionContext,
@@ -27,29 +30,307 @@ from .pipeline import Redirect, Sequence, Stage, Pipeline, expand_globs, parse_l
 from .process import ProcessSlot
 from .prompt import get_prompt_func, set_prompt
 
+# ---------------------------------------------------------------------------
+# Thread-local stdout routing + per-slot buffering proxy
+# ---------------------------------------------------------------------------
+
+class _ThreadLocalStdout(io.TextIOBase):
+    """A sys.stdout replacement that routes writes per thread.
+
+    The main thread (no override set) writes directly to *real*.
+    A Python-command thread sets an override via set_override() so its
+    print() calls go to a _StdoutProxy, keeping them separate from the
+    main thread's terminal output.
+    """
+
+    def __init__(self, real: io.TextIOBase) -> None:
+        self._real = real
+        self._local = threading.local()
+
+    @property
+    def _target(self) -> io.TextIOBase:
+        return getattr(self._local, "override", None) or self._real
+
+    def write(self, s: str) -> int:
+        return self._target.write(s)
+
+    def flush(self) -> None:
+        self._target.flush()
+
+    def fileno(self) -> int:
+        return self._real.fileno()
+
+    @property
+    def buffer(self):
+        return self._real.buffer
+
+    @property
+    def encoding(self) -> str:
+        return getattr(self._real, "encoding", "utf-8")
+
+    @property
+    def errors(self) -> str:
+        return getattr(self._real, "errors", "strict")
+
+    def set_override(self, proxy: "_StdoutProxy") -> None:
+        self._local.override = proxy
+
+    def clear_override(self) -> None:
+        self._local.override = None
+
+
+class _StdoutProxy(io.TextIOBase):
+    """Per-command buffering proxy.
+
+    Starts inactive (buffering).  Call activate(raw_mode=True) once the
+    terminal is in raw mode: it replays the buffer (converting \\n → \\r\\n)
+    and then forwards subsequent writes directly.  deactivate() resumes
+    buffering (used when the user switches away).
+    """
+
+    def __init__(self, real: io.TextIOBase) -> None:
+        self._real = real
+        self._buf = io.StringIO()
+        self._active = False
+        self._raw_mode = False
+        self._lock = threading.Lock()
+
+    @property
+    def encoding(self) -> str:
+        return getattr(self._real, "encoding", "utf-8")
+
+    @property
+    def errors(self) -> str:
+        return getattr(self._real, "errors", "strict")
+
+    def write(self, s: str) -> int:
+        with self._lock:
+            if self._active:
+                if self._raw_mode:
+                    s = s.replace("\n", "\r\n")
+                return self._real.write(s)
+            return self._buf.write(s)
+
+    def flush(self) -> None:
+        with self._lock:
+            if self._active:
+                self._real.flush()
+
+    def fileno(self) -> int:
+        return self._real.fileno()
+
+    def activate(self, raw_mode: bool = False) -> None:
+        """Replay buffer to real stdout and start writing live."""
+        with self._lock:
+            self._raw_mode = raw_mode
+            content = self._buf.getvalue()
+            if content:
+                if raw_mode:
+                    content = content.replace("\n", "\r\n")
+                self._real.write(content)
+                self._real.flush()
+                self._buf = io.StringIO()
+            self._active = True
+
+    def deactivate(self) -> None:
+        with self._lock:
+            self._active = False
+            self._raw_mode = False
+
+    def replay(self) -> None:
+        """Drain buffer to real stdout (called on switch-back, cooked mode)."""
+        with self._lock:
+            content = self._buf.getvalue()
+            if content:
+                self._real.write(content)
+                self._real.flush()
+                self._buf = io.StringIO()
+
+
+class _NullBuffer:
+    """Stub matching OutputBuffer.drain() used in the run() loop."""
+    def drain(self) -> list:
+        return []
+
+
+class PythonCommandSlot:
+    """Manages a Python @registry.command running in a background thread.
+
+    Implements the same runtime interface as ProcessSlot so the shell's
+    run() loop and context machinery can treat both uniformly.
+    """
+
+    def __init__(self, cmd, raw_args: list[str]) -> None:
+        self._cmd = cmd
+        self._raw_args = raw_args
+        self.argv: list[str] = [cmd.name] + raw_args
+        self._thread: threading.Thread | None = None
+        self._proxy: _StdoutProxy | None = None
+        self._exit_exception: BaseException | None = None
+        self._finished = threading.Event()
+        # Stub attributes expected by the run() loop
+        self.buffer = _NullBuffer()
+        self.exit_code: int | None = None
+
+    # --- lifecycle -----------------------------------------------------------
+
+    def start(self) -> None:
+        """Spawn the command thread.  stdout starts buffered (inactive)."""
+        real = getattr(sys.stdout, "_real", sys.stdout)
+        self._proxy = _StdoutProxy(real)
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"pycmd-{self._cmd.name}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        if hasattr(sys.stdout, "set_override"):
+            sys.stdout.set_override(self._proxy)
+        try:
+            self._cmd.invoke(self._raw_args)
+        except SystemExit as e:
+            self._exit_exception = e
+        except KeyboardInterrupt as e:
+            self._exit_exception = e
+        except Exception as e:
+            self._exit_exception = e
+        finally:
+            if hasattr(sys.stdout, "clear_override"):
+                sys.stdout.clear_override()
+            self.exit_code = self._compute_exit_code()
+            self._finished.set()
+
+    def _compute_exit_code(self) -> int:
+        exc = self._exit_exception
+        if exc is None:
+            return 0
+        if isinstance(exc, SystemExit):
+            code = exc.code
+            return code if isinstance(code, int) else (1 if code else 0)
+        if isinstance(exc, KeyboardInterrupt):
+            return 130
+        return 1
+
+    # --- ProcessSlot-compatible interface ------------------------------------
+
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def activate(self, raw_mode: bool = False) -> None:
+        if self._proxy:
+            self._proxy.activate(raw_mode=raw_mode)
+
+    def deactivate(self) -> None:
+        if self._proxy:
+            self._proxy.deactivate()
+
+    def replay_buffer(self) -> None:
+        if self._proxy:
+            self._proxy.replay()
+
+    def kill(self) -> None:
+        """Inject KeyboardInterrupt into the command thread."""
+        if self._thread and self._thread.is_alive():
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_ulong(self._thread.ident),
+                ctypes.py_object(KeyboardInterrupt),
+            )
+
+    def restore_terminal_modes(self) -> str:
+        return ""
+
+    def suspend_terminal_modes(self) -> str:
+        return ""
+
+    def write_stdin(self, data: bytes) -> None:
+        pass  # stdin forwarding not yet implemented for Python commands
+
+
 _DEFAULT_CONFIG = """\
 # cshell2 user configuration
 # Define custom commands and completers here.
 #
-# Example:
+# ── Simple example: one positional argument ───────────────────────────────────
 #
-# from cshell2.commands import registry
-# from cshell2.completion import Completer, Completion, ChoiceCompleter
+# from cshell2.commands import registry, arg
 #
 # @registry.command(
 #     name="hello",
-#     completers={0: ChoiceCompleter(["world", "there"])},
+#     help="Greet someone by name.",        # shell-facing description; no docstring needed
+#     params=[arg("name", nargs="?", default="world", completer=ChoiceCompleter(["world", "there"]))],
 # )
-# def hello(name: str = "world"):
-#     '''Greet someone by name.'''
+# def hello(name):
 #     print(f"Hello, {name}!")
 #
-# Enable completion recipes for external commands:
+#
+# ── Complex example: multiple positional args, flags with/without values, ─────
+# ── and a long-running task that supports Ctrl+] context switching mid-run ────
+#
+# • help=       sets the description shown by 'help deploy' and 'deploy --help'.
+#               Usage is auto-generated from params= — no need to write it.
+# • params=     each arg() call configures argparse (validation, type coercion,
+#               defaults) AND TAB completion in one place.  completer= on any
+#               arg drives TAB completion without restricting valid values;
+#               help= on an arg appears in the completion menu description.
+# • Function    receives typed keyword arguments — zero parsing code in body.
+#
+# from cshell2.commands import registry, arg
+# from cshell2.completion import ChoiceCompleter  # only needed for completer=
+# import time
+#
+# @registry.command(
+#     name="deploy",
+#     help="Deploy a service to an environment.",
+#     params=[
+#         # choices= drives argparse validation AND TAB completion simultaneously.
+#         arg("environment", choices=["prod", "staging", "dev"]),
+#         arg("service",     nargs="?", default="all",
+#                            choices=["api", "web", "worker"]),
+#         # Boolean flags: help= text appears in 'deploy --help' and completion menu.
+#         # Combined short flags (-nv) are expanded automatically by argparse.
+#         arg("-n", "--dry-run",  action="store_true",
+#                                 help="show steps, skip execution"),
+#         arg("-v", "--verbose",  action="store_true",
+#                                 help="print details for each step"),
+#         # Value-taking flags: completer= drives TAB completion for the value.
+#         arg("-t", "--timeout",  type=int, default=60,  metavar="SECONDS",
+#                                 help="deployment timeout in seconds",
+#                                 completer=ChoiceCompleter(["30", "60", "120", "300"])),
+#         arg("-b", "--branch",   default="main",        metavar="BRANCH",
+#                                 help="git branch to deploy"),
+#     ],
+# )
+# def deploy(environment, service, dry_run, verbose, timeout, branch):
+#     import time
+#     # All arguments arrive pre-parsed and typed — no manual parsing needed.
+#     # While this runs, press Ctrl+] to switch context without killing the deploy.
+#     prefix = "[DRY RUN] " if dry_run else ""
+#     print(f"{prefix}Deploying '{service}' to '{environment}'  "
+#           f"branch={branch!r}  timeout={timeout}s")
+#     for step, secs in [("Build image",       2),
+#                        ("Push to registry",   3),
+#                        ("Update deployment",  2),
+#                        ("Wait for rollout",   4),
+#                        ("Health checks",      2)]:
+#         if verbose:
+#             print(f"  -> {step} ...", flush=True)
+#         if not dry_run:
+#             # Use short sleep intervals so Ctrl-C is handled promptly.
+#             for _ in range(secs * 10):
+#                 time.sleep(0.1)
+#         print(f"  ok {step}")
+#     print(f"{prefix}Done.")
+#
+#
+# ── Enable completion recipes for external commands ───────────────────────────
 #
 # from cshell2.recipes import enable
-# enable("make")
+# enable("make", "git")
 #
-# Customize the prompt:
+#
+# ── Customize the prompt ──────────────────────────────────────────────────────
 #
 # import os
 # from cshell2 import set_prompt
@@ -64,6 +345,30 @@ _DEFAULT_CONFIG = """\
 """
 
 
+def _positional_index(args: list[str], options_completer) -> int:
+    """Return the number of positional (non-flag) arguments in *args*.
+
+    Flags are skipped without counting: boolean flags advance by 1 token;
+    value-taking flags (those listed in ``options_completer.args``) advance
+    by 2 tokens because they consume the following token as their value.
+    """
+    pos = 0
+    i = 0
+    value_taking = (
+        set(options_completer.args)
+        if options_completer and hasattr(options_completer, "args")
+        else set()
+    )
+    while i < len(args):
+        token = args[i]
+        if token.startswith("-"):
+            i += 2 if token in value_taking else 1
+        else:
+            pos += 1
+            i += 1
+    return pos
+
+
 class Shell:
     def __init__(self):
         self.registry = registry
@@ -73,6 +378,10 @@ class Shell:
         self.registry.mark_builtins()
         var_registry.mark_builtins()
         self._load_user_config()
+        # Install thread-local stdout router so Python command threads can
+        # write to a buffering proxy without disturbing the main thread.
+        if not isinstance(sys.stdout, _ThreadLocalStdout):
+            sys.stdout = _ThreadLocalStdout(sys.stdout)
 
         history_path = Path.home() / ".cshell2" / "history"
         history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -141,7 +450,9 @@ class Shell:
 
         if completers_dict is not None:
             options_completer = completers_dict.get(None)
-            positional_completer = completers_dict.get(arg_index)
+            positional_completer = completers_dict.get(
+                _positional_index(args, options_completer)
+            )
 
             # When the last arg is a value-taking flag (e.g. "du -d <TAB>"),
             # suppress positional/file completion and return a hint instead.
@@ -182,48 +493,54 @@ class Shell:
         return completions, prefix
 
     def _register_builtins(self) -> None:
-        from .completion import CallbackCompleter, ChoiceCompleter, Completer, Completion
+        from .completion import (
+            CallbackCompleter, ChoiceCompleter, Completer, Completion, DirCompleter,
+        )
 
-        @self.registry.command(name="cd")
-        def cd(path: str = "~"):
-            """Change directory."""
+        @self.registry.command(
+            name="cd",
+            help="Change directory.",
+            params=[arg("path", nargs="?", default="~", completer=DirCompleter())],
+        )
+        def cd(path):
             target = os.path.expanduser(path)
             try:
                 os.chdir(target)
             except OSError as e:
                 print(f"cd: {e}")
 
-        @self.registry.command(name="exit")
+        @self.registry.command(name="exit", help="Exit the shell.")
         def exit_shell():
-            """Exit the shell."""
             running = self._running_contexts()
             if running and not self._confirm_exit(running):
                 return
             raise SystemExit(0)
 
-        @self.registry.command(name="reload")
+        @self.registry.command(name="reload", help="Reload ~/.cshell2/config.py.")
         def reload_config():
-            """Reload ~/.cshell2/config.py."""
             self.registry.clear_user_commands()
             var_registry.clear_user_vars()
             set_prompt(None)
             self._load_user_config()
             print("Config reloaded.")
 
-        @self.registry.command(name="var", completers={0: VarCompleter()})
-        def var_cmd(*args):
-            """Set, unset, or list context variables.
-
-            var                  - list all registered vars and env vars
-            var NAME             - print current value of NAME
-            var NAME=VALUE       - set NAME to VALUE
-            var NAME=            - unset NAME (remove from env / context)
-
-            NAME may be a registered Python-backed variable (e.g. 'aws_region')
-            or a plain environment variable name.  Registered variables handle
-            their own set logic (e.g. writing multiple env keys at once).
-            """
-            if not args:
+        @self.registry.command(
+            name="var",
+            help=(
+                "Set, unset, or list context variables.\n\n"
+                "  var              list all registered vars and env vars\n"
+                "  var NAME         print current value of NAME\n"
+                "  var NAME=VALUE   set NAME to VALUE\n"
+                "  var NAME=        unset NAME (remove from env)\n\n"
+                "NAME may be a registered Python-backed variable (e.g. 'aws_region')\n"
+                "or a plain environment variable.  Registered variables handle their\n"
+                "own set logic (e.g. writing multiple env keys at once)."
+            ),
+            params=[arg("assignments", nargs="*", metavar="NAME[=VALUE]",
+                        completer=VarCompleter())],
+        )
+        def var_cmd(assignments):
+            if not assignments:
                 # List registered Python-backed vars first, then plain env.
                 py_vars = var_registry.all()
                 if py_vars:
@@ -237,30 +554,31 @@ class Shell:
                 for key, value in sorted(os.environ.items()):
                     print(f"  {key}={value}")
                 return
-            for arg in args:
-                if "=" in arg:
-                    key, _, value = arg.partition("=")
+            for assignment in assignments:
+                if "=" in assignment:
+                    key, _, value = assignment.partition("=")
                     if value == "":
                         self._unset_variable(key)
                     else:
                         self._set_variable(key, value)
-                elif var_registry.get(arg) is not None:
+                elif var_registry.get(assignment) is not None:
                     # 'var NAME' with no '=' → print current value of Python-backed var
-                    v = var_registry.get(arg)
+                    v = var_registry.get(assignment)
                     val = v.get()
-                    print(f"{arg}={val}" if val is not None else f"{arg}=(unset)")
-                elif arg in os.environ:
+                    print(f"{assignment}={val}" if val is not None else f"{assignment}=(unset)")
+                elif assignment in os.environ:
                     # 'var NAME' for a plain env var → print its value
-                    print(f"{arg}={os.environ[arg]}")
+                    print(f"{assignment}={os.environ[assignment]}")
                 else:
-                    print(f"var: invalid argument '{arg}' (expected NAME=VALUE or NAME= to unset)")
+                    print(f"var: invalid argument '{assignment}' (expected NAME=VALUE or NAME= to unset)")
 
         @self.registry.command(
             name="help",
-            completers={0: CallbackCompleter(lambda: sorted(self.registry.list_commands()))},
+            help="Show help for a command, or list all commands.",
+            params=[arg("command_name", nargs="?", default="",
+                        completer=CallbackCompleter(lambda: sorted(self.registry.list_commands())))],
         )
         def help_cmd(command_name: str = ""):
-            """Show help for a command, or list all commands."""
             if command_name:
                 cmd = self.registry.get(command_name)
                 if cmd:
@@ -274,15 +592,14 @@ class Shell:
                     desc = cmd.help_text.split("\n")[0] if cmd.help_text else ""
                     print(f"  {name:20s} {desc}")
 
-        context_subcommands = ChoiceCompleter(["push", "pop", "switch", "list", "kill"])
-        names_after_subcommands = {"switch", "kill"}
+        _names_after_subcommands = {"switch", "kill"}
 
         class ContextNameCompleter(Completer):
             def __init__(self, cm):
                 self._cm = cm
 
             def should_activate(self, ctx: CompletionContext) -> bool:
-                return bool(ctx.args) and ctx.args[0] in names_after_subcommands
+                return bool(ctx.args) and ctx.args[0] in _names_after_subcommands
 
             def complete(self, ctx: CompletionContext) -> list[Completion]:
                 subcmd = ctx.args[0] if ctx.args else ""
@@ -301,11 +618,16 @@ class Shell:
 
         @self.registry.command(
             name="context",
-            completers={0: context_subcommands, 1: ContextNameCompleter(self.context_manager)},
+            help="Manage shell contexts: push, pop, switch, list, kill.",
+            params=[
+                arg("subcommand", nargs="?", default="",
+                    completer=ChoiceCompleter(["push", "pop", "switch", "list", "kill"])),
+                arg("name", nargs="?", default="",
+                    completer=ContextNameCompleter(self.context_manager)),
+            ],
         )
-        def context_cmd(*args):
-            """Manage contexts: push, pop, switch, list."""
-            if not args:
+        def context_cmd(subcommand: str = "", name: str = ""):
+            if not subcommand:
                 ctx = self.context_manager.current()
                 if ctx:
                     vars_str = f" {ctx.variables}" if ctx.variables else ""
@@ -314,14 +636,10 @@ class Shell:
                     print("No active context.")
                 return
 
-            subcmd = args[0]
-            rest = args[1:]
-
-            if subcmd == "push":
-                if not rest:
+            if subcommand == "push":
+                if not name:
                     print("Usage: context push <name>")
                     return
-                name = rest[0]
                 if name in self.context_manager.contexts:
                     print(f"Context '{name}' already exists.")
                     return
@@ -331,7 +649,7 @@ class Shell:
                 self.context_manager.push(name)
                 print(f"Pushed context '{name}'")
 
-            elif subcmd == "pop":
+            elif subcommand == "pop":
                 ctx = self.context_manager.current()
                 if ctx is None:
                     print("No active context.")
@@ -339,9 +657,9 @@ class Shell:
                 if len(self.context_manager.list_contexts()) <= 1:
                     print("Cannot remove the last context.")
                     return
-                name = ctx.name
+                popped_name = ctx.name
                 self.context_manager.pop()
-                self.context_manager.remove(name)
+                self.context_manager.remove(popped_name)
                 prev = self.context_manager.current()
                 if prev is None:
                     remaining = self.context_manager.list_contexts()
@@ -349,20 +667,20 @@ class Shell:
                         self.context_manager.switch(remaining[0])
                         prev = self.context_manager.current()
                 if prev:
-                    print(f"Popped '{name}', now in '{prev.name}'")
+                    print(f"Popped '{popped_name}', now in '{prev.name}'")
                 else:
-                    print(f"Popped '{name}'")
+                    print(f"Popped '{popped_name}'")
 
-            elif subcmd == "switch":
-                if not rest:
+            elif subcommand == "switch":
+                if not name:
                     print("Usage: context switch <name>")
                     return
                 try:
-                    self.context_manager.switch(rest[0])
+                    self.context_manager.switch(name)
                 except KeyError as e:
                     print(e)
 
-            elif subcmd == "list":
+            elif subcommand == "list":
                 names = self.context_manager.list_contexts()
                 if not names:
                     print("No contexts defined.")
@@ -383,23 +701,22 @@ class Shell:
                         vars_str = f" {ctx.variables}" if ctx.variables else ""
                         print(f"  {marker} {n}{state_str}{vars_str}")
 
-            elif subcmd == "kill":
-                if not rest:
+            elif subcommand == "kill":
+                if not name:
                     print("Usage: context kill <name>")
                     return
-                target_name = rest[0]
-                if target_name not in self.context_manager.contexts:
-                    print(f"No context named '{target_name}'")
+                if name not in self.context_manager.contexts:
+                    print(f"No context named '{name}'")
                     return
-                target_ctx = self.context_manager.contexts[target_name]
+                target_ctx = self.context_manager.contexts[name]
                 if target_ctx.process_slot and target_ctx.process_slot.is_alive():
                     target_ctx.process_slot.kill()
-                    print(f"Sent SIGTERM to process in context '{target_name}'")
+                    print(f"Sent SIGTERM to process in context '{name}'")
                 else:
-                    print(f"Context '{target_name}' has no running process.")
+                    print(f"Context '{name}' has no running process.")
 
             else:
-                print(f"Unknown subcommand: {subcmd}")
+                print(f"Unknown subcommand: {subcommand}")
 
     def _load_user_config(self) -> None:
         config_path = Path.home() / ".cshell2" / "config.py"
@@ -591,43 +908,64 @@ class Shell:
 
         cmd = self.registry.get(command_name)
         if cmd:
-            # Python command — redirect sys.stdout/stdin if needed
-            import io as _io
-            old_stdout = sys.stdout
-            old_stdin = sys.stdin
-            old_stderr = sys.stderr
-            try:
-                if stdout_override:
-                    sys.stdout = _io.TextIOWrapper(stdout_override)
-                if stdin_override:
-                    sys.stdin = _io.TextIOWrapper(stdin_override)
-                if stderr_override == "stdout":
-                    sys.stderr = sys.stdout
-                elif stderr_override:
-                    sys.stderr = _io.TextIOWrapper(stderr_override)
-                cmd.func(*args)
-            except SystemExit:
-                raise
-            except TypeError as e:
-                print(f"{command_name}: {e}")
-            except Exception as e:
-                print(f"{command_name}: error: {e}")
-                traceback.print_exc()
-            finally:
-                sys.stdout = old_stdout
-                sys.stdin = old_stdin
-                sys.stderr = old_stderr
-                for f in (stdout_override, stdin_override):
-                    if f:
+            if has_redirects:
+                # Redirected Python command — run synchronously with overridden streams.
+                old_stdout = sys.stdout
+                old_stdin = sys.stdin
+                old_stderr = sys.stderr
+                try:
+                    if stdout_override:
+                        sys.stdout = io.TextIOWrapper(stdout_override)
+                    if stdin_override:
+                        sys.stdin = io.TextIOWrapper(stdin_override)
+                    if stderr_override == "stdout":
+                        sys.stderr = sys.stdout
+                    elif stderr_override:
+                        sys.stderr = io.TextIOWrapper(stderr_override)
+                    cmd.invoke(args)
+                except SystemExit:
+                    raise
+                except TypeError as e:
+                    print(f"{command_name}: {e}")
+                except Exception as e:
+                    print(f"{command_name}: error: {e}")
+                    traceback.print_exc()
+                finally:
+                    sys.stdout = old_stdout
+                    sys.stdin = old_stdin
+                    sys.stderr = old_stderr
+                    for f in (stdout_override, stdin_override):
+                        if f:
+                            try:
+                                f.close()
+                            except Exception:
+                                pass
+                    if stderr_override and stderr_override != "stdout":
                         try:
-                            f.close()
+                            stderr_override.close()
                         except Exception:
                             pass
-                if stderr_override and stderr_override != "stdout":
-                    try:
-                        stderr_override.close()
-                    except Exception:
-                        pass
+            else:
+                # Interactive Python command — run in a thread so Ctrl+] works.
+                ctx = self.context_manager.current()
+                slot = PythonCommandSlot(cmd, args)
+                slot.start()
+                result = self._enter_python_forwarding_mode(slot)
+                if result == "switched":
+                    slot.deactivate()
+                    if ctx is not None:
+                        ctx.process_slot = slot
+                    self._handle_switch()
+                elif result == "interrupted":
+                    print(f"{command_name}: interrupted")
+                else:
+                    slot.deactivate()
+                    exc = slot._exit_exception
+                    if isinstance(exc, SystemExit):
+                        raise exc
+                    if exc is not None and not isinstance(exc, KeyboardInterrupt):
+                        print(f"{command_name}: error: {exc}")
+                        traceback.print_exc()
             return 0
 
         # External command
@@ -755,6 +1093,58 @@ class Shell:
                     sys.stdout.write(suspend_seq)
                     sys.stdout.flush()
 
+    def _enter_python_forwarding_mode(self, slot: PythonCommandSlot) -> str:
+        """Monitor stdin while a Python command runs in a background thread.
+
+        Sets the terminal to raw mode, activates the slot's stdout proxy
+        (replaying any buffered output), then loops:
+          • Ctrl+C  (\\x03) — inject KeyboardInterrupt into the command thread
+          • Ctrl+]  (\\x1d) — return 'switched' so caller can store the slot
+          • normal keys     — forwarded to slot.write_stdin (no-op currently)
+
+        Returns 'exited' when the thread finishes, 'switched' on Ctrl+].
+        """
+        fd = sys.stdin.fileno()
+        old_attrs = termios.tcgetattr(fd)
+        old_sigint = signal.getsignal(signal.SIGINT)
+        old_sigwinch = signal.getsignal(signal.SIGWINCH)
+        result = "exited"
+        try:
+            tty.setraw(fd)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            signal.signal(signal.SIGWINCH, signal.SIG_IGN)
+            # Replay any output buffered before raw mode was set
+            slot.activate(raw_mode=True)
+
+            while slot.is_alive():
+                rlist, _, _ = select.select([fd], [], [], 0.1)
+                if fd in rlist:
+                    data = os.read(fd, 1024)
+                    if not data:
+                        break
+                    if b"\x1d" in data:
+                        result = "switched"
+                        break
+                    if b"\x03" in data:
+                        # Inject KeyboardInterrupt into the command thread, then
+                        # return immediately.  PyThreadState_SetAsyncExc only fires
+                        # at bytecode boundaries, so the thread may still be blocked
+                        # in time.sleep() — waiting for it would delay the response
+                        # by the full remaining sleep duration.  Deactivating the
+                        # proxy first prevents any stray output from reaching the
+                        # terminal after we return.
+                        slot.deactivate()
+                        slot.kill()
+                        result = "interrupted"
+                        break
+                    else:
+                        slot.write_stdin(data)
+            return result
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+            signal.signal(signal.SIGINT, old_sigint)
+            signal.signal(signal.SIGWINCH, old_sigwinch)
+
     _NEW_CTX_SENTINEL = "\x00new"
 
     def _show_switch_menu(self) -> tuple[str, bool] | None:
@@ -813,7 +1203,13 @@ class Shell:
         return (selected, False)
 
     def _handle_switch(self) -> bool:
-        """Handle Ctrl+] switch request. Returns True if new context has a live process."""
+        """Handle Ctrl+] switch request.
+
+        Returns True to signal lineedit that it should exit (CONTEXT_CHANGED_SENTINEL)
+        so the run() loop can take over — either to replay buffered output or to
+        enter forwarding mode.  Returns False only when there is nothing pending in
+        the target context (no process_slot at all).
+        """
         ctx = self.context_manager.current()
         if ctx and ctx.process_slot:
             ctx.process_slot.deactivate()
@@ -821,8 +1217,13 @@ class Shell:
         result = self._show_switch_menu()
 
         if result is None:
+            # User cancelled.  Re-activate PTY slots so their reader thread can
+            # stream output again.  PythonCommandSlots stay deactivated: their
+            # buffered output will be replayed correctly (with raw_mode=True) the
+            # next time _enter_python_forwarding_mode is called from run().
             if ctx and ctx.process_slot and ctx.process_slot.is_alive():
-                ctx.process_slot.activate()
+                if not isinstance(ctx.process_slot, PythonCommandSlot):
+                    ctx.process_slot.activate()
             return False
 
         target_name, is_new = result
@@ -836,8 +1237,17 @@ class Shell:
             self.context_manager.switch(target_name)
 
         new_ctx = self.context_manager.current()
-        if new_ctx and new_ctx.process_slot and new_ctx.process_slot.is_alive():
-            new_ctx.process_slot.activate()
+        if new_ctx and new_ctx.process_slot:
+            slot = new_ctx.process_slot
+            # PTY processes: activate immediately so the reader thread resumes
+            # streaming output (run() will enter forwarding mode right after).
+            # PythonCommandSlots: leave deactivated.  _enter_python_forwarding_mode
+            # calls activate(raw_mode=True) which converts \n→\r\n correctly.
+            # Also handles the finished-but-not-replayed case: returning True here
+            # makes lineedit exit so run() calls replay_buffer() immediately,
+            # rather than waiting for the user to press Enter.
+            if slot.is_alive() and not isinstance(slot, PythonCommandSlot):
+                slot.activate()
             return True
         return False
 
@@ -858,29 +1268,56 @@ class Shell:
                 ctx = self.context_manager.current()
 
                 if ctx and ctx.process_slot and ctx.process_slot.is_alive():
-                    ctx.process_slot.buffer.drain()
-                    restore_seq = ctx.process_slot.restore_terminal_modes()
-                    if restore_seq:
-                        sys.stdout.write(restore_seq)
-                        sys.stdout.flush()
-                    ctx.process_slot.activate()
-                    result = self._enter_forwarding_mode(ctx.process_slot, force_redraw=True)
-                    ctx.process_slot.deactivate()
-                    if result == "switched":
-                        self._handle_switch()
-                        continue
+                    slot = ctx.process_slot
+                    if isinstance(slot, PythonCommandSlot):
+                        # Resume a backgrounded Python command.
+                        result = self._enter_python_forwarding_mode(slot)
+                        slot.deactivate()
+                        if result == "switched":
+                            self._handle_switch()
+                            continue
+                        elif result == "interrupted":
+                            ctx.process_slot = None
+                            print(f"{slot.argv[0]}: interrupted")
+                            continue
+                        else:
+                            exc = slot._exit_exception
+                            ctx.process_slot = None
+                            if isinstance(exc, SystemExit):
+                                raise exc
+                            if exc is not None and not isinstance(exc, KeyboardInterrupt):
+                                print(f"\n[Python command error: {exc}]")
+                            elif slot.exit_code and slot.exit_code != 0:
+                                print(f"\n[Process exited with code {slot.exit_code}]")
+                            continue
                     else:
-                        exit_code = ctx.process_slot.exit_code
-                        ctx.process_slot = None
-                        if exit_code and exit_code != 0:
-                            print(f"\n[Process exited with code {exit_code}]")
-                        continue
+                        # Resume a PTY subprocess.
+                        slot.buffer.drain()
+                        restore_seq = slot.restore_terminal_modes()
+                        if restore_seq:
+                            sys.stdout.write(restore_seq)
+                            sys.stdout.flush()
+                        slot.activate()
+                        result = self._enter_forwarding_mode(slot, force_redraw=True)
+                        slot.deactivate()
+                        if result == "switched":
+                            self._handle_switch()
+                            continue
+                        else:
+                            exit_code = slot.exit_code
+                            ctx.process_slot = None
+                            if exit_code and exit_code != 0:
+                                print(f"\n[Process exited with code {exit_code}]")
+                            continue
 
                 if ctx and ctx.process_slot and not ctx.process_slot.is_alive():
-                    ctx.process_slot.replay_buffer()
-                    exit_code = ctx.process_slot.exit_code
+                    slot = ctx.process_slot
+                    slot.replay_buffer()
+                    exit_code = slot.exit_code
                     ctx.process_slot = None
-                    if exit_code and exit_code != 0:
+                    if isinstance(slot, PythonCommandSlot) and exit_code == 130:
+                        print(f"{slot.argv[0]}: killed")
+                    elif exit_code and exit_code != 0:
                         print(f"\n[Process exited with code {exit_code}]")
 
                 text = self._line_editor.prompt()
