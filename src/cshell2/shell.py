@@ -255,7 +255,7 @@ _DEFAULT_CONFIG = """\
 # @registry.command(
 #     name="hello",
 #     help="Greet someone by name.",        # shell-facing description; no docstring needed
-#     params=[arg("name", nargs="?", default="world", choices=["world", "there"])],
+#     params=[arg("name", nargs="?", default="world", completer=ChoiceCompleter(["world", "there"]))],
 # )
 # def hello(name):
 #     print(f"Hello, {name}!")
@@ -267,8 +267,8 @@ _DEFAULT_CONFIG = """\
 # • help=       sets the description shown by 'help deploy' and 'deploy --help'.
 #               Usage is auto-generated from params= — no need to write it.
 # • params=     each arg() call configures argparse (validation, type coercion,
-#               defaults) AND TAB completion in one place.  choices= on a
-#               positional and completer= on any arg drive TAB completion;
+#               defaults) AND TAB completion in one place.  completer= on any
+#               arg drives TAB completion without restricting valid values;
 #               help= on an arg appears in the completion menu description.
 # • Function    receives typed keyword arguments — zero parsing code in body.
 #
