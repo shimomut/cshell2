@@ -1186,7 +1186,13 @@ class Shell:
         return (selected, False)
 
     def _handle_switch(self) -> bool:
-        """Handle Ctrl+] switch request. Returns True if new context has a live process."""
+        """Handle Ctrl+] switch request.
+
+        Returns True to signal lineedit that it should exit (CONTEXT_CHANGED_SENTINEL)
+        so the run() loop can take over — either to replay buffered output or to
+        enter forwarding mode.  Returns False only when there is nothing pending in
+        the target context (no process_slot at all).
+        """
         ctx = self.context_manager.current()
         if ctx and ctx.process_slot:
             ctx.process_slot.deactivate()
@@ -1194,8 +1200,13 @@ class Shell:
         result = self._show_switch_menu()
 
         if result is None:
+            # User cancelled.  Re-activate PTY slots so their reader thread can
+            # stream output again.  PythonCommandSlots stay deactivated: their
+            # buffered output will be replayed correctly (with raw_mode=True) the
+            # next time _enter_python_forwarding_mode is called from run().
             if ctx and ctx.process_slot and ctx.process_slot.is_alive():
-                ctx.process_slot.activate()
+                if not isinstance(ctx.process_slot, PythonCommandSlot):
+                    ctx.process_slot.activate()
             return False
 
         target_name, is_new = result
@@ -1209,8 +1220,17 @@ class Shell:
             self.context_manager.switch(target_name)
 
         new_ctx = self.context_manager.current()
-        if new_ctx and new_ctx.process_slot and new_ctx.process_slot.is_alive():
-            new_ctx.process_slot.activate()
+        if new_ctx and new_ctx.process_slot:
+            slot = new_ctx.process_slot
+            # PTY processes: activate immediately so the reader thread resumes
+            # streaming output (run() will enter forwarding mode right after).
+            # PythonCommandSlots: leave deactivated.  _enter_python_forwarding_mode
+            # calls activate(raw_mode=True) which converts \n→\r\n correctly.
+            # Also handles the finished-but-not-replayed case: returning True here
+            # makes lineedit exit so run() calls replay_buffer() immediately,
+            # rather than waiting for the user to press Enter.
+            if slot.is_alive() and not isinstance(slot, PythonCommandSlot):
+                slot.activate()
             return True
         return False
 
