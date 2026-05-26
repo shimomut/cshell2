@@ -255,6 +255,7 @@ _DEFAULT_CONFIG = """\
 # ── Simple example: one positional argument ───────────────────────────────────
 #
 # from cshell2.commands import registry, arg
+# from cshell2.completion import ChoiceCompleter
 #
 # @registry.command(
 #     name="hello",
@@ -275,10 +276,6 @@ _DEFAULT_CONFIG = """\
 #               arg drives TAB completion without restricting valid values;
 #               help= on an arg appears in the completion menu description.
 # • Function    receives typed keyword arguments — zero parsing code in body.
-#
-# from cshell2.commands import registry, arg
-# from cshell2.completion import ChoiceCompleter  # only needed for completer=
-# import time
 #
 # @registry.command(
 #     name="deploy",
@@ -327,7 +324,7 @@ _DEFAULT_CONFIG = """\
 # ── Enable completion recipes for external commands ───────────────────────────
 #
 # from cshell2.recipes import enable
-# enable("make", "git")
+# enable("*")
 #
 #
 # ── Customize the prompt ──────────────────────────────────────────────────────

@@ -1,10 +1,11 @@
 """Completion recipes for external commands.
 
-Recipes provide TAB completion for system commands. Enable them selectively
-in ~/.cshell2/config.py:
+Recipes provide TAB completion for system commands. Enable them in
+~/.cshell2/config.py:
 
     from cshell2.recipes import enable
-    enable("make", "git", "docker", "ssh", "kill", "tail")
+    enable("*")              # all built-in + user recipes
+    enable("make", "git")    # or pick specific ones
 
 Available recipes:
     aws     aws s3 subcommands (ls, cp, mv, sync, rm, mb, rb, presign, website),
@@ -53,6 +54,8 @@ def add_recipe_path(path: str | Path) -> None:
 def enable(*recipe_names: str) -> None:
     """Enable one or more completion recipes by name.
 
+    Pass ``"*"`` to enable all discoverable recipes (built-in + search path).
+
     Lookup order for each name:
 
     1. Built-in package (``cshell2.recipes.<name>``).
@@ -61,9 +64,32 @@ def enable(*recipe_names: str) -> None:
 
     Raises ``ImportError`` if the recipe is not found anywhere.
     """
-    for name in recipe_names:
+    names = recipe_names
+    if "*" in names:
+        names = _discover_all_recipes()
+    for name in names:
         module = _load_recipe(name)
         module.register()
+
+
+def _discover_all_recipes() -> list[str]:
+    """Return sorted list of all available recipe names (built-in + search path)."""
+    found: set[str] = set()
+
+    # Built-in recipes: .py files in this package's directory (excluding __init__).
+    builtin_dir = Path(__file__).parent
+    for p in builtin_dir.glob("*.py"):
+        if p.stem != "__init__":
+            found.add(p.stem)
+
+    # User/extra recipes from search path.
+    for directory in recipe_search_path:
+        if directory.is_dir():
+            for p in directory.glob("*.py"):
+                if p.stem != "__init__":
+                    found.add(p.stem)
+
+    return sorted(found)
 
 
 def _load_recipe(name: str):
