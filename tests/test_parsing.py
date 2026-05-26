@@ -1,4 +1,33 @@
-from cshell2.parsing import tokenize, split_for_completion
+import os
+
+from cshell2.parsing import expand_vars, tokenize, split_for_completion
+
+
+def test_expand_vars_basic():
+    os.environ["CSHELL2_TEST_VAR"] = "hello"
+    assert expand_vars("echo $CSHELL2_TEST_VAR") == "echo hello"
+    del os.environ["CSHELL2_TEST_VAR"]
+
+
+def test_expand_vars_braces():
+    os.environ["CSHELL2_TEST_VAR"] = "world"
+    assert expand_vars("echo ${CSHELL2_TEST_VAR}!") == "echo world!"
+    del os.environ["CSHELL2_TEST_VAR"]
+
+
+def test_expand_vars_unset_is_empty():
+    os.environ.pop("CSHELL2_TEST_UNSET", None)
+    assert expand_vars("echo $CSHELL2_TEST_UNSET") == "echo "
+
+
+def test_expand_vars_single_quoted_not_expanded():
+    os.environ["CSHELL2_TEST_VAR"] = "hello"
+    assert expand_vars("echo '$CSHELL2_TEST_VAR'") == "echo '$CSHELL2_TEST_VAR'"
+    del os.environ["CSHELL2_TEST_VAR"]
+
+
+def test_expand_vars_no_vars():
+    assert expand_vars("ls -la /tmp") == "ls -la /tmp"
 
 
 def test_tokenize_simple():

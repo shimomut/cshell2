@@ -4,7 +4,18 @@
 
 The context system provides named environments that bundle variables and a working directory. Switching contexts restores the associated state, making it easy to work across multiple environments (e.g., AWS accounts, projects, clusters) within a single shell session.
 
+Contexts also serve as the unit of **process multiplexing**: each context can hold a live PTY subprocess. Pressing `Ctrl+]` opens a picker to switch between contexts; if the target context has a running process, it is resumed immediately without being killed.
+
 ## Data Model
+
+### ContextState
+
+```python
+class ContextState(Enum):
+    IDLE    = auto()   # no process attached
+    RUNNING = auto()   # process_slot.is_alive() is True
+    EXITED  = auto()   # process finished but slot not yet cleaned up
+```
 
 ### Context
 
@@ -14,11 +25,16 @@ class Context:
     name: str                           # unique identifier
     variables: dict[str, str]           # key-value pairs exported to os.environ
     cwd: str                            # saved working directory
+    process_slot: ProcessSlot | None    # optional running subprocess
+
+    @property
+    def state(self) -> ContextState: ...  # derived from process_slot
 ```
 
 A context captures:
 - **Variables**: exported to `os.environ` on activation, restored on deactivation. Subprocesses inherit these automatically.
 - **Working directory**: saved when leaving, restored when entering. Each context remembers where you were.
+- **Process slot**: an optional PTY-backed subprocess. When a context has a live process and is switched away from, the process keeps running and its output is buffered until you switch back.
 
 ### ContextManager
 
@@ -33,16 +49,23 @@ The manager maintains:
 - A **named collection** of all contexts (addressable by name)
 - A **current pointer** indicating the active context
 - A **stack** for push/pop navigation (stores names, not copies)
+- A **display order** list (current context always first in `context list`)
 
 ## Operations
 
-### Create
+### Push (create + switch)
 
 ```
-context push prod --account 123456 --region us-east-1
+context push prod
 ```
 
-Creates a context with the given name and variables. The `cwd` is captured at creation time. If this is the first context, it automatically becomes current.
+Creates a new context named `prod` with variables inherited from the current context. The current context's name is appended to the stack before switching. The `cwd` is captured at creation time.
+
+> **Note:** Variables are not set at push time. Use the `var` command after pushing:
+> ```
+> cshell2> context push prod
+> [prod] cshell2> var ACCOUNT=123456 REGION=us-east-1
+> ```
 
 ### Switch
 
@@ -52,20 +75,45 @@ context switch staging
 
 Directly sets the current pointer to any existing context. Does not modify the stack. The previous context remains available — nothing is lost.
 
-### Push / Pop
+### Pop
 
 ```
-context push staging    # saves current to stack, switches to staging
-context pop             # returns to what was on top of stack
+context pop
 ```
 
-Push/pop provides stack-style navigation for temporary context switches. Push appends the current context name to the stack before switching. Pop removes the top of the stack and switches back.
+Removes the current context, then switches to the name at the top of the stack (or to the first remaining context if the stack is empty). The popped context is **deleted**, not just deactivated.
 
-When popping with an empty stack, the shell returns to a no-context state (no context variables, initial working directory).
+> **Contrast with push:** `push` saves to the stack; `pop` removes from the collection. Think of push/pop as "enter a temporary sub-environment and discard it when done."
 
-### Remove
+### Kill
 
-Deletes a context from the collection. If it was the current context, falls back to the top of the stack or no-context state.
+```
+context kill <name>
+```
+
+Sends SIGTERM to the running process in the named context. The context itself is not removed.
+
+### Variables
+
+```
+var KEY=VALUE [KEY=VALUE ...]    # set one or more context variables
+var                              # list all current environment variables
+unset KEY [KEY ...]              # remove variables from context and os.environ
+```
+
+`var` sets variables on the **current context** and immediately exports them to `os.environ`. They will be re-applied whenever this context is switched to.
+
+### Ctrl+] — Live Context Switch
+
+Pressing `Ctrl+]` at the shell prompt (or during a running process) opens an inline picker listing all contexts. Each entry shows:
+- A `*` marker for the current context
+- The name of the running command (if any) as a right-aligned label
+
+Selecting a context:
+- If it has a live process: the shell enters forwarding mode immediately, resuming that process
+- If idle: the shell switches to that context and shows its prompt
+
+Selecting `+ new context` prompts for a name and creates a new context inheriting the current context's variables.
 
 ## Environment Variable Management
 
@@ -101,9 +149,9 @@ Completers receive the active context via `CompletionContext.shell_context`. Thi
 class InstanceCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         # Use explicit arg if given, otherwise inherit from context
-        account = ctx.shell_context.get_variable("account") if ctx.shell_context else None
-        if ctx.args:
-            account = ctx.args[0]
+        account = ctx.args[0] if ctx.args else (
+            ctx.shell_context.get_variable("ACCOUNT") if ctx.shell_context else None
+        )
         # ... fetch completions for account
 ```
 
@@ -114,32 +162,44 @@ This pattern lets commands work both ways:
 ## State Diagram
 
 ```
-No Context ──create──→ Context A (current)
-                           │
-                       push B
-                           │
-                           ▼
-              Context A ← stack ← Context B (current)
-                           │
-                         pop
-                           │
-                           ▼
-              Context A (current), B still exists
-                           │
-                       switch B
-                           │
-                           ▼
-              Context B (current), A still exists
+Shell starts → "default" context created (IDLE, current)
+                    │
+               context push prod
+                    │
+                    ▼
+         "default" ← stack ← "prod" (IDLE, current)
+                    │
+               run vim  (vim launches in PTY)
+                    │
+                    ▼
+         "default" ← stack ← "prod" (RUNNING, current)
+                    │
+               Ctrl+] → switch to "default"
+                    │
+                    ▼
+         "prod" (RUNNING, background)
+         "default" (IDLE, current)   ← [bg:1] shown in prompt
+                    │
+               Ctrl+] → switch back to "prod"
+                    │
+                    ▼
+         "prod" (RUNNING, current) ← vim resumes in foreground
+                    │
+               context pop  (vim still running)
+                    │
+                    ▼
+         "default" (IDLE, current), "prod" deleted
 ```
 
 ## Prompt Integration
 
-The shell prompt reflects the active context:
+The shell prompt reflects the active context and any background activity:
 
-- No context: `dirname> `
-- With context: `[contextname] dirname> `
+- Default context (`"default"`): no context prefix shown
+- Named context: `[contextname] path/cwd HH:MM:SS>`
+- Background processes: `[contextname] path/cwd HH:MM:SS [bg:N]>`
 
-This gives immediate visual feedback about which environment is active.
+The `[bg:N]` indicator shows how many other contexts (not the current one) have live running processes.
 
 ## Design Rationale
 
@@ -154,3 +214,7 @@ Subprocess commands (the system fallback) need to see context variables without 
 **Why save cwd per context?**
 
 Different environments often correspond to different directories (project roots, deployment repos). Saving cwd per context eliminates repetitive `cd` after every switch.
+
+**Why PTY-per-context rather than job control?**
+
+Traditional job control (`bg`/`fg`/`&`) is complex and exposes Unix process groups to the user. Per-context PTY slots are simpler to reason about: each context has at most one foreground process, and `Ctrl+]` is the only way to switch. The tradeoff is that you cannot have multiple background jobs within a single context — use multiple contexts instead.

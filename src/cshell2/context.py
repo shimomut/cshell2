@@ -1,7 +1,7 @@
 """Context management — named collection with current pointer and push/pop stack.
 
 Each context stores:
-- variables: exported to os.environ on switch
+- variables: set/restored on context switch
 - cwd: saved/restored on switch
 - process_slot: optional running subprocess (for multiplexing)
 """
@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .process import ProcessSlot
@@ -30,7 +30,7 @@ class Context:
     name: str
     variables: dict[str, str] = field(default_factory=dict)
     cwd: str = field(default_factory=os.getcwd)
-    process_slot: ProcessSlot | None = field(default=None, repr=False)
+    process_slot: Any = field(default=None, repr=False)  # ProcessSlot | PythonCommandSlot
 
     @property
     def state(self) -> ContextState:
@@ -46,23 +46,29 @@ class ContextManager:
         self.contexts: dict[str, Context] = {}
         self.current_name: str | None = None
         self.stack: list[str] = []
+        self._display_order: list[str] = []
         self._env_backup: dict[str, str | None] = {}
         self._initial_cwd: str = os.getcwd()
 
-    def create(self, name: str, **variables: str) -> Context:
-        ctx = Context(name=name, variables=variables, cwd=os.getcwd())
+    def create(self, name: str, variables: dict[str, str] | None = None) -> Context:
+        ctx = Context(name=name, variables=dict(variables or {}), cwd=os.getcwd())
         self.contexts[name] = ctx
+        self._display_order.append(name)
         if self.current_name is None:
-            self.current_name = name
-            self._apply_env(ctx)
+            self._activate(name)
         return ctx
+
+    def _activate(self, name: str) -> None:
+        self.current_name = name
+        self._display_order = [name] + [n for n in self._display_order if n != name]
+        self._restore(self.contexts[name])
 
     def switch(self, name: str) -> None:
         if name not in self.contexts:
             raise KeyError(f"No context named '{name}'")
         self._save_current()
-        self.current_name = name
-        self._restore(self.contexts[name])
+        self._unapply_env()
+        self._activate(name)
 
     def push(self, name: str) -> None:
         if self.current_name is not None:
@@ -70,23 +76,19 @@ class ContextManager:
         if name not in self.contexts:
             raise KeyError(f"No context named '{name}'")
         self._save_current()
-        self.current_name = name
-        self._restore(self.contexts[name])
+        self._unapply_env()
+        self._activate(name)
 
     def pop(self) -> Context | None:
+        self._save_current()
+        self._unapply_env()
         if not self.stack:
-            self._save_current()
-            self._unapply_env()
             self.current_name = None
             os.chdir(self._initial_cwd)
             return None
-        self._save_current()
         prev_name = self.stack.pop()
-        self.current_name = prev_name
-        ctx = self.contexts.get(prev_name)
-        if ctx:
-            self._restore(ctx)
-        return ctx
+        self._activate(prev_name)
+        return self.contexts.get(prev_name)
 
     def current(self) -> Context | None:
         if self.current_name is None:
@@ -94,13 +96,14 @@ class ContextManager:
         return self.contexts.get(self.current_name)
 
     def list_contexts(self) -> list[str]:
-        return list(self.contexts.keys())
+        return [n for n in self._display_order if n in self.contexts]
 
     def remove(self, name: str) -> None:
         if name not in self.contexts:
             raise KeyError(f"No context named '{name}'")
         was_current = self.current_name == name
         del self.contexts[name]
+        self._display_order = [n for n in self._display_order if n != name]
         self.stack = [n for n in self.stack if n != name]
         if was_current:
             self._unapply_env()
@@ -114,8 +117,16 @@ class ContextManager:
         ctx = self.current()
         if ctx is None:
             raise RuntimeError("No active context")
+        if key not in self._env_backup:
+            self._env_backup[key] = os.environ.get(key)
         ctx.variables[key] = value
         os.environ[key] = value
+
+    def unset_variable(self, key: str) -> None:
+        ctx = self.current()
+        if ctx is not None:
+            ctx.variables.pop(key, None)
+        os.environ.pop(key, None)
 
     def get_variable(self, key: str) -> str | None:
         ctx = self.current()
@@ -124,7 +135,6 @@ class ContextManager:
         return ctx.variables.get(key)
 
     def _save_current(self) -> None:
-        """Snapshot cwd into the current context before switching away."""
         if self.current_name is None:
             return
         ctx = self.contexts.get(self.current_name)
@@ -132,20 +142,16 @@ class ContextManager:
             ctx.cwd = os.getcwd()
 
     def _restore(self, ctx: Context) -> None:
-        """Apply a context: restore cwd and set env vars."""
-        self._unapply_env()
         os.chdir(ctx.cwd)
         self._apply_env(ctx)
 
     def _apply_env(self, ctx: Context) -> None:
-        """Export context variables to os.environ, backing up originals."""
         self._env_backup = {}
         for key, value in ctx.variables.items():
             self._env_backup[key] = os.environ.get(key)
             os.environ[key] = value
 
     def _unapply_env(self) -> None:
-        """Restore os.environ to state before the current context was applied."""
         for key, original in self._env_backup.items():
             if original is None:
                 os.environ.pop(key, None)

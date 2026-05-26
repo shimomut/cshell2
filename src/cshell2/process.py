@@ -32,6 +32,7 @@ class OutputBuffer:
 
 
 _TRACKED_MODES = {
+    b"1": "app_cursor_keys", # DECCKM — application cursor key sequences (vi, less, …)
     b"1049": "alt_screen",   # alternate screen buffer
     b"1000": "mouse_click",  # mouse click tracking
     b"1002": "mouse_btn",    # mouse button tracking
@@ -46,6 +47,7 @@ class ProcessSlot:
     def __init__(self):
         self.pid: int = -1
         self.master_fd: int = -1
+        self.argv: list[str] = []
         self.buffer: OutputBuffer = OutputBuffer()
         self.active: bool = False
         self.exit_code: int | None = None
@@ -56,6 +58,7 @@ class ProcessSlot:
         }
 
     def start(self, argv: list[str], env: dict[str, str], cwd: str) -> None:
+        self.argv = argv
         master_fd, slave_fd = pty.openpty()
 
         # Set PTY size before fork so child sees correct dimensions immediately
@@ -106,7 +109,14 @@ class ProcessSlot:
     def _reader_loop(self) -> None:
         try:
             while True:
+                # Use select before read: on macOS, a blocking os.read() wakes
+                # with EIO when the slave PTY closes, discarding buffered data.
+                # select() correctly reports the fd as readable when data is
+                # available even after slave close, so we get the data first.
                 try:
+                    r, _, _ = select.select([self.master_fd], [], [], 0.05)
+                    if not r:
+                        continue
                     data = os.read(self.master_fd, 4096)
                 except OSError:
                     break
