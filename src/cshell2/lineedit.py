@@ -113,7 +113,8 @@ class History:
             pass
 
     def add(self, line: str) -> None:
-        if not line.strip():
+        line = line.rstrip()
+        if not line:
             return
         if self._entries and self._entries[-1] == line:
             return
@@ -798,9 +799,14 @@ class LineEditor:
         # _shell_quote only adds quotes when necessary and treats ~ as safe so
         # that home-dir paths like ~/Desktop/ are not needlessly quoted.
         value = _shell_quote(completion.value)
-        # Append a trailing space for arg-taking options so _prompt_for_arg
-        # can insert the value immediately after without an extra separator.
-        value = value + (" " if completion.arg_hint else "")
+        # Append a trailing space so the next argument can be typed immediately.
+        # Skip when: (a) the value ends with "/" — a directory, where the user
+        # may continue typing the path; (b) post already starts with whitespace.
+        # arg_hint flags always get a space — _prompt_for_arg uses it as a separator.
+        if completion.arg_hint:
+            value = value + " "
+        elif not value.endswith("/") and not post[:1].isspace():
+            value = value + " "
         self._buf = pre + value + post
         self._cursor = len(pre) + len(value)
 
