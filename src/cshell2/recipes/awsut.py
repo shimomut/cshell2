@@ -1134,7 +1134,8 @@ def _register_hyperpod(awsut) -> None:
             for k in ("CurrentCount", "TargetCount", "Status",
                       "SoftwareUpdateStatus", "TargetStateCount",
                       "ActiveOperations", "FailureMessages",
-                      "TrainingPlanStatus", "CurrentImageId"):
+                      "TrainingPlanStatus", "CurrentImageId",
+                      "ImageVersionStatus"):
                 _drop(ig, k)
             _rename(ig, "DesiredImageId", "ImageId")
             if "KubernetesConfig" in ig:
