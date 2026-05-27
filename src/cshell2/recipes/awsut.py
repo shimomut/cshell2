@@ -2,13 +2,14 @@
 
 Provides the ``awsut`` command tree:
 
-* ``awsut profile <name>``       — switch AWS_PROFILE
-* ``awsut region <name>``        — switch AWS_REGION + AWS_DEFAULT_REGION
 * ``awsut console <page>``       — open a Management Console URL
 * ``awsut recent-cost``          — show recent AWS cost
 * ``awsut ec2 list|start|stop|reboot``
 * ``awsut logs list|monitor|export``
 * ``awsut cf list|wait|open``
+
+Profile and region switching live in the ``aws`` recipe as ``Var`` entries
+(``var aws_profile=...``, ``var aws_region=...``).
 
 User-customisable defaults (read from ``~/.cshell2/config.py`` if set):
 
@@ -32,12 +33,9 @@ import boto3
 
 from ..commands import registry as command_registry, arg
 from ..completion import (
-    CallbackCompleter,
-    ChoiceCompleter,
     Completer,
     Completion,
     CompletionContext,
-    FileCompleter,
 )
 
 
@@ -124,23 +122,6 @@ def _max_len(items, key) -> int:
 
 
 # ─── completers ─────────────────────────────────────────────────────────────
-
-_AWS_REGIONS = [
-    "us-east-1", "us-east-2", "us-west-1", "us-west-2",
-    "ca-central-1",
-    "ap-south-1", "ap-southeast-2", "ap-northeast-1",
-    "eu-west-1", "eu-west-2", "eu-central-1",
-]
-
-
-class _ProfileCompleter(Completer):
-    def complete(self, ctx: CompletionContext) -> list[Completion]:
-        return [
-            Completion(value=p, description="AWS profile")
-            for p in _get_all_profiles().keys()
-            if p.startswith(ctx.prefix)
-        ]
-
 
 class _ConsolePageCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
@@ -319,35 +300,6 @@ class _ProgressDots:
 
 def register() -> None:
     awsut = command_registry.command("awsut", help="AWS utility commands")
-
-    # ── profile ──
-    @awsut.command(
-        "profile",
-        help="Switch AWS profile",
-        params=[arg("profile_name", completer=_ProfileCompleter())],
-    )
-    def _profile(profile_name):
-        print(f"Switching AWS profile to {profile_name}")
-        os.environ["AWS_PROFILE"] = profile_name
-        boto3.setup_default_session(profile_name=profile_name)
-
-    # ── region ──
-    @awsut.command(
-        "region",
-        help="Switch AWS region",
-        params=[arg("region_name",
-                    completer=ChoiceCompleter([*_AWS_REGIONS, "default"]))],
-    )
-    def _region(region_name):
-        if region_name in ("", "default"):
-            print("Switching to default AWS region")
-            os.environ.pop("AWS_REGION", None)
-            os.environ.pop("AWS_DEFAULT_REGION", None)
-        else:
-            current = os.environ.get("AWS_REGION", "default")
-            print(f"Switching AWS region from {current} to {region_name}")
-            os.environ["AWS_REGION"] = region_name
-            os.environ["AWS_DEFAULT_REGION"] = region_name
 
     # ── console ──
     @awsut.command(
