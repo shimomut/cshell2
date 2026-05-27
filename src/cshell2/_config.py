@@ -3,10 +3,10 @@
 
 # ── Simple example: one positional argument ───────────────────────────────────
 
-from cshell2.commands import registry, arg
+from cshell2.commands import registry as command_registry, arg
 from cshell2.completion import ChoiceCompleter
 
-@registry.command(
+@command_registry.command(
     name="hello",
     help="Greet someone by name.",        # shell-facing description; no docstring needed
     params=[arg("name", nargs="?", default="world", completer=ChoiceCompleter(["world", "there"]))],
@@ -18,7 +18,7 @@ def hello(name):
 # ── Multi-level sub-command example ───────────────────────────────────────────
 #
 # Build a command tree by:
-# 1. Calling `registry.command(name, ...)` bare — returns a `Command` node.
+# 1. Calling `command_registry.command(name, ...)` bare — returns a `Command` node.
 # 2. Chaining `.command(...)` on the node for each child (group or leaf).
 # 3. Using `@parent.command(name, ...)` as a decorator to attach a handler.
 #
@@ -27,7 +27,7 @@ def hello(name):
 # are filtered out before the call.  So `--verbose` and `--dry-run` declared on
 # the `deploy` root are usable on `deploy app`, `deploy rollback`, etc.
 
-deploy = registry.command(
+deploy = command_registry.command(
     "deploy",
     help="Deploy services to environments.",
     params=[
@@ -129,13 +129,67 @@ enable("*")
 # They participate in TAB completion: typing the alias name and pressing TAB
 # completes the rest as if the expansion had been typed.
 
-registry.alias("hp", "awsut hyperpod")
-registry.alias("la", "ls -la")
+command_registry.alias("hp", "awsut hyperpod")
+command_registry.alias("la", "ls -la")
+
+
+# ── Python-backed variables ───────────────────────────────────────────────────
+#
+# Register Vars to give `var NAME=VALUE` custom set logic and TAB completion
+# for the value side.  Two flavours:
+#
+#   * EnvVar         — 1-to-1 passthrough to a single os.environ key.
+#   * Var subclass   — full control: write multiple env keys, validate, etc.
+#
+# At the prompt:
+#
+#     cshell2> var editor=<TAB>           → vim, emacs, nano, code
+#     cshell2> var editor=vim
+#     cshell2> var http_proxy=http://...  → sets HTTP_PROXY *and* HTTPS_PROXY
+
+import os
+from cshell2.variables import registry as var_registry, EnvVar, Var
+
+# Simple case: one logical name → one env var, with completion.
+var_registry.register(EnvVar(
+    name="editor",
+    env_var="EDITOR",
+    completer=ChoiceCompleter(["vim", "emacs", "nano", "code"]),
+    description="Default text editor",
+))
+
+
+# Custom case: one logical name → two env keys.  Subclass Var when EnvVar
+# isn't enough — e.g. when set() needs to write multiple env keys, validate
+# the input, or trigger a side effect.
+class _HttpProxyVar(Var):
+    """Sets HTTP_PROXY and HTTPS_PROXY together from one logical name."""
+
+    @property
+    def name(self) -> str:
+        return "http_proxy"
+
+    @property
+    def description(self) -> str:
+        return "HTTP/HTTPS proxy — sets HTTP_PROXY + HTTPS_PROXY"
+
+    @property
+    def env_keys(self) -> list[str]:
+        # Listed env keys are saved/restored on context switch.
+        return ["HTTP_PROXY", "HTTPS_PROXY"]
+
+    def get(self) -> str | None:
+        return os.environ.get("HTTP_PROXY")
+
+    def set(self, value: str) -> None:
+        os.environ["HTTP_PROXY"] = value
+        os.environ["HTTPS_PROXY"] = value
+
+var_registry.register(_HttpProxyVar())
 
 
 # ── Customize the prompt ──────────────────────────────────────────────────────
 
-import os
 from datetime import datetime
 from cshell2 import set_prompt
 
