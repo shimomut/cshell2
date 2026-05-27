@@ -658,16 +658,14 @@ class CommandRegistry:
         self._commands[name] = cmd
         return cmd
 
-    def register(
-        self,
-        func: Callable,
-        name: str | None = None,
-        params: list[Arg] | None = None,
-        help: str | None = None,
-    ) -> None:
-        """Imperative registration (alternative to decorator)."""
-        cmd_name = name or func.__name__
-        self._make_root(cmd_name, params=params, help=help, func=func)
+    def register(self, cmd: Command) -> None:
+        """Register a pre-built :class:`Command` object.
+
+        Mirrors ``var_registry.register(var_object)``.  Use ``command(...)``
+        instead when you want the registry to build the :class:`Command` for
+        you from ``params`` / ``help`` / a function.
+        """
+        self._commands[cmd.name] = cmd
 
     def register_external_completers(
         self,

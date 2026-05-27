@@ -95,7 +95,7 @@ def hello(name):
 
 Methods:
 - `command(name, *, help=None, params=None)` — decorator to register a Python function. `params=[arg(...)]` declares positionals and flags; the registry derives both an argparse parser and the per-position completer dict from the same list.
-- `register(func, name, ...)` — imperative alternative
+- `register(cmd: Command)` — register a pre-built `Command` object (mirrors `var_registry.register(var_object)`)
 - `register_external_completers(command_name, completers)` — attach a `{None: OptionsCompleter, N: positional}` dict to a system command (e.g. `git`, `docker`) without wrapping it as a Python command
 - `mark_builtins()` — snapshot current commands as builtins (not removed on `reload`)
 - `clear_user_commands()` — remove non-builtin commands and all external completers

@@ -1,6 +1,6 @@
 import pytest
 from cshell2.commands import (
-    CommandRegistry, CmdParser, arg,
+    Command, CommandRegistry, CmdParser, arg,
     _build_completers, _build_usage, _build_help_text,
 )
 from cshell2.completion import ChoiceCompleter, OptionsCompleter
@@ -50,13 +50,16 @@ def test_imperative_register():
     reg = CommandRegistry()
 
     def my_func(x):
-        """Do something."""
         return x
 
-    reg.register(my_func, name="doit")
-    cmd = reg.get("doit")
-    assert cmd.name == "doit"
-    assert cmd.help_text == "Do something."
+    cmd = Command(name="doit", func=my_func, description="Do something.")
+    reg.register(cmd)
+
+    got = reg.get("doit")
+    assert got is cmd
+    assert got.name == "doit"
+    assert got.func("hi") == "hi"
+    assert got.description == "Do something."
 
 
 def _make_deploy_parser():
