@@ -341,7 +341,7 @@ class _CfStackNameCompleter(Completer):
 
 # ─── HyperPod helpers ───────────────────────────────────────────────────────
 
-def _list_clusters_all(sagemaker_client) -> list[dict]:
+def _list_hyperpod_clusters_all(sagemaker_client) -> list[dict]:
     clusters: list[dict] = []
     next_token = None
     while True:
@@ -356,7 +356,7 @@ def _list_clusters_all(sagemaker_client) -> list[dict]:
     return clusters
 
 
-def _list_cluster_nodes_all(sagemaker_client, cluster_name: str) -> list[dict]:
+def _list_hyperpod_cluster_nodes_all(sagemaker_client, cluster_name: str) -> list[dict]:
     nodes: list[dict] = []
     next_token = None
     while True:
@@ -371,7 +371,7 @@ def _list_cluster_nodes_all(sagemaker_client, cluster_name: str) -> list[dict]:
     return nodes
 
 
-def _list_cluster_events_all(sagemaker_client, cluster_name: str) -> list[dict]:
+def _list_hyperpod_cluster_events_all(sagemaker_client, cluster_name: str) -> list[dict]:
     events: list[dict] = []
     next_token = None
     while True:
@@ -386,7 +386,7 @@ def _list_cluster_events_all(sagemaker_client, cluster_name: str) -> list[dict]:
     return events
 
 
-def _list_log_streams_all(logs_client, log_group: str) -> list[dict]:
+def _list_hyperpod_log_streams_all(logs_client, log_group: str) -> list[dict]:
     streams: list[dict] = []
     next_token = None
     while True:
@@ -401,13 +401,13 @@ def _list_log_streams_all(logs_client, log_group: str) -> list[dict]:
     return streams
 
 
-class _Hostnames:
+class _HyperpodHostnames:
     """Maps cluster InstanceId ↔ short private DNS hostname."""
 
-    _instance: "_Hostnames | None" = None
+    _instance: "_HyperpodHostnames | None" = None
 
     @classmethod
-    def instance(cls) -> "_Hostnames":
+    def instance(cls) -> "_HyperpodHostnames":
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
@@ -440,13 +440,13 @@ class _Hostnames:
         return self.hostname_to_node_id.get(hostname)
 
 
-def _resolve_node_id(sm, cluster, cluster_name, node_id_input: str) -> str:
+def _resolve_hyperpod_node_id(sm, cluster, cluster_name, node_id_input: str) -> str:
     """Strip instance-group prefix and convert hostname to node_id when needed."""
     if "/" in node_id_input:
         node_id_input = node_id_input.split("/")[-1]
     if node_id_input.startswith("ip-"):
-        nodes = _list_cluster_nodes_all(sm, cluster_name)
-        hostnames = _Hostnames.instance()
+        nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
+        hostnames = _HyperpodHostnames.instance()
         hostnames.resolve(sm, cluster, nodes)
         resolved = hostnames.get_node_id(node_id_input)
         if resolved:
@@ -454,7 +454,7 @@ def _resolve_node_id(sm, cluster, cluster_name, node_id_input: str) -> str:
     return node_id_input
 
 
-def _print_log(logs_client, log_group, stream):
+def _print_hyperpod_log(logs_client, log_group, stream):
     start_time = int((time.time() - 24 * 60 * 60) * 1000)
     next_token = None
     while True:
@@ -487,11 +487,11 @@ def _print_log(logs_client, log_group, stream):
 
 # ─── HyperPod completers ────────────────────────────────────────────────────
 
-class _ClusterNameCompleter(Completer):
+class _HyperpodClusterNameCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         try:
             sm = _get_sagemaker_client()
-            clusters = _list_clusters_all(sm)
+            clusters = _list_hyperpod_clusters_all(sm)
         except Exception:
             return []
         return [Completion(value=c["ClusterName"], description=c.get("ClusterStatus", ""))
@@ -499,7 +499,7 @@ class _ClusterNameCompleter(Completer):
                 if c["ClusterName"].startswith(ctx.prefix)]
 
 
-class _InstanceGroupNameCompleter(Completer):
+class _HyperpodInstanceGroupNameCompleter(Completer):
     """Completes instance group names. Reads cluster_name from preceding args."""
 
     def complete(self, ctx: CompletionContext) -> list[Completion]:
@@ -520,7 +520,7 @@ class _InstanceGroupNameCompleter(Completer):
                 for c in choices if c.startswith(ctx.prefix)]
 
 
-class _NodeIdCompleter(Completer):
+class _HyperpodNodeIdCompleter(Completer):
     """Completes node IDs (and IG/node_id, hostname). Reads cluster_name from preceding args."""
 
     def __init__(self, with_cwlog: bool = False):
@@ -534,11 +534,11 @@ class _NodeIdCompleter(Completer):
             sm = _get_sagemaker_client()
             logs = _get_boto3_client("logs")
             cluster = sm.describe_cluster(ClusterName=cluster_name)
-            nodes = _list_cluster_nodes_all(sm, cluster_name)
+            nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
         except Exception:
             return []
 
-        hostnames = _Hostnames.instance()
+        hostnames = _HyperpodHostnames.instance()
         try:
             hostnames.resolve(sm, cluster, nodes)
         except Exception:
@@ -558,7 +558,7 @@ class _NodeIdCompleter(Completer):
             cluster_id = cluster["ClusterArn"].split("/")[-1]
             log_group = f"/aws/sagemaker/Clusters/{cluster_name}/{cluster_id}"
             try:
-                streams = _list_log_streams_all(logs, log_group)
+                streams = _list_hyperpod_log_streams_all(logs, log_group)
             except Exception:
                 streams = []
             for stream in streams:
@@ -1067,7 +1067,7 @@ def _register_hyperpod(awsut) -> None:
     @hyperpod.command(
         "update", help="Update a cluster with JSON file",
         params=[
-            arg("cluster_name", completer=_ClusterNameCompleter(),
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter(),
                 help="Name of cluster"),
             arg("--instances", required=True, metavar="FILE",
                 completer=FileCompleter(),
@@ -1102,8 +1102,8 @@ def _register_hyperpod(awsut) -> None:
     @hyperpod.command(
         "scale", help="Scale up or down an instance group",
         params=[
-            arg("cluster_name", completer=_ClusterNameCompleter()),
-            arg("instance_group_name", completer=_InstanceGroupNameCompleter()),
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
+            arg("instance_group_name", completer=_HyperpodInstanceGroupNameCompleter()),
             arg("target_instance_count", type=int),
         ],
     )
@@ -1169,7 +1169,7 @@ def _register_hyperpod(awsut) -> None:
             print(f"Cluster [{cluster_name}] not found.")
             return
         resolved_ids = [
-            _resolve_node_id(sm, cluster, cluster_name, n) for n in node_ids
+            _resolve_hyperpod_node_id(sm, cluster, cluster_name, n) for n in node_ids
         ]
         response = api(ClusterName=cluster_name, NodeIds=resolved_ids)
         print(f"{operation_name} : {response}")
@@ -1177,8 +1177,8 @@ def _register_hyperpod(awsut) -> None:
     @hyperpod.command(
         "delete-nodes", help="Delete specific nodes",
         params=[
-            arg("cluster_name", completer=_ClusterNameCompleter()),
-            arg("node_ids", nargs="+", completer=_NodeIdCompleter(with_cwlog=False)),
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
+            arg("node_ids", nargs="+", completer=_HyperpodNodeIdCompleter(with_cwlog=False)),
         ],
     )
     def _delete_nodes(cluster_name, node_ids):
@@ -1190,8 +1190,8 @@ def _register_hyperpod(awsut) -> None:
     @hyperpod.command(
         "reboot-nodes", help="Reboot specific nodes",
         params=[
-            arg("cluster_name", completer=_ClusterNameCompleter()),
-            arg("node_ids", nargs="+", completer=_NodeIdCompleter(with_cwlog=False)),
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
+            arg("node_ids", nargs="+", completer=_HyperpodNodeIdCompleter(with_cwlog=False)),
         ],
     )
     def _reboot_nodes(cluster_name, node_ids):
@@ -1203,8 +1203,8 @@ def _register_hyperpod(awsut) -> None:
     @hyperpod.command(
         "replace-nodes", help="Replace specific nodes",
         params=[
-            arg("cluster_name", completer=_ClusterNameCompleter()),
-            arg("node_ids", nargs="+", completer=_NodeIdCompleter(with_cwlog=False)),
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
+            arg("node_ids", nargs="+", completer=_HyperpodNodeIdCompleter(with_cwlog=False)),
         ],
     )
     def _replace_nodes(cluster_name, node_ids):
@@ -1216,9 +1216,9 @@ def _register_hyperpod(awsut) -> None:
     @hyperpod.command(
         "update-software", help="Update the AMI of a cluster",
         params=[
-            arg("cluster_name", completer=_ClusterNameCompleter()),
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
             arg("--instance-group-name", metavar="NAME",
-                completer=_InstanceGroupNameCompleter(),
+                completer=_HyperpodInstanceGroupNameCompleter(),
                 help="Instance group to apply update (default: all)"),
             arg("--rolling-update-by", metavar="N|N%",
                 help="Number or percentage of instances to update at once"),
@@ -1258,7 +1258,7 @@ def _register_hyperpod(awsut) -> None:
     @hyperpod.command(
         "delete", help="Delete a cluster",
         params=[
-            arg("cluster_name", completer=_ClusterNameCompleter()),
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
             arg("-y", "--yes", action="store_true",
                 help="Skip confirmation"),
         ],
@@ -1287,7 +1287,7 @@ def _register_hyperpod(awsut) -> None:
     def _list(all_regions):
         def _list_one(region_name=None):
             sm = _get_sagemaker_client(region_name=region_name)
-            clusters = _list_clusters_all(sm)
+            clusters = _list_hyperpod_clusters_all(sm)
             if not clusters:
                 return
             name_w   = _max_len(clusters, "ClusterName")
@@ -1325,7 +1325,7 @@ def _register_hyperpod(awsut) -> None:
     @hyperpod.command(
         "describe", help="Describe cluster and its nodes in depth",
         params=[
-            arg("cluster_name", completer=_ClusterNameCompleter()),
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
             arg("--raw", action="store_true",
                 help="Show raw JSON output from boto3 APIs"),
         ],
@@ -1339,14 +1339,14 @@ def _register_hyperpod(awsut) -> None:
             return
 
         cluster_id = cluster["ClusterArn"].split("/")[-1]
-        nodes = _list_cluster_nodes_all(sm, cluster_name)
+        nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
 
         if raw:
             print(json.dumps({"cluster": cluster, "nodes": nodes},
                              indent=2, default=str))
             return
 
-        hostnames = _Hostnames.instance()
+        hostnames = _HyperpodHostnames.instance()
         hostnames.resolve(sm, cluster, nodes)
 
         print(f"Cluster name : {cluster['ClusterName']}")
@@ -1400,7 +1400,7 @@ def _register_hyperpod(awsut) -> None:
         "wait", help="Wait for asynchronous cluster operations",
         params=[
             arg("cluster_name", nargs="?",
-                completer=_ClusterNameCompleter(),
+                completer=_HyperpodClusterNameCompleter(),
                 help="Cluster name (omit to wait cluster creation/deletion)"),
         ],
     )
@@ -1411,7 +1411,7 @@ def _register_hyperpod(awsut) -> None:
         if cluster_name is None:
             while True:
                 status_list = []
-                for cluster in _list_clusters_all(sm):
+                for cluster in _list_hyperpod_clusters_all(sm):
                     if cluster["ClusterStatus"] not in ("InService", "Failed"):
                         status_list.append(f"{cluster['ClusterName']}:{cluster['ClusterStatus']}")
                 progress.tick(", ".join(status_list))
@@ -1439,7 +1439,7 @@ def _register_hyperpod(awsut) -> None:
                 if ig["CurrentCount"] != ig["TargetCount"]:
                     status_list.append(f"{ig_name}:Scaling({ig['CurrentCount']}->{ig['TargetCount']})")
 
-            for node in _list_cluster_nodes_all(sm, cluster_name):
+            for node in _list_hyperpod_cluster_nodes_all(sm, cluster_name):
                 ig_name = node["InstanceGroupName"]
                 node_id = node["InstanceId"]
                 node_status = node["InstanceStatus"]["Status"]
@@ -1455,8 +1455,8 @@ def _register_hyperpod(awsut) -> None:
     @hyperpod.command(
         "log", help="Print log from a cluster node",
         params=[
-            arg("cluster_name", completer=_ClusterNameCompleter()),
-            arg("node_id", completer=_NodeIdCompleter(with_cwlog=True)),
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
+            arg("node_id", completer=_HyperpodNodeIdCompleter(with_cwlog=True)),
         ],
     )
     def _log(cluster_name, node_id):
@@ -1473,14 +1473,14 @@ def _register_hyperpod(awsut) -> None:
         log_group = f"/aws/sagemaker/Clusters/{cluster_name}/{cluster_id}"
 
         try:
-            streams = _list_log_streams_all(logs, log_group)
+            streams = _list_hyperpod_log_streams_all(logs, log_group)
         except logs.exceptions.ResourceNotFoundException:
             print(f"Log group [{log_group}] not found.")
             return
 
         if node_id.startswith("ip-"):
-            nodes = _list_cluster_nodes_all(sm, cluster_name)
-            hostnames = _Hostnames.instance()
+            nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
+            hostnames = _HyperpodHostnames.instance()
             hostnames.resolve(sm, cluster, nodes)
             node_id = hostnames.get_node_id(node_id) or node_id
 
@@ -1492,7 +1492,7 @@ def _register_hyperpod(awsut) -> None:
                 print("-" * len(header))
                 print(header)
                 print("-" * len(header))
-                _print_log(logs, log_group, stream_name)
+                _print_hyperpod_log(logs, log_group, stream_name)
                 print()
                 found = True
 
@@ -1502,8 +1502,8 @@ def _register_hyperpod(awsut) -> None:
     @hyperpod.command(
         "ssm", help="Login to a cluster node with SSM",
         params=[
-            arg("cluster_name", completer=_ClusterNameCompleter()),
-            arg("node_id", completer=_NodeIdCompleter(with_cwlog=False)),
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
+            arg("node_id", completer=_HyperpodNodeIdCompleter(with_cwlog=False)),
         ],
     )
     def _ssm(cluster_name, node_id):
@@ -1514,9 +1514,9 @@ def _register_hyperpod(awsut) -> None:
             print(f"Cluster [{cluster_name}] not found.")
             return
 
-        nodes = _list_cluster_nodes_all(sm, cluster_name)
+        nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
         cluster_id = cluster["ClusterArn"].split("/")[-1]
-        node_id = _resolve_node_id(sm, cluster, cluster_name, node_id)
+        node_id = _resolve_hyperpod_node_id(sm, cluster, cluster_name, node_id)
 
         ig_name = None
         for node in nodes:
@@ -1535,7 +1535,7 @@ def _register_hyperpod(awsut) -> None:
     @ssh.command(
         "print-config", help="Print SSH config for cluster nodes",
         params=[
-            arg("cluster_name", completer=_ClusterNameCompleter()),
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
             arg("user", choices=["ubuntu", "ec2-user"]),
         ],
     )
@@ -1547,7 +1547,7 @@ def _register_hyperpod(awsut) -> None:
             print(f"Cluster [{cluster_name}] not found.")
             return
 
-        nodes = _list_cluster_nodes_all(sm, cluster_name)
+        nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
         cluster_id = cluster["ClusterArn"].split("/")[-1]
         profile = os.environ.get("AWS_PROFILE", "default")
         region = os.environ.get("AWS_REGION", "")
@@ -1575,7 +1575,7 @@ def _register_hyperpod(awsut) -> None:
     @ssh.command(
         "install-key", help="Install SSH public key to all cluster nodes",
         params=[
-            arg("cluster_name", completer=_ClusterNameCompleter()),
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
             arg("home_path",
                 help="Path to home directory on the cluster (e.g. /fsx/ubuntu)"),
             arg("public_key_file", completer=FileCompleter(),
@@ -1598,7 +1598,7 @@ def _register_hyperpod(awsut) -> None:
             print(f"Cluster [{cluster_name}] not found.")
             return
 
-        nodes = _list_cluster_nodes_all(sm, cluster_name)
+        nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
         cluster_id = cluster["ClusterArn"].split("/")[-1]
 
         with open(os.path.expanduser(public_key_file)) as fd:
@@ -1636,12 +1636,12 @@ def _register_hyperpod(awsut) -> None:
     @hyperpod.command(
         "run", help="Run a single line command on nodes of an instance group",
         params=[
-            arg("cluster_name", completer=_ClusterNameCompleter()),
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
             arg("--instance-group-name", metavar="NAME",
-                completer=_InstanceGroupNameCompleter(),
+                completer=_HyperpodInstanceGroupNameCompleter(),
                 help="Instance group name"),
             arg("--instances", nargs="+", default=[], metavar="NODE",
-                completer=_NodeIdCompleter(with_cwlog=False),
+                completer=_HyperpodNodeIdCompleter(with_cwlog=False),
                 help="Instances to target"),
             arg("--command", required=True, metavar="CMD",
                 help="Single line of command to run"),
@@ -1663,7 +1663,7 @@ def _register_hyperpod(awsut) -> None:
             print(f"Cluster [{cluster_name}] not found.")
             return
 
-        nodes = _list_cluster_nodes_all(sm, cluster_name)
+        nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
         cluster_id = cluster["ClusterArn"].split("/")[-1]
 
         node_ids: list[str] = []
@@ -1671,7 +1671,7 @@ def _register_hyperpod(awsut) -> None:
             if "/" in inst:
                 inst = inst.split("/")[-1]
             if inst.startswith("ip-"):
-                hostnames = _Hostnames.instance()
+                hostnames = _HyperpodHostnames.instance()
                 hostnames.resolve(sm, cluster, nodes)
                 inst = hostnames.get_node_id(inst) or inst
             node_ids.append(inst)
@@ -1754,7 +1754,7 @@ def _register_hyperpod(awsut) -> None:
 
     @hyperpod.command(
         "kubeconfig", help="Update kubeconfig with the EKS cluster",
-        params=[arg("cluster_name", completer=_ClusterNameCompleter())],
+        params=[arg("cluster_name", completer=_HyperpodClusterNameCompleter())],
     )
     def _kubeconfig(cluster_name):
         sm = _get_sagemaker_client()
@@ -1776,7 +1776,7 @@ def _register_hyperpod(awsut) -> None:
     @hyperpod.command(
         "events", help="Print historical events",
         params=[
-            arg("cluster_name", completer=_ClusterNameCompleter()),
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
             arg("--format", choices=["csv", "jsonl"], default="csv",
                 help="Output format"),
             arg("--details", action="store_true",
@@ -1786,7 +1786,7 @@ def _register_hyperpod(awsut) -> None:
     def _events(cluster_name, format, details):
         sm = _get_sagemaker_client()
         try:
-            events = _list_cluster_events_all(sm, cluster_name)
+            events = _list_hyperpod_cluster_events_all(sm, cluster_name)
         except sm.exceptions.ResourceNotFound:
             print(f"Cluster [{cluster_name}] not found.")
             return
