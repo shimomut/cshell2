@@ -1551,8 +1551,8 @@ def _register_hyperpod(awsut) -> None:
 
         nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
         cluster_id = cluster["ClusterArn"].split("/")[-1]
-        profile = os.environ.get("AWS_PROFILE", "default")
-        region = os.environ.get("AWS_REGION", "")
+        profile = _get_profile()
+        region = _get_region() or ""
 
         for ig in cluster["InstanceGroups"] + cluster["RestrictedInstanceGroups"]:
             node_index = 0
