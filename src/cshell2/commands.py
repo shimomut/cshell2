@@ -593,6 +593,8 @@ class CommandRegistry:
         self._commands: dict[str, Command] = {}
         self._external_completers: dict[str, dict[int | None, Completer]] = {}
         self._builtin_names: set[str] = set()
+        self._aliases: dict[str, str] = {}
+        self._builtin_aliases: set[str] = set()
 
     def command(
         self,
@@ -699,13 +701,43 @@ class CommandRegistry:
     def mark_builtins(self) -> None:
         """Snapshot current commands as builtins (won't be removed on reload)."""
         self._builtin_names = set(self._commands.keys())
+        self._builtin_aliases = set(self._aliases.keys())
 
     def clear_user_commands(self) -> None:
-        """Remove all non-builtin commands and external completers."""
+        """Remove all non-builtin commands, external completers, and aliases."""
         self._commands = {
             k: v for k, v in self._commands.items() if k in self._builtin_names
         }
         self._external_completers.clear()
+        self._aliases = {
+            k: v for k, v in self._aliases.items() if k in self._builtin_aliases
+        }
+
+    # ── Aliases ──────────────────────────────────────────────────────────────
+
+    def alias(self, name: str, expansion: str) -> None:
+        """Register *name* as a shorthand that expands to *expansion*.
+
+        Expansion is applied to the first token of a command line (bash-style)
+        so ``hp create`` becomes ``awsut hyperpod create``.  The expansion text
+        is tokenized at use time, so it may contain multiple words and flags.
+
+        Aliases do not chain — the first token of the expansion is never itself
+        re-expanded as an alias, which prevents infinite loops.
+        """
+        self._aliases[name] = expansion
+
+    def unalias(self, name: str) -> bool:
+        """Remove an alias.  Returns True if it existed."""
+        return self._aliases.pop(name, None) is not None
+
+    def get_alias(self, name: str) -> str | None:
+        """Return the expansion for *name*, or None if not aliased."""
+        return self._aliases.get(name)
+
+    def list_aliases(self) -> dict[str, str]:
+        """Return a copy of the alias table."""
+        return dict(self._aliases)
 
 
 registry = CommandRegistry()

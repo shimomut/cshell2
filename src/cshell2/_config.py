@@ -119,6 +119,20 @@ from cshell2.recipes import enable
 enable("*")
 
 
+# ── Aliases ───────────────────────────────────────────────────────────────────
+#
+# Aliases expand the first token of a command line (bash-style):
+#
+#     hp create ...   →  awsut hyperpod create ...
+#     la /tmp         →  ls -la /tmp
+#
+# They participate in TAB completion: typing the alias name and pressing TAB
+# completes the rest as if the expansion had been typed.
+
+registry.alias("hp", "awsut hyperpod")
+registry.alias("la", "ls -la")
+
+
 # ── Customize the prompt ──────────────────────────────────────────────────────
 
 import os

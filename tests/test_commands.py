@@ -395,3 +395,46 @@ def test_has():
 
     assert reg.has("exists")
     assert not reg.has("nope")
+
+
+# ── Aliases ──────────────────────────────────────────────────────────────────
+
+def test_alias_register_and_lookup():
+    reg = CommandRegistry()
+    reg.alias("hp", "awsut hyperpod")
+    assert reg.get_alias("hp") == "awsut hyperpod"
+    assert reg.list_aliases() == {"hp": "awsut hyperpod"}
+
+
+def test_alias_unalias():
+    reg = CommandRegistry()
+    reg.alias("hp", "awsut hyperpod")
+    assert reg.unalias("hp") is True
+    assert reg.get_alias("hp") is None
+    assert reg.unalias("missing") is False
+
+
+def test_alias_overwrite():
+    reg = CommandRegistry()
+    reg.alias("hp", "awsut hyperpod")
+    reg.alias("hp", "echo hello")
+    assert reg.get_alias("hp") == "echo hello"
+
+
+def test_alias_cleared_by_clear_user_commands_unless_builtin():
+    reg = CommandRegistry()
+    reg.alias("builtin_alias", "echo b")
+    reg.mark_builtins()
+    reg.alias("user_alias", "echo u")
+
+    reg.clear_user_commands()
+    assert reg.get_alias("builtin_alias") == "echo b"
+    assert reg.get_alias("user_alias") is None
+
+
+def test_list_aliases_returns_copy():
+    reg = CommandRegistry()
+    reg.alias("hp", "awsut hyperpod")
+    snapshot = reg.list_aliases()
+    snapshot["hp"] = "tampered"
+    assert reg.get_alias("hp") == "awsut hyperpod"

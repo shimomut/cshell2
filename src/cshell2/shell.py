@@ -341,6 +341,15 @@ class Shell:
         stage_line = _split_on_operators(line_before_cursor, [";", "&&", "||", "|"])[-1][1]
         tokens, prefix = split_for_completion(stage_line)
 
+        # Expand the first token if it is an alias, so completions for
+        # `hp <TAB>` come from the expansion's resolved command.
+        if tokens:
+            expansion = self.registry.get_alias(tokens[0])
+            if expansion is not None:
+                expansion_tokens = tokenize(expansion)
+                if expansion_tokens:
+                    tokens = expansion_tokens + tokens[1:]
+
         if not tokens:
             # Bare KEY=VALUE assignment (e.g. "aws_region=us-<TAB>"): delegate
             # to VarCompleter for value-side completion.
@@ -590,6 +599,52 @@ class Shell:
                     print(f"var: invalid argument '{assignment}' (expected NAME=VALUE or NAME= to unset)")
 
         @self.registry.command(
+            name="alias",
+            help=(
+                "Define or list command aliases.\n\n"
+                "  alias                  list all aliases\n"
+                "  alias NAME             show the expansion of NAME\n"
+                "  alias NAME=EXPANSION   define NAME as a shorthand for EXPANSION\n\n"
+                "Aliases expand the first token of a command line.  Quote the\n"
+                "expansion if it contains spaces:  alias hp='awsut hyperpod'."
+            ),
+            params=[arg("assignments", nargs="*", metavar="NAME[=EXPANSION]")],
+        )
+        def alias_cmd(assignments):
+            if not assignments:
+                aliases = self.registry.list_aliases()
+                if not aliases:
+                    return
+                for name in sorted(aliases):
+                    print(f"alias {name}={aliases[name]!r}")
+                return
+            for assignment in assignments:
+                if "=" in assignment:
+                    name, _, expansion = assignment.partition("=")
+                    if not name:
+                        print(f"alias: invalid name in '{assignment}'")
+                        continue
+                    self.registry.alias(name, expansion)
+                else:
+                    expansion = self.registry.get_alias(assignment)
+                    if expansion is None:
+                        print(f"alias: {assignment}: not found")
+                    else:
+                        print(f"alias {assignment}={expansion!r}")
+
+        @self.registry.command(
+            name="unalias",
+            help="Remove one or more aliases.",
+            params=[arg("names", nargs="+", metavar="NAME",
+                        completer=CallbackCompleter(
+                            lambda: sorted(self.registry.list_aliases())))],
+        )
+        def unalias_cmd(names):
+            for name in names:
+                if not self.registry.unalias(name):
+                    print(f"unalias: {name}: not found")
+
+        @self.registry.command(
             name="help",
             help="Show help for a command, or list all commands.",
             params=[arg("command_name", nargs="?", default="",
@@ -796,10 +851,27 @@ class Shell:
             last_exit = self._execute_pipeline(pipeline)
 
     def _tokenize_stage(self, stage: Stage) -> list[str]:
-        """Expand variables, tokenize, glob-expand a stage's text."""
+        """Expand variables, tokenize, alias-expand, and glob-expand a stage's text."""
         tokens = tokenize(stage.text + " ")
         tokens = [os.path.expanduser(t) for t in tokens]
+        tokens = self._expand_alias(tokens)
         return expand_globs(tokens)
+
+    def _expand_alias(self, tokens: list[str]) -> list[str]:
+        """Replace the first token with its alias expansion, if any.
+
+        Aliases never chain — the expansion's own first token is not
+        re-expanded — so cycles are impossible.
+        """
+        if not tokens:
+            return tokens
+        expansion = self.registry.get_alias(tokens[0])
+        if expansion is None:
+            return tokens
+        expansion_tokens = tokenize(expansion)
+        if not expansion_tokens:
+            return tokens
+        return expansion_tokens + tokens[1:]
 
     def _execute_pipeline(self, pipeline: Pipeline) -> int:
         """Execute a pipeline; return exit code of last stage."""

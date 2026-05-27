@@ -119,6 +119,13 @@ class CommandNameCompleter(Completer):
             if name.startswith(prefix):
                 results.append(Completion(value=name, description="command"))
 
+        if hasattr(self._registry, "list_aliases"):
+            for name, expansion in sorted(self._registry.list_aliases().items()):
+                if name.startswith(prefix):
+                    results.append(Completion(
+                        value=name, description=f"alias → {expansion}"
+                    ))
+
         for cmd in self._find_system_commands(prefix):
             results.append(Completion(value=cmd, description="system"))
 
