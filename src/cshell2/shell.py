@@ -187,6 +187,24 @@ def passthrough_run(argv: list[str], **popen_kwargs) -> int:
     return slot._run_in_pty(argv, popen_kwargs)
 
 
+def passthrough_input(prompt: str = "") -> str:
+    """Read a line from real stdin from inside a Python command thread.
+
+    Built-in ``input()`` would race the main forwarding thread for stdin
+    bytes, and even when it won, raw mode would suppress echo and turn
+    Enter into ``\\r``.  ``passthrough_input`` coordinates with the main
+    forwarding loop: it asks the loop to surrender stdin and restore
+    cooked terminal mode, calls :func:`input` on the slot thread, then
+    hands control back.
+
+    Outside a Python command thread, falls back to plain ``input(prompt)``.
+    """
+    slot = getattr(_current_slot, "slot", None)
+    if slot is None:
+        return input(prompt)
+    return slot._run_input(prompt)
+
+
 class PythonCommandSlot:
     """Manages a Python @registry.command running in a background thread.
 
@@ -214,6 +232,11 @@ class PythonCommandSlot:
         self._pty_buffer = OutputBuffer()
         self._pty_active = False
         self._pty_lock = threading.Lock()
+        # passthrough_input() coordination — events are flipped by the
+        # slot thread; the main forwarding loop watches _input_request.
+        self._input_request = threading.Event()
+        self._input_released = threading.Event()
+        self._input_resume = threading.Event()
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -443,6 +466,25 @@ class PythonCommandSlot:
                     sys.stdout.buffer.flush()
                 except OSError:
                     pass
+
+    # --- passthrough_input() implementation ---------------------------------
+
+    def _run_input(self, prompt: str) -> str:
+        """Read a line via input() while the main loop yields stdin and cooked mode."""
+        # Drain pending output so the prompt isn't preceded by buffered text.
+        self._proxy.deactivate()
+        self._proxy.replay()
+        self._input_resume.clear()
+        self._input_released.clear()
+        self._input_request.set()
+        # Wait for the main loop to release stdin and restore cooked mode.
+        self._input_released.wait()
+        try:
+            return input(prompt)
+        finally:
+            self._input_request.clear()
+            self._input_resume.set()
+            self._proxy.activate(raw_mode=True)
 
 
 _DEFAULT_CONFIG_PATH = Path(__file__).parent / "_config.py"
@@ -1396,6 +1438,11 @@ class Shell:
           • other keys    — forwarded to slot.write_stdin, which writes to
             a passthrough_run() PTY master if active (no-op otherwise).
 
+        If the command thread enters passthrough_input(), the loop restores
+        cooked terminal mode and stops reading stdin until the input() call
+        returns.  That gives the slot thread direct, line-buffered access
+        to the terminal for the prompt.
+
         Returns 'exited' when the thread finishes, 'switched' on Ctrl+].
         """
         fd = sys.stdin.fileno()
@@ -1419,6 +1466,18 @@ class Shell:
             slot.activate(raw_mode=True)
 
             while slot.is_alive():
+                if slot._input_request.is_set():
+                    # Hand stdin and cooked mode over to the slot thread for
+                    # the duration of its input() call.
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+                    slot._input_released.set()
+                    while slot.is_alive() and not slot._input_resume.is_set():
+                        slot._input_resume.wait(timeout=0.1)
+                    if not slot.is_alive():
+                        break
+                    tty.setraw(fd)
+                    continue
+
                 rlist, _, _ = select.select([fd], [], [], 0.1)
                 if fd in rlist:
                     data = os.read(fd, 1024)
@@ -1668,7 +1727,7 @@ class Shell:
         for name, argv in running:
             print(f"  {name}: {' '.join(argv)}")
         try:
-            answer = input("Exit anyway? [y/N] ").strip().lower()
+            answer = passthrough_input("Exit anyway? [y/N] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return False

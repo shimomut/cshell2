@@ -470,6 +470,8 @@ def my_ssm():
 
 Outside a Python command thread (e.g. inside a synchronous handler that doesn't run on a slot), `passthrough_run` falls through to plain `subprocess.run`.
 
+**Reading a line of input from the user.** `input()` from a Python command body has the same race as `subprocess.run` — the main thread is also reading stdin in raw mode, so most keystrokes are lost and Enter arrives as `\r` with no echo. Use `cshell2.passthrough_input(prompt)` instead: the slot signals the main loop to restore cooked terminal mode and stop reading stdin for the duration of the call, then takes it back. Built-in commands like `exit`'s "Exit anyway? [y/N]" confirmation use this. Outside a Python command thread, `passthrough_input` falls through to plain `input()`.
+
 **When you don't need it.** Three cases that look like subprocesses but don't race for stdin:
 
 1. **Non-interactive subprocesses** (`subprocess.run(..., capture_output=True)`, `$()` substitution, completer queries that shell out to `git`/`docker`/`aws`). The child doesn't read fd 0, so there's no race. Plain `subprocess.run` is fine.
