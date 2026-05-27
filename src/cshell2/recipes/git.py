@@ -1,118 +1,11 @@
-"""Completion recipe for git."""
+"""Completion recipe for git, modelled as a sub-command tree."""
 
 from __future__ import annotations
 
 import subprocess
 
-from ..commands import registry
-from ..completion import Completer, Completion, CompletionContext, FileCompleter, OptionsCompleter
-
-GIT_SUBCOMMANDS: dict[str, str] = {
-    "add": "add file contents to the index",
-    "bisect": "use binary search to find the commit that introduced a bug",
-    "blame": "show what revision and author last modified each line of a file",
-    "branch": "list, create, or delete branches",
-    "checkout": "switch branches or restore working tree files",
-    "cherry-pick": "apply the changes introduced by some existing commits",
-    "clean": "remove untracked files from the working tree",
-    "clone": "clone a repository into a new directory",
-    "commit": "record changes to the repository",
-    "diff": "show changes between commits or working tree",
-    "fetch": "download objects and refs from another repository",
-    "grep": "print lines matching a pattern",
-    "init": "create an empty Git repository or reinitialize an existing one",
-    "log": "show the commit logs",
-    "merge": "join two or more development histories together",
-    "mv": "move or rename a file, a directory, or a symlink",
-    "pull": "fetch from and integrate with another repository or a local branch",
-    "push": "update remote refs along with associated objects",
-    "rebase": "reapply commits on top of another base tip",
-    "remote": "manage set of tracked repositories",
-    "reset": "reset current HEAD to the specified state",
-    "restore": "restore working tree files",
-    "revert": "revert some existing commits",
-    "rm": "remove files from the working tree and from the index",
-    "show": "show various types of objects",
-    "stash": "stash the changes in a dirty working directory away",
-    "status": "show the working tree status",
-    "switch": "switch branches",
-    "tag": "create, list, delete or verify a tag object",
-}
-
-GIT_STASH_SUBCOMMANDS: dict[str, str] = {
-    "apply": "apply a stash entry without removing it",
-    "clear": "remove all stash entries",
-    "drop": "remove a single stash entry",
-    "list": "list stash entries",
-    "pop": "apply and remove the latest stash entry",
-    "push": "save the current state to the stash",
-    "show": "show the changes recorded in the stash entry",
-}
-
-_SUBCOMMAND_OPTIONS: dict[str, dict[str, str]] = {
-    "commit": {
-        "--all": "stage all tracked modified and deleted files",
-        "--amend": "replace the tip of the current branch",
-        "--dry-run": "show what would be committed",
-        "--no-edit": "use the selected commit message without editing",
-        "--verbose": "show unified diff between HEAD and what would be committed",
-        "-a": "stage all tracked modified and deleted files",
-        "-m": "use the given message as the commit message",
-        "-v": "show unified diff",
-    },
-    "diff": {
-        "--cached": "view staged changes (alias: --staged)",
-        "--ignore-space-change": "ignore changes in whitespace amount",
-        "--name-only": "show only names of changed files",
-        "--name-status": "show names and status of changed files",
-        "--staged": "view staged changes",
-        "--stat": "show diffstat",
-        "--word-diff": "show word-level diff",
-        "-w": "ignore all whitespace",
-    },
-    "log": {
-        "--all": "show all refs",
-        "--follow": "follow file renames",
-        "--graph": "draw a text-based graphical representation",
-        "--no-merges": "do not print commits with more than one parent",
-        "--oneline": "shorthand for --pretty=oneline --abbrev-commit",
-        "--patch": "generate patch",
-        "--reverse": "output commits in reverse order",
-        "--stat": "show diffstat for each commit",
-        "-n": "limit number of commits to output",
-        "-p": "generate patch (alias for --patch)",
-    },
-    "push": {
-        "--all": "push all branches",
-        "--delete": "delete remote ref",
-        "--dry-run": "do everything except actually send the updates",
-        "--follow-tags": "push all local tags missing from remote",
-        "--force": "force push (use with caution)",
-        "--set-upstream": "set upstream tracking for the current branch",
-        "--tags": "push all refs under refs/tags",
-        "-f": "force push (use with caution)",
-        "-u": "set upstream tracking (alias for --set-upstream)",
-    },
-    "checkout": {
-        "-b": "create and switch to a new branch",
-        "-B": "create/reset and switch to a branch",
-        "--detach": "detach HEAD at the named commit",
-        "--orphan": "create a new orphan branch",
-        "--track": "set up tracking mode",
-    },
-    "reset": {
-        "--soft": "reset HEAD only, keep index and working tree",
-        "--mixed": "reset HEAD and index, keep working tree (default)",
-        "--hard": "reset HEAD, index, and working tree",
-    },
-    "rebase": {
-        "--abort": "abort the current rebase operation",
-        "--continue": "continue after resolving conflicts",
-        "--interactive": "make a list of commits to rebase",
-        "--skip": "skip the current patch",
-        "-i": "make a list of commits to rebase (alias for --interactive)",
-    },
-}
+from ..commands import registry, arg
+from ..completion import Completer, Completion, CompletionContext, FileCompleter
 
 
 def _run_git(args: list[str], timeout: float = 2.0) -> list[str]:
@@ -126,22 +19,21 @@ def _run_git(args: list[str], timeout: float = 2.0) -> list[str]:
         return []
 
 
+# ─── Dynamic completers ─────────────────────────────────────────────────────
+
 class GitBranchCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         lines = _run_git(["branch", "--all", "--format=%(refname:short)"])
-        prefix = ctx.prefix
         return [
             Completion(value=b, description="branch")
-            for b in lines
-            if b.startswith(prefix)
+            for b in lines if b.startswith(ctx.prefix)
         ]
 
 
 class GitTagCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         lines = _run_git(["tag"])
-        prefix = ctx.prefix
-        return [Completion(value=t, description="tag") for t in lines if t.startswith(prefix)]
+        return [Completion(value=t, description="tag") for t in lines if t.startswith(ctx.prefix)]
 
 
 class GitModifiedFileCompleter(Completer):
@@ -149,7 +41,6 @@ class GitModifiedFileCompleter(Completer):
 
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         lines = _run_git(["status", "--short"])
-        prefix = ctx.prefix
         seen: set[str] = set()
         completions = []
         for line in lines:
@@ -158,7 +49,7 @@ class GitModifiedFileCompleter(Completer):
             path = line[3:].strip()
             if " -> " in path:
                 path = path.split(" -> ")[-1]
-            if path not in seen and path.startswith(prefix):
+            if path not in seen and path.startswith(ctx.prefix):
                 seen.add(path)
                 completions.append(Completion(value=path))
         return completions
@@ -167,131 +58,238 @@ class GitModifiedFileCompleter(Completer):
 class GitRemoteCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         lines = _run_git(["remote"])
-        prefix = ctx.prefix
-        return [Completion(value=r, description="remote") for r in lines if r.startswith(prefix)]
+        return [Completion(value=r, description="remote") for r in lines if r.startswith(ctx.prefix)]
 
 
 class GitStashRefCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         lines = _run_git(["stash", "list", "--format=%gd: %s"])
-        prefix = ctx.prefix
         completions = []
         for line in lines:
             parts = line.split(": ", 1)
             ref = parts[0]
             desc = parts[1] if len(parts) > 1 else ""
-            if ref.startswith(prefix):
+            if ref.startswith(ctx.prefix):
                 completions.append(Completion(value=ref, description=desc))
         return completions
 
 
-class GitSubcommandCompleter(Completer):
-    def complete(self, ctx: CompletionContext) -> list[Completion]:
-        prefix = ctx.prefix
-        return [
-            Completion(value=sub, description=desc)
-            for sub, desc in GIT_SUBCOMMANDS.items()
-            if sub.startswith(prefix)
-        ]
-
-
-class GitArgCompleter(Completer):
-    """Dispatches to the appropriate completer based on the git subcommand."""
-
+class GitRefCompleter(Completer):
+    """Branches + tags merged (used for diff, show, blame, log)."""
     _branch = GitBranchCompleter()
     _tag = GitTagCompleter()
-    _file = FileCompleter()
-    _modified = GitModifiedFileCompleter()
-    _remote = GitRemoteCompleter()
-    _stash_ref = GitStashRefCompleter()
 
     def complete(self, ctx: CompletionContext) -> list[Completion]:
-        if not ctx.args:
-            return []
-        subcmd = ctx.args[0]
-
-        if subcmd in ("checkout", "switch", "merge", "cherry-pick"):
-            return self._branch.complete(ctx)
-
-        if subcmd == "rebase":
-            return self._branch.complete(ctx)
-
-        if subcmd in ("push", "fetch"):
-            if ctx.arg_index == 1:
-                return self._remote.complete(ctx)
-            return self._branch.complete(ctx)
-
-        if subcmd == "pull":
-            if ctx.arg_index == 1:
-                return self._remote.complete(ctx)
-            return self._branch.complete(ctx)
-
-        if subcmd in ("add", "restore", "rm", "mv"):
-            return self._modified.complete(ctx)
-
-        if subcmd in ("diff", "show", "blame", "log"):
-            results = self._branch.complete(ctx) + self._tag.complete(ctx) + self._file.complete(ctx)
-            seen: set[str] = set()
-            unique = []
-            for c in results:
-                if c.value not in seen:
-                    seen.add(c.value)
-                    unique.append(c)
-            return unique
-
-        if subcmd == "stash":
-            if ctx.arg_index == 1:
-                prefix = ctx.prefix
-                return [
-                    Completion(value=sub, description=desc)
-                    for sub, desc in GIT_STASH_SUBCOMMANDS.items()
-                    if sub.startswith(prefix)
-                ]
-            if len(ctx.args) > 1 and ctx.args[1] in ("apply", "drop", "show"):
-                return self._stash_ref.complete(ctx)
-            return []
-
-        if subcmd == "tag":
-            return self._tag.complete(ctx)
-
-        if subcmd == "branch":
-            return self._branch.complete(ctx)
-
-        if subcmd == "remote":
-            return self._remote.complete(ctx)
-
-        if subcmd == "reset":
-            return self._branch.complete(ctx) + self._tag.complete(ctx)
-
-        return []
+        results = self._branch.complete(ctx) + self._tag.complete(ctx) + FileCompleter().complete(ctx)
+        seen: set[str] = set()
+        unique = []
+        for c in results:
+            if c.value not in seen:
+                seen.add(c.value)
+                unique.append(c)
+        return unique
 
 
-class GitSubcommandOptionsCompleter(Completer):
-    """Options completer that dispatches by git subcommand."""
-
-    def should_activate(self, ctx: CompletionContext) -> bool:
-        return ctx.prefix.startswith("-")
-
-    def complete(self, ctx: CompletionContext) -> list[Completion]:
-        if not ctx.args:
-            return []
-        subcmd = ctx.args[0]
-        options = _SUBCOMMAND_OPTIONS.get(subcmd)
-        if not options:
-            return []
-        prefix = ctx.prefix
-        return [
-            Completion(value=flag, description=desc, multi_select=True)
-            for flag, desc in sorted(options.items())
-            if flag.startswith(prefix)
-        ]
-
+# ─── Tree definition ─────────────────────────────────────────────────────────
 
 def register() -> None:
-    registry.register_external_completers("git", {
-        None: GitSubcommandOptionsCompleter(),
-        0: GitSubcommandCompleter(),
-        1: GitArgCompleter(),
-        2: GitArgCompleter(),
-        3: GitArgCompleter(),
-    })
+    git = registry.command("git", help="distributed version control")
+
+    # ── add ──
+    git.command(
+        "add", help="add file contents to the index",
+        params=[
+            arg("path", nargs="*", completer=GitModifiedFileCompleter()),
+            arg("-A", "--all", action="store_true", help="stage all changes"),
+            arg("-p", "--patch", action="store_true", help="interactive patch"),
+        ],
+    )
+
+    # ── branch ──
+    git.command(
+        "branch", help="list, create, or delete branches",
+        params=[
+            arg("name", nargs="?", completer=GitBranchCompleter()),
+            arg("-d", "--delete", action="store_true", help="delete branch"),
+            arg("-D", action="store_true", help="force delete"),
+            arg("-a", "--all", action="store_true", help="show all branches"),
+            arg("-r", "--remotes", action="store_true", help="show remote branches"),
+        ],
+    )
+
+    # ── checkout / switch / merge / cherry-pick / restore ──
+    git.command(
+        "checkout", help="switch branches or restore working tree files",
+        params=[
+            arg("ref", nargs="?", completer=GitBranchCompleter()),
+            arg("-b", metavar="NEW_BRANCH", help="create and switch to a new branch"),
+            arg("-B", metavar="NEW_BRANCH", help="create/reset and switch to a branch"),
+            arg("--detach", action="store_true", help="detach HEAD"),
+            arg("--orphan", metavar="NEW_BRANCH", help="create a new orphan branch"),
+            arg("--track", action="store_true", help="set up tracking mode"),
+        ],
+    )
+    git.command(
+        "switch", help="switch branches",
+        params=[arg("branch", nargs="?", completer=GitBranchCompleter())],
+    )
+    git.command(
+        "merge", help="join development histories",
+        params=[arg("branch", nargs="?", completer=GitBranchCompleter())],
+    )
+    git.command(
+        "cherry-pick", help="apply changes from existing commits",
+        params=[arg("ref", nargs="?", completer=GitBranchCompleter())],
+    )
+    git.command(
+        "restore", help="restore working tree files",
+        params=[arg("path", nargs="*", completer=GitModifiedFileCompleter())],
+    )
+
+    # ── rm / mv ──
+    git.command(
+        "rm", help="remove files from the working tree and index",
+        params=[arg("path", nargs="*", completer=GitModifiedFileCompleter())],
+    )
+    git.command(
+        "mv", help="move or rename a file",
+        params=[arg("path", nargs="*", completer=GitModifiedFileCompleter())],
+    )
+
+    # ── commit ──
+    git.command(
+        "commit", help="record changes to the repository",
+        params=[
+            arg("-a", "--all", action="store_true", help="stage all tracked"),
+            arg("--amend", action="store_true", help="replace tip commit"),
+            arg("--dry-run", action="store_true", help="show what would be committed"),
+            arg("--no-edit", action="store_true", help="reuse current message"),
+            arg("-v", "--verbose", action="store_true", help="show diff in editor"),
+            arg("-m", "--message", metavar="MSG", help="commit message"),
+        ],
+    )
+
+    # ── diff / show / blame / log ──
+    diff_log_params = [
+        arg("ref", nargs="*", completer=GitRefCompleter()),
+        arg("--cached", action="store_true", help="view staged changes"),
+        arg("--staged", action="store_true", help="view staged changes"),
+        arg("--name-only", action="store_true", help="show only filenames"),
+        arg("--name-status", action="store_true", help="show names and status"),
+        arg("--stat", action="store_true", help="show diffstat"),
+        arg("--word-diff", action="store_true", help="word-level diff"),
+        arg("-w", action="store_true", help="ignore whitespace"),
+    ]
+    git.command("diff", help="show changes between commits or working tree", params=diff_log_params)
+    git.command(
+        "show", help="show various types of objects",
+        params=[arg("ref", nargs="?", completer=GitRefCompleter())],
+    )
+    git.command(
+        "blame", help="show last revision per line of a file",
+        params=[arg("file", nargs="?", completer=FileCompleter())],
+    )
+    git.command(
+        "log", help="show commit logs",
+        params=[
+            arg("ref", nargs="*", completer=GitRefCompleter()),
+            arg("--all", action="store_true", help="all refs"),
+            arg("--follow", action="store_true", help="follow renames"),
+            arg("--graph", action="store_true", help="ascii graph"),
+            arg("--no-merges", action="store_true", help="omit merges"),
+            arg("--oneline", action="store_true", help="one line per commit"),
+            arg("--patch", action="store_true", help="generate patch"),
+            arg("-p", action="store_true", help="generate patch"),
+            arg("--reverse", action="store_true", help="reverse order"),
+            arg("--stat", action="store_true", help="show diffstat"),
+            arg("-n", metavar="N", type=int, help="limit number of commits"),
+        ],
+    )
+
+    # ── push / pull / fetch ──
+    git.command(
+        "push", help="update remote refs",
+        params=[
+            arg("remote", nargs="?", completer=GitRemoteCompleter()),
+            arg("branch", nargs="?", completer=GitBranchCompleter()),
+            arg("--all", action="store_true", help="push all branches"),
+            arg("--delete", action="store_true", help="delete remote ref"),
+            arg("--dry-run", action="store_true", help="dry run"),
+            arg("--follow-tags", action="store_true", help="push local tags"),
+            arg("-f", "--force", action="store_true", help="force push"),
+            arg("--set-upstream", action="store_true", help="set upstream"),
+            arg("-u", action="store_true", help="set upstream"),
+            arg("--tags", action="store_true", help="push all tags"),
+        ],
+    )
+    git.command(
+        "pull", help="fetch and integrate",
+        params=[
+            arg("remote", nargs="?", completer=GitRemoteCompleter()),
+            arg("branch", nargs="?", completer=GitBranchCompleter()),
+        ],
+    )
+    git.command(
+        "fetch", help="download objects and refs",
+        params=[
+            arg("remote", nargs="?", completer=GitRemoteCompleter()),
+            arg("branch", nargs="?", completer=GitBranchCompleter()),
+        ],
+    )
+
+    # ── reset / rebase ──
+    git.command(
+        "reset", help="reset HEAD to a specified state",
+        params=[
+            arg("ref", nargs="?", completer=GitRefCompleter()),
+            arg("--soft", action="store_true", help="keep index and worktree"),
+            arg("--mixed", action="store_true", help="default — reset index"),
+            arg("--hard", action="store_true", help="reset everything"),
+        ],
+    )
+    git.command(
+        "rebase", help="reapply commits on top of another base",
+        params=[
+            arg("ref", nargs="?", completer=GitBranchCompleter()),
+            arg("--abort", action="store_true", help="abort current rebase"),
+            arg("--continue", action="store_true", help="continue after conflicts"),
+            arg("-i", "--interactive", action="store_true", help="interactive list"),
+            arg("--skip", action="store_true", help="skip current patch"),
+        ],
+    )
+
+    # ── remote / tag ──
+    git.command(
+        "remote", help="manage tracked repositories",
+        params=[arg("name", nargs="?", completer=GitRemoteCompleter())],
+    )
+    git.command(
+        "tag", help="create, list, delete, or verify a tag",
+        params=[arg("name", nargs="?", completer=GitTagCompleter())],
+    )
+
+    # ── stash (nested sub-commands) ──
+    stash = git.command("stash", help="stash dirty working state")
+    stash.command("apply", help="apply a stash without removing it",
+                  params=[arg("ref", nargs="?", completer=GitStashRefCompleter())])
+    stash.command("drop",  help="remove a single stash entry",
+                  params=[arg("ref", nargs="?", completer=GitStashRefCompleter())])
+    stash.command("show",  help="show the changes recorded in a stash",
+                  params=[arg("ref", nargs="?", completer=GitStashRefCompleter())])
+    stash.command("pop",   help="apply and remove the latest stash",
+                  params=[arg("ref", nargs="?", completer=GitStashRefCompleter())])
+    stash.command("push",  help="save the current state to the stash")
+    stash.command("list",  help="list stash entries")
+    stash.command("clear", help="remove all stash entries")
+
+    # ── flat sub-commands without dynamic completion ──
+    for sub, desc in [
+        ("bisect", "binary search to find a bad commit"),
+        ("clean",  "remove untracked files from the working tree"),
+        ("clone",  "clone a repository into a new directory"),
+        ("grep",   "print lines matching a pattern"),
+        ("init",   "create an empty Git repository"),
+        ("revert", "revert some existing commits"),
+        ("status", "show the working tree status"),
+    ]:
+        git.command(sub, help=desc)

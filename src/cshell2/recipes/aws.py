@@ -1,15 +1,11 @@
-"""Completion recipe for aws (AWS CLI).
+"""Completion recipe for the AWS CLI, modelled as a sub-command tree.
 
-Currently supports the ``aws s3`` service group and its subcommands:
+Currently models the ``aws s3`` service group and its sub-commands:
 ls, cp, mv, sync, rm, mb, rb, presign, website.
 
-Global flags ``--region`` and ``--profile`` are completed anywhere on the
-command line, including when they appear before the service name.
-
-Enable in ~/.cshell2/config.py::
-
-    from cshell2.recipes import enable
-    enable("aws")
+Global flags (``--region``, ``--profile``, …) are declared at the root and
+inherit down to every leaf, so they can be typed at any position once the
+defining ancestor is reached in the walk.
 """
 
 from __future__ import annotations
@@ -19,16 +15,9 @@ import os
 import subprocess
 from pathlib import Path
 
-from ..commands import registry
+from ..commands import registry, arg
 from ..completion import Completer, Completion, CompletionContext, FileCompleter
 from ..variables import EnvVar, Var, var_registry
-
-# ─── Service map ─────────────────────────────────────────────────────────────
-
-AWS_SERVICES: dict[str, str] = {
-    "s3": "Amazon S3 — object storage",
-    # More services can be added here as support grows
-}
 
 # ─── AWS regions ─────────────────────────────────────────────────────────────
 
@@ -68,126 +57,6 @@ AWS_REGIONS: list[tuple[str, str]] = [
     ("us-west-2",       "US West (Oregon)"),
 ]
 
-# ─── aws s3 subcommands ──────────────────────────────────────────────────────
-
-S3_SUBCOMMANDS: dict[str, str] = {
-    "cp":      "copy a local file or S3 object to another location",
-    "ls":      "list S3 objects and common prefixes under a bucket or prefix",
-    "mb":      "make a new S3 bucket",
-    "mv":      "move a local file or S3 object to another location",
-    "presign": "generate a pre-signed URL for an Amazon S3 object",
-    "rb":      "remove an empty S3 bucket",
-    "rm":      "delete an S3 object",
-    "sync":    "sync directories and S3 prefixes",
-    "website": "set the website configuration for a bucket",
-}
-
-# ─── Options ─────────────────────────────────────────────────────────────────
-
-_GLOBAL_OPTIONS: dict[str, str] = {
-    "--color":        "turn on/off color output (on|off|auto)",
-    "--debug":        "turn on debug logging",
-    "--endpoint-url": "override the command's default URL",
-    "--no-cli-pager": "disable output through a pager",
-    "--no-color":     "disable color output",
-    "--no-verify-ssl":"override default behavior of verifying SSL certificates",
-    "--output":       "output format (json|text|table|yaml)",
-    "--profile":      "use a specific profile from your credential file",
-    "--region":       "override the endpoint region",
-}
-
-# Flags that take a following value argument (used to mark arg_hint and to
-# detect when to complete the value rather than the next positional arg).
-_GLOBAL_VALUE_FLAGS: set[str] = {
-    "--color", "--endpoint-url", "--output", "--profile", "--region",
-}
-
-# Options shared by cp, mv, sync (transfer commands)
-_S3_TRANSFER_OPTIONS: dict[str, str] = {
-    "--acl":                "sets the ACL for the object (private|public-read|...)",
-    "--cache-control":      "sets the Cache-Control HTTP header",
-    "--content-disposition":"sets the Content-Disposition HTTP header",
-    "--content-encoding":   "sets the Content-Encoding HTTP header",
-    "--content-language":   "sets the Content-Language HTTP header",
-    "--content-type":       "sets the Content-Type HTTP header",
-    "--dryrun":             "display operations without executing them",
-    "--exclude":            "exclude files or objects matching the specified pattern",
-    "--follow-symlinks":    "follow symbolic links when uploading to S3",
-    "--include":            "include only files or objects matching the specified pattern",
-    "--metadata":           "metadata to set on the object (key=value pairs)",
-    "--metadata-directive": "specifies whether metadata is copied or replaced",
-    "--no-follow-symlinks": "do not follow symbolic links",
-    "--no-guess-mime-type": "do not guess MIME type based on file extension",
-    "--no-progress":        "do not display a progress bar",
-    "--only-show-errors":   "only show errors and warnings",
-    "--quiet":              "suppress all output",
-    "--recursive":          "perform the command recursively",
-    "--request-payer":      "confirms that requester will pay (requester)",
-    "--source-region":      "region of the source bucket",
-    "--sse":                "server-side encryption algorithm (AES256|aws:kms)",
-    "--sse-kms-key-id":     "customer master key ID for server-side encryption",
-    "--storage-class":      "storage class (STANDARD|REDUCED_REDUNDANCY|STANDARD_IA|...)",
-}
-
-_S3_SUBCOMMAND_OPTIONS: dict[str, dict[str, str]] = {
-    "ls": {
-        "--human-readable": "display file sizes in human readable format",
-        "--page-size":      "number of items to return per API call",
-        "--recursive":      "perform the command recursively on all S3 objects",
-        "--request-payer":  "confirms that requester will pay (requester)",
-        "--summarize":      "display summary information (total objects and total size)",
-    },
-    "cp": {
-        **_S3_TRANSFER_OPTIONS,
-        "--expected-size":     "expected size of the file (for multipart progress tracking)",
-        "--grants":            "grant permissions to individual users or groups",
-        "--website-redirect":  "redirect requests to another object or external URL",
-    },
-    "mv": {
-        **_S3_TRANSFER_OPTIONS,
-        "--grants":           "grant permissions to individual users or groups",
-        "--website-redirect": "redirect requests to another object or external URL",
-    },
-    "sync": {
-        **_S3_TRANSFER_OPTIONS,
-        "--delete":            "delete files in destination not present in source",
-        "--exact-timestamps":  "sync only when timestamps match exactly",
-        "--grants":            "grant permissions to individual users or groups",
-        "--size-only":         "compare only object sizes, not timestamps",
-    },
-    "rm": {
-        "--dryrun":          "display operations without executing them",
-        "--exclude":         "exclude files or objects matching the specified pattern",
-        "--include":         "include only files or objects matching the specified pattern",
-        "--no-progress":     "do not display a progress bar",
-        "--only-show-errors":"only show errors and warnings",
-        "--page-size":       "number of items to return per API call",
-        "--quiet":           "suppress all output",
-        "--recursive":       "recursively delete all objects under the given prefix",
-        "--request-payer":   "confirms that requester will pay (requester)",
-    },
-    "mb": {
-        "--region": "region in which to create the bucket",
-    },
-    "rb": {
-        "--force": "remove bucket contents before deleting the bucket",
-    },
-    "presign": {
-        "--expires-in": "seconds until the pre-signed URL expires (default 3600)",
-    },
-    "website": {
-        "--index-document": "suffix appended to requests for a directory (e.g. index.html)",
-        "--error-document":  "key name prefix for 4XX class error documents",
-    },
-}
-
-# s3 subcommands that accept S3 URIs only
-_S3_ONLY_SUBCMDS: frozenset[str] = frozenset({"ls", "mb", "rb", "rm", "presign", "website"})
-# s3 subcommands that accept both local paths and S3 URIs
-_S3_MIXED_SUBCMDS: frozenset[str] = frozenset({"cp", "mv", "sync"})
-
-
-# ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def _run_aws(args: list[str], timeout: float = 5.0) -> list[str]:
     try:
@@ -200,52 +69,23 @@ def _run_aws(args: list[str], timeout: float = 5.0) -> list[str]:
         return []
 
 
-def _positional_args(args: list[str]) -> list[str]:
-    """Return positional (non-flag, non-flag-value) args from *args*.
-
-    Flags in ``_GLOBAL_VALUE_FLAGS`` consume the next token as their value;
-    all other ``--foo`` / ``-f`` tokens are skipped as boolean flags.
-    The remaining tokens (the actual positional arguments) are returned.
-    """
-    result: list[str] = []
-    skip_next = False
-    for arg in args:
-        if skip_next:
-            skip_next = False
-            continue
-        if arg in _GLOBAL_VALUE_FLAGS:
-            skip_next = True   # next token is the flag's value, skip it too
-        elif arg.startswith("-"):
-            pass               # boolean flag — skip
-        else:
-            result.append(arg)
-    return result
-
-
 # ─── Completers ──────────────────────────────────────────────────────────────
 
 class AwsRegionCompleter(Completer):
-    """Completes AWS region identifiers."""
-
     def complete(self, ctx: CompletionContext) -> list[Completion]:
-        prefix = ctx.prefix
         return [
             Completion(value=region, description=description)
             for region, description in AWS_REGIONS
-            if region.startswith(prefix)
+            if region.startswith(ctx.prefix)
         ]
 
 
 class AwsProfileCompleter(Completer):
-    """Completes AWS profile names from ~/.aws/config and ~/.aws/credentials."""
-
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         profiles = self._get_profiles()
-        prefix = ctx.prefix
         return [
             Completion(value=p, description="AWS profile")
-            for p in profiles
-            if p.startswith(prefix)
+            for p in profiles if p.startswith(ctx.prefix)
         ]
 
     def _get_profiles(self) -> list[str]:
@@ -262,12 +102,10 @@ class AwsProfileCompleter(Completer):
             except configparser.Error:
                 continue
             for section in parser.sections():
-                # ~/.aws/config uses "profile NAME"; credentials uses "NAME"
                 if section.startswith("profile "):
                     profiles.add(section[len("profile "):])
                 elif section.lower() != "default":
                     profiles.add(section)
-        # Always include "default" if it exists in either file
         for config_file in (
             Path.home() / ".aws" / "credentials",
             Path.home() / ".aws" / "config",
@@ -283,19 +121,8 @@ class AwsProfileCompleter(Completer):
         return sorted(profiles)
 
 
-# Maps a value-taking global flag to its value completer.
-_FLAG_VALUE_COMPLETERS: dict[str, Completer] = {
-    "--region":  AwsRegionCompleter(),
-    "--profile": AwsProfileCompleter(),
-}
-
-
 class S3PathCompleter(Completer):
-    """Completes S3 URIs (s3://bucket/key) and local filesystem paths.
-
-    When the prefix starts with ``s3://``, calls ``aws s3 ls`` to enumerate
-    buckets and object keys.  Otherwise delegates to :class:`FileCompleter`.
-    """
+    """Completes S3 URIs (s3://bucket/key) and local filesystem paths."""
 
     _file = FileCompleter()
 
@@ -305,17 +132,12 @@ class S3PathCompleter(Completer):
         return self._file.complete(ctx)
 
     def _complete_s3(self, prefix: str) -> list[Completion]:
-        rest = prefix[5:]  # strip leading "s3://"
+        rest = prefix[5:]
         slash_pos = rest.find("/")
-
         if slash_pos == -1:
-            # User is still typing the bucket name — list all buckets
             return self._list_buckets(rest)
-
         bucket = rest[:slash_pos]
-        key_part = rest[slash_pos + 1:]  # everything after "s3://bucket/"
-
-        # Find the "parent directory" to list, filter by what comes after it
+        key_part = rest[slash_pos + 1:]
         last_slash = key_part.rfind("/")
         if last_slash == -1:
             parent_uri = f"s3://{bucket}/"
@@ -324,14 +146,12 @@ class S3PathCompleter(Completer):
             parent_key = key_part[: last_slash + 1]
             parent_uri = f"s3://{bucket}/{parent_key}"
             partial = key_part[last_slash + 1:]
-
         return self._list_objects(parent_uri, partial)
 
     def _list_buckets(self, partial: str) -> list[Completion]:
         lines = _run_aws(["s3", "ls"])
         completions = []
         for line in lines:
-            # Format: "2023-01-01 00:00:00 bucket-name"
             parts = line.split()
             if len(parts) >= 3:
                 bucket = parts[-1]
@@ -348,10 +168,8 @@ class S3PathCompleter(Completer):
         completions = []
         for line in lines:
             if "PRE " in line:
-                # Common prefix ("directory")
-                # Format: "                           PRE subdir/"
                 idx = line.index("PRE ") + 4
-                name = line[idx:].strip()  # e.g. "subdir/"
+                name = line[idx:].strip()
                 if name.startswith(partial):
                     completions.append(Completion(
                         value=parent_uri + name,
@@ -359,9 +177,6 @@ class S3PathCompleter(Completer):
                         description="prefix",
                     ))
             else:
-                # Object line: "2023-01-01 00:00:00   12345 key with spaces.txt"
-                # Split into at most 4 parts so the filename (which may contain
-                # spaces) is captured whole in parts[3].
                 parts = line.split(None, 3)
                 if len(parts) >= 4:
                     name = parts[3]
@@ -375,104 +190,161 @@ class S3PathCompleter(Completer):
         return completions
 
 
-class AwsArgCompleter(Completer):
-    """Dispatches positional completions for the AWS CLI.
+# ─── Tree definition ─────────────────────────────────────────────────────────
 
-    Handles global value-taking flags (``--region``, ``--profile``, …) that
-    may appear *before* the service name by stripping flag+value pairs from
-    ``ctx.args`` before doing positional dispatch.  Also completes the value
-    of those flags when the previous token is the flag itself.
-    """
-
-    _s3_path = S3PathCompleter()
-
-    def complete(self, ctx: CompletionContext) -> list[Completion]:
-        # Priority 1: complete the *value* of a value-taking global flag.
-        # Flags with a specific completer (--region, --profile) get one;
-        # flags without (--endpoint-url, --output, --color) return nothing so
-        # InlineArgPrompt is used for free-text entry instead.
-        if ctx.args and ctx.args[-1] in _GLOBAL_VALUE_FLAGS:
-            completer = _FLAG_VALUE_COMPLETERS.get(ctx.args[-1])
-            return completer.complete(ctx) if completer else []
-
-        # Strip flag+value pairs to get the "logical" positional args.
-        positionals = _positional_args(ctx.args)
-        effective_index = len(positionals)
-
-        if effective_index == 0:
-            # Complete the service name (e.g. "s3")
-            prefix = ctx.prefix
-            return [
-                Completion(value=svc, description=desc)
-                for svc, desc in AWS_SERVICES.items()
-                if svc.startswith(prefix)
-            ]
-
-        service = positionals[0]
-
-        if service == "s3":
-            return self._complete_s3(ctx, positionals, effective_index)
-
-        return []
-
-    def _complete_s3(
-        self,
-        ctx: CompletionContext,
-        positionals: list[str],
-        effective_index: int,
-    ) -> list[Completion]:
-        if effective_index == 1:
-            # Complete the s3 subcommand name
-            prefix = ctx.prefix
-            return [
-                Completion(value=sub, description=desc)
-                for sub, desc in S3_SUBCOMMANDS.items()
-                if sub.startswith(prefix)
-            ]
-
-        if len(positionals) < 2:
-            return []
-        subcmd = positionals[1]
-
-        # effective_index >= 2: complete path arguments (S3 URI or local path)
-        if subcmd in _S3_ONLY_SUBCMDS or subcmd in _S3_MIXED_SUBCMDS:
-            return self._s3_path.complete(ctx)
-
-        return []
+# Shared option lists for transfer-style commands
+_TRANSFER_OPTIONS = [
+    arg("--acl",                metavar="ACL",          help="ACL (private|public-read|...)"),
+    arg("--cache-control",      metavar="VALUE",        help="Cache-Control header"),
+    arg("--content-disposition", metavar="VALUE",       help="Content-Disposition header"),
+    arg("--content-encoding",   metavar="VALUE",        help="Content-Encoding header"),
+    arg("--content-language",   metavar="VALUE",        help="Content-Language header"),
+    arg("--content-type",       metavar="VALUE",        help="Content-Type header"),
+    arg("--dryrun",             action="store_true",    help="display operations without executing"),
+    arg("--exclude",            metavar="PATTERN",      help="exclude matching files"),
+    arg("--follow-symlinks",    action="store_true",    help="follow symbolic links"),
+    arg("--include",            metavar="PATTERN",      help="include matching files"),
+    arg("--metadata",           metavar="KEY=VAL",      help="metadata pairs"),
+    arg("--metadata-directive", metavar="DIRECTIVE",    help="copy or replace metadata"),
+    arg("--no-follow-symlinks", action="store_true",    help="do not follow symlinks"),
+    arg("--no-guess-mime-type", action="store_true",    help="do not guess MIME type"),
+    arg("--no-progress",        action="store_true",    help="hide progress bar"),
+    arg("--only-show-errors",   action="store_true",    help="only show errors"),
+    arg("--quiet",              action="store_true",    help="suppress all output"),
+    arg("--recursive",          action="store_true",    help="recurse into directories"),
+    arg("--request-payer",      metavar="REQUESTER",    help="confirm requester pays"),
+    arg("--source-region",      metavar="REGION",       help="source bucket region"),
+    arg("--sse",                metavar="ALGO",         help="server-side encryption (AES256|aws:kms)"),
+    arg("--sse-kms-key-id",     metavar="KEY_ID",       help="customer master key ID"),
+    arg("--storage-class",      metavar="CLASS",        help="storage class"),
+]
 
 
-class AwsOptionsCompleter(Completer):
-    """Completes AWS CLI flags, merging global and per-subcommand options."""
+def register() -> None:
+    aws = registry.command(
+        "aws", help="AWS CLI",
+        params=[
+            arg("--color",        metavar="WHEN",     help="color output (on|off|auto)"),
+            arg("--debug",        action="store_true", help="turn on debug logging"),
+            arg("--endpoint-url", metavar="URL",      help="override endpoint URL"),
+            arg("--no-cli-pager", action="store_true", help="disable pager"),
+            arg("--no-color",     action="store_true", help="disable color output"),
+            arg("--no-verify-ssl", action="store_true", help="disable SSL verification"),
+            arg("--output",       metavar="FORMAT",   help="output format (json|text|table|yaml)"),
+            arg("--profile",      metavar="PROFILE",  help="named profile",
+                                  completer=AwsProfileCompleter()),
+            arg("--region",       metavar="REGION",   help="override endpoint region",
+                                  completer=AwsRegionCompleter()),
+        ],
+    )
 
-    def should_activate(self, ctx: CompletionContext) -> bool:
-        return ctx.prefix.startswith("-")
+    s3 = aws.command("s3", help="Amazon S3 — object storage")
 
-    def complete(self, ctx: CompletionContext) -> list[Completion]:
-        all_options: dict[str, str] = dict(_GLOBAL_OPTIONS)
+    s3.command(
+        "ls", help="list S3 objects under a bucket or prefix",
+        params=[
+            arg("path", nargs="?", completer=S3PathCompleter()),
+            arg("--human-readable", action="store_true", help="human readable sizes"),
+            arg("--page-size",      metavar="N", type=int, help="API page size"),
+            arg("--recursive",      action="store_true", help="recurse"),
+            arg("--request-payer",  metavar="REQUESTER", help="requester pays"),
+            arg("--summarize",      action="store_true", help="show summary"),
+        ],
+    )
 
-        # Add service + subcommand specific options when we know them.
-        # Strip flag+value pairs to find the logical positional args.
-        positionals = _positional_args(ctx.args)
-        if len(positionals) >= 2 and positionals[0] == "s3":
-            subcmd = positionals[1]
-            all_options.update(_S3_SUBCOMMAND_OPTIONS.get(subcmd, {}))
+    s3.command(
+        "cp", help="copy a local file or S3 object to another location",
+        params=[
+            arg("src", completer=S3PathCompleter()),
+            arg("dst", completer=S3PathCompleter()),
+            *_TRANSFER_OPTIONS,
+            arg("--expected-size",    metavar="BYTES", help="expected file size"),
+            arg("--grants",           metavar="GRANT", help="grant permissions"),
+            arg("--website-redirect", metavar="URL",   help="website redirect"),
+        ],
+    )
 
-        prefix = ctx.prefix
-        return [
-            Completion(
-                value=flag,
-                description=desc,
-                multi_select=True,
-                arg_hint="VALUE" if flag in _GLOBAL_VALUE_FLAGS else "",
-            )
-            for flag, desc in sorted(all_options.items())
-            if flag.startswith(prefix)
-        ]
+    s3.command(
+        "mv", help="move a local file or S3 object to another location",
+        params=[
+            arg("src", completer=S3PathCompleter()),
+            arg("dst", completer=S3PathCompleter()),
+            *_TRANSFER_OPTIONS,
+            arg("--grants",           metavar="GRANT", help="grant permissions"),
+            arg("--website-redirect", metavar="URL",   help="website redirect"),
+        ],
+    )
+
+    s3.command(
+        "sync", help="sync directories and S3 prefixes",
+        params=[
+            arg("src", completer=S3PathCompleter()),
+            arg("dst", completer=S3PathCompleter()),
+            *_TRANSFER_OPTIONS,
+            arg("--delete",            action="store_true", help="delete extras at dst"),
+            arg("--exact-timestamps",  action="store_true", help="exact timestamp match"),
+            arg("--grants",            metavar="GRANT",     help="grant permissions"),
+            arg("--size-only",         action="store_true", help="compare by size only"),
+        ],
+    )
+
+    s3.command(
+        "rm", help="delete an S3 object",
+        params=[
+            arg("path", completer=S3PathCompleter()),
+            arg("--dryrun",          action="store_true", help="dry run"),
+            arg("--exclude",         metavar="PATTERN",   help="exclude pattern"),
+            arg("--include",         metavar="PATTERN",   help="include pattern"),
+            arg("--no-progress",     action="store_true", help="hide progress"),
+            arg("--only-show-errors", action="store_true", help="only show errors"),
+            arg("--page-size",       metavar="N", type=int, help="API page size"),
+            arg("--quiet",           action="store_true", help="suppress output"),
+            arg("--recursive",       action="store_true", help="delete recursively"),
+            arg("--request-payer",   metavar="REQUESTER", help="requester pays"),
+        ],
+    )
+
+    s3.command(
+        "mb", help="make a new S3 bucket",
+        params=[arg("path", completer=S3PathCompleter())],
+    )
+
+    s3.command(
+        "rb", help="remove an empty S3 bucket",
+        params=[
+            arg("path", completer=S3PathCompleter()),
+            arg("--force", action="store_true", help="remove contents first"),
+        ],
+    )
+
+    s3.command(
+        "presign", help="generate a pre-signed URL for an S3 object",
+        params=[
+            arg("path", completer=S3PathCompleter()),
+            arg("--expires-in", metavar="SECONDS", type=int, help="expiry seconds"),
+        ],
+    )
+
+    s3.command(
+        "website", help="set the website configuration for a bucket",
+        params=[
+            arg("path", completer=S3PathCompleter()),
+            arg("--index-document", metavar="KEY", help="index document"),
+            arg("--error-document", metavar="KEY", help="error document"),
+        ],
+    )
+
+    # ─── Variables ───────────────────────────────────────────────────────
+    var_registry.register(_AwsRegionVar())
+    var_registry.register(EnvVar(
+        name="aws_profile",
+        env_var="AWS_PROFILE",
+        completer=AwsProfileCompleter(),
+        description="AWS named profile",
+    ))
 
 
-# ─── Variables ───────────────────────────────────────────────────────────────
-
-class AwsRegionVar(Var):
+class _AwsRegionVar(Var):
     """Sets AWS_REGION and AWS_DEFAULT_REGION together from one logical name."""
 
     @property
@@ -501,26 +373,3 @@ class AwsRegionVar(Var):
     @property
     def value_completer(self) -> Completer:
         return AwsRegionCompleter()
-
-
-def register() -> None:
-    # _positional_index() in shell.py strips global flags and their values
-    # before looking up the positional completer, so the four slots here map
-    # directly to the four *actual* positional arguments:
-    #   0 → service (e.g. s3)
-    #   1 → subcommand (e.g. ls, cp)
-    #   2 → first path/URI argument
-    #   3 → second path/URI argument (cp, mv, sync take src + dst)
-    arg_completer = AwsArgCompleter()
-    registry.register_external_completers("aws", {
-        None: AwsOptionsCompleter(),
-        **{i: arg_completer for i in range(4)},
-    })
-
-    var_registry.register(AwsRegionVar())
-    var_registry.register(EnvVar(
-        name="aws_profile",
-        env_var="AWS_PROFILE",
-        completer=AwsProfileCompleter(),
-        description="AWS named profile",
-    ))

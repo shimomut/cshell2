@@ -471,6 +471,23 @@ class Shell:
 
         cmd = self.registry.get(command_name)
         ext = self.registry.get_external_completers(command_name)
+
+        # Tree-shaped command: resolve to the current node, then offer
+        # sub-command names / positionals / inherited flags.
+        if cmd is not None and cmd.children:
+            node, remaining_args = cmd.resolve(args)
+            # Update ctx so positional completers see the correct index
+            # (the position relative to the resolved node).
+            tree_ctx = CompletionContext(
+                command=command_name,
+                args=remaining_args,
+                arg_index=len(remaining_args),
+                prefix=prefix,
+                line=line_before_cursor,
+                shell_context=self.context_manager.current(),
+            )
+            return self._complete_tree_node(node, tree_ctx, prefix)
+
         completers_dict = cmd.completers if cmd else ext
 
         has_completer = False
@@ -519,6 +536,69 @@ class Shell:
             completions = self._file_completer.complete(ctx)
 
         return completions, prefix
+
+    def _complete_tree_node(self, node, ctx, prefix):
+        """Compute completions when the user is typing within a sub-command tree.
+
+        *node* is the resolved node (the deepest sub-command in ctx.args).
+        *ctx.args* are the tokens remaining after stripping consumed
+        sub-command names; *ctx.arg_index* reflects that.
+        """
+        # Build a merged options completer (this node + ancestors).
+        merged_options = node.merged_options_completer()
+
+        # Preceding-flag hint: if last completed token is a value-taking flag
+        # known at this node or an ancestor, show its value completer / hint.
+        if (merged_options and ctx.args and not ctx.prefix.startswith("-")
+                and hasattr(merged_options, "get_preceding_flag_hint")):
+            hint_info = merged_options.get_preceding_flag_hint(ctx)
+            if hint_info:
+                flag, arg_hint, description, value_completer = hint_info
+                if value_completer:
+                    return value_completer.complete(ctx), ctx.prefix
+                return [Completion(
+                    value=flag,
+                    display=f"<{arg_hint}>",
+                    description=description,
+                    arg_hint=arg_hint,
+                    is_arg_hint=True,
+                )], ctx.prefix
+
+        # Typing a flag → offer all flags from this node + ancestors.
+        if ctx.prefix.startswith("-"):
+            if merged_options and merged_options.should_activate(ctx):
+                return merged_options.complete(ctx), prefix
+            return [], prefix
+
+        # Compute positional index relative to this node, ignoring flag tokens
+        # and their values.
+        pos_idx = _positional_index(ctx.args, merged_options)
+
+        # If this is an interior group, the next positional is a sub-command
+        # name.  Offer the children at the leftmost positional slot only —
+        # extra positionals after a missing match should fall back to file
+        # completion (or this node's own positional completer, if any).
+        if node.children and pos_idx == 0:
+            results = []
+            for name in sorted(node.children):
+                child = node.children[name]
+                if name.startswith(ctx.prefix):
+                    results.append(Completion(value=name, description=child.description))
+            return results, prefix
+
+        # Leaf-or-deeper: use the resolved node's own positional completers.
+        positional_completer = node.completers.get(pos_idx)
+        if positional_completer is not None and positional_completer.should_activate(ctx):
+            return positional_completer.complete(ctx), prefix
+
+        # If the node has no positional completer registered for this slot,
+        # fall back to file completion only when the node has no positional
+        # completers at all (i.e. it didn't declare any positionals).  This
+        # matches the flat-command behaviour where a registered completer
+        # returning [] suppresses file fallback.
+        if not any(isinstance(k, int) for k in node.completers):
+            return self._file_completer.complete(ctx), prefix
+        return [], prefix
 
     def _register_builtins(self) -> None:
         from .completion import (
@@ -935,6 +1015,11 @@ class Shell:
         has_redirects = any([stdin_override, stdout_override, stderr_override])
 
         cmd = self.registry.get(command_name)
+        # External recipes are stored as Command nodes too (for unified
+        # completion), but have no Python handler anywhere — fall through to
+        # the system command path so the real binary runs.
+        if cmd is not None and not cmd.has_any_handler():
+            cmd = None
         if cmd:
             if has_redirects:
                 # Redirected Python command — run synchronously with overridden streams.
