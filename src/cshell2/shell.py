@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import ctypes
+import fcntl
 import io
 import os
+import pty
 import re
 import select
 import signal
+import struct
+import subprocess
 import sys
 import termios
 import threading
@@ -27,7 +31,7 @@ from .context import ContextManager, ContextState
 from .lineedit import CONTEXT_CHANGED_SENTINEL, History, LineEditor, SWITCH_SENTINEL
 from .parsing import expand_vars, split_for_completion, tokenize
 from .pipeline import Redirect, Sequence, Stage, Pipeline, expand_globs, parse_line, _split_on_operators
-from .process import ProcessSlot
+from .process import OutputBuffer, ProcessSlot
 from .prompt import get_prompt_func, set_prompt
 
 # ---------------------------------------------------------------------------
@@ -153,6 +157,36 @@ class _NullBuffer:
         return []
 
 
+_current_slot = threading.local()
+
+
+def passthrough_run(argv: list[str], **popen_kwargs) -> int:
+    """Run an interactive subprocess from inside a Python command thread.
+
+    A Python @registry.command runs in a background thread while the main
+    thread holds stdin in raw mode and forwards bytes to the slot.  Calling
+    ``subprocess.run`` directly inside such a command makes the child
+    inherit the real stdin — which the main thread is also reading — and
+    keystrokes are split unpredictably between the two.
+
+    ``passthrough_run`` runs the subprocess against a PTY owned by the
+    enclosing :class:`PythonCommandSlot` so the main thread keeps a single
+    consistent view of stdin: it forwards bytes to the slot's PTY master,
+    intercepts ``Ctrl+]`` for context switching, and the subprocess sees a
+    full TTY on its fd 0/1/2.
+
+    Outside a Python command thread (e.g. from a synchronous handler) the
+    function falls back to ``subprocess.run(argv, **popen_kwargs)``.
+
+    Returns the subprocess's exit code.
+    """
+    slot = getattr(_current_slot, "slot", None)
+    if slot is None:
+        return subprocess.run(argv, **popen_kwargs).returncode
+
+    return slot._run_in_pty(argv, popen_kwargs)
+
+
 class PythonCommandSlot:
     """Manages a Python @registry.command running in a background thread.
 
@@ -171,6 +205,15 @@ class PythonCommandSlot:
         # Stub attributes expected by the run() loop
         self.buffer = _NullBuffer()
         self.exit_code: int | None = None
+        # PTY state — created on demand by passthrough_run().  When a
+        # subprocess is running here, the main thread reads stdin and writes
+        # to master_fd; a reader thread copies master_fd output to stdout.
+        self._pty_master_fd: int = -1
+        self._pty_subproc: subprocess.Popen | None = None
+        self._pty_reader: threading.Thread | None = None
+        self._pty_buffer = OutputBuffer()
+        self._pty_active = False
+        self._pty_lock = threading.Lock()
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -188,6 +231,7 @@ class PythonCommandSlot:
     def _run(self) -> None:
         if hasattr(sys.stdout, "set_override"):
             sys.stdout.set_override(self._proxy)
+        _current_slot.slot = self
         try:
             self._cmd.invoke(self._raw_args)
         except SystemExit as e:
@@ -197,6 +241,7 @@ class PythonCommandSlot:
         except Exception as e:
             self._exit_exception = e
         finally:
+            _current_slot.slot = None
             if hasattr(sys.stdout, "clear_override"):
                 sys.stdout.clear_override()
             self.exit_code = self._compute_exit_code()
@@ -221,14 +266,44 @@ class PythonCommandSlot:
     def activate(self, raw_mode: bool = False) -> None:
         if self._proxy:
             self._proxy.activate(raw_mode=raw_mode)
+        # Drain any PTY output that arrived while inactive, then resume
+        # live forwarding from the reader thread.
+        with self._pty_lock:
+            if self._pty_master_fd >= 0:
+                chunks = self._pty_buffer.drain()
+                for chunk in chunks:
+                    try:
+                        sys.stdout.buffer.write(chunk)
+                    except OSError:
+                        pass
+                try:
+                    sys.stdout.buffer.flush()
+                except OSError:
+                    pass
+                self._pty_active = True
 
     def deactivate(self) -> None:
         if self._proxy:
             self._proxy.deactivate()
+        with self._pty_lock:
+            if self._pty_master_fd >= 0:
+                self._pty_active = False
 
     def replay_buffer(self) -> None:
         if self._proxy:
             self._proxy.replay()
+        with self._pty_lock:
+            if self._pty_master_fd >= 0:
+                chunks = self._pty_buffer.drain()
+                for chunk in chunks:
+                    try:
+                        sys.stdout.buffer.write(chunk)
+                    except OSError:
+                        pass
+                try:
+                    sys.stdout.buffer.flush()
+                except OSError:
+                    pass
 
     def kill(self) -> None:
         """Inject KeyboardInterrupt into the command thread."""
@@ -245,7 +320,129 @@ class PythonCommandSlot:
         return ""
 
     def write_stdin(self, data: bytes) -> None:
-        pass  # stdin forwarding not yet implemented for Python commands
+        """Forward bytes to a passthrough_run() subprocess, if one is active."""
+        with self._pty_lock:
+            fd = self._pty_master_fd
+            if fd < 0:
+                return
+        try:
+            os.write(fd, data)
+        except OSError:
+            pass
+
+    def resize(self, rows: int, cols: int) -> None:
+        """Propagate a SIGWINCH-driven resize to a passthrough_run() subprocess."""
+        with self._pty_lock:
+            fd = self._pty_master_fd
+            pid = self._pty_subproc.pid if self._pty_subproc else -1
+        if fd < 0:
+            return
+        try:
+            winsize = struct.pack("HHHH", rows, cols, 0, 0)
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+        except OSError:
+            pass
+        if pid > 0:
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGWINCH)
+            except (OSError, ProcessLookupError):
+                pass
+
+    # --- passthrough_run() implementation -----------------------------------
+
+    def _run_in_pty(self, argv: list[str], popen_kwargs: dict) -> int:
+        """Run *argv* on a slot-owned PTY; main thread forwards stdin via write_stdin."""
+        # Pause the buffering stdout proxy: while the subprocess runs, its
+        # output is written to the slot's PTY master and copied to stdout
+        # by a reader thread.
+        self._proxy.deactivate()
+        master_fd, slave_fd = pty.openpty()
+        try:
+            rows, cols = ProcessSlot._get_real_terminal_size()
+            if rows and cols:
+                winsize = struct.pack("HHHH", rows, cols, 0, 0)
+                fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, winsize)
+        except OSError:
+            pass
+
+        env = popen_kwargs.pop("env", None) or dict(os.environ)
+        # Tell the child the terminal it sees is a TTY.
+        env.setdefault("TERM", os.environ.get("TERM", "xterm-256color"))
+
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                env=env,
+                start_new_session=True,
+                **popen_kwargs,
+            )
+        finally:
+            os.close(slave_fd)
+
+        with self._pty_lock:
+            self._pty_master_fd = master_fd
+            self._pty_subproc = proc
+            self._pty_active = True
+
+        reader = threading.Thread(
+            target=self._pty_reader_loop,
+            args=(master_fd,),
+            name=f"pycmd-pty-{self._cmd.name}",
+            daemon=True,
+        )
+        with self._pty_lock:
+            self._pty_reader = reader
+        reader.start()
+
+        try:
+            proc.wait()
+        finally:
+            # Wait for reader to drain any remaining output, then tear down.
+            reader.join(timeout=1.0)
+            with self._pty_lock:
+                self._pty_active = False
+                self._pty_master_fd = -1
+                self._pty_subproc = None
+                self._pty_reader = None
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+            # Re-enable the buffering proxy in raw mode for any remaining
+            # prints from the Python command after the subprocess returns.
+            self._proxy.activate(raw_mode=True)
+
+        return proc.returncode if proc.returncode is not None else 1
+
+    def _pty_reader_loop(self, master_fd: int) -> None:
+        while True:
+            try:
+                r, _, _ = select.select([master_fd], [], [], 0.05)
+                if not r:
+                    if self._pty_subproc and self._pty_subproc.poll() is not None:
+                        # Drain any final bytes before returning.
+                        try:
+                            r2, _, _ = select.select([master_fd], [], [], 0)
+                            if not r2:
+                                break
+                        except OSError:
+                            break
+                    continue
+                data = os.read(master_fd, 4096)
+            except OSError:
+                break
+            if not data:
+                break
+            self._pty_buffer.append(data)
+            if self._pty_active:
+                try:
+                    sys.stdout.buffer.write(data)
+                    sys.stdout.buffer.flush()
+                except OSError:
+                    pass
 
 
 _DEFAULT_CONFIG_PATH = Path(__file__).parent / "_config.py"
@@ -1192,9 +1389,12 @@ class Shell:
 
         Sets the terminal to raw mode, activates the slot's stdout proxy
         (replaying any buffered output), then loops:
-          • Ctrl+C  (\\x03) — inject KeyboardInterrupt into the command thread
-          • Ctrl+]  (\\x1d) — return 'switched' so caller can store the slot
-          • normal keys     — forwarded to slot.write_stdin (no-op currently)
+          • Ctrl+] (\\x1d) — return 'switched' so caller can store the slot
+          • Ctrl+C (\\x03) — forwarded to a passthrough_run() subprocess if
+            one is active (so e.g. SSH/SSM see the interrupt); otherwise
+            inject KeyboardInterrupt into the command thread.
+          • other keys    — forwarded to slot.write_stdin, which writes to
+            a passthrough_run() PTY master if active (no-op otherwise).
 
         Returns 'exited' when the thread finishes, 'switched' on Ctrl+].
         """
@@ -1203,10 +1403,18 @@ class Shell:
         old_sigint = signal.getsignal(signal.SIGINT)
         old_sigwinch = signal.getsignal(signal.SIGWINCH)
         result = "exited"
+
+        def on_resize(signum, frame):
+            try:
+                size = os.get_terminal_size(fd)
+                slot.resize(size.lines, size.columns)
+            except OSError:
+                pass
+
         try:
             tty.setraw(fd)
             signal.signal(signal.SIGINT, signal.SIG_IGN)
-            signal.signal(signal.SIGWINCH, signal.SIG_IGN)
+            signal.signal(signal.SIGWINCH, on_resize)
             # Replay any output buffered before raw mode was set
             slot.activate(raw_mode=True)
 
@@ -1219,20 +1427,17 @@ class Shell:
                     if b"\x1d" in data:
                         result = "switched"
                         break
-                    if b"\x03" in data:
-                        # Inject KeyboardInterrupt into the command thread, then
-                        # return immediately.  PyThreadState_SetAsyncExc only fires
-                        # at bytecode boundaries, so the thread may still be blocked
-                        # in time.sleep() — waiting for it would delay the response
-                        # by the full remaining sleep duration.  Deactivating the
-                        # proxy first prevents any stray output from reaching the
-                        # terminal after we return.
+                    if b"\x03" in data and not slot._pty_active:
+                        # No passthrough subprocess is running — interrupt
+                        # the Python command itself.
                         slot.deactivate()
                         slot.kill()
                         result = "interrupted"
                         break
-                    else:
-                        slot.write_stdin(data)
+                    # Forward to slot.  When a passthrough_run() subprocess
+                    # is active, this writes to its PTY master.  Otherwise
+                    # write_stdin() is a no-op (the command isn't reading).
+                    slot.write_stdin(data)
             return result
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)

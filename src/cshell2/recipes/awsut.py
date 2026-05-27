@@ -49,6 +49,7 @@ from ..completion import (
     CompletionContext,
     FileCompleter,
 )
+from ..shell import passthrough_run
 
 
 # ─── User-customisable module-level config ──────────────────────────────────
@@ -1528,7 +1529,7 @@ def _register_hyperpod(awsut) -> None:
             return
 
         ssm_target = f"sagemaker-cluster:{cluster_id}_{ig_name}-{node_id}"
-        subprocess.run(["aws", "ssm", "start-session", "--target", ssm_target])
+        passthrough_run(["aws", "ssm", "start-session", "--target", ssm_target])
 
     ssh = hyperpod.command("ssh", help="Set up SSH access to all cluster nodes")
 
@@ -1771,7 +1772,7 @@ def _register_hyperpod(awsut) -> None:
             return
 
         eks_name = eks_arn.split("/")[-1]
-        subprocess.run(["aws", "eks", "update-kubeconfig", "--name", eks_name])
+        passthrough_run(["aws", "eks", "update-kubeconfig", "--name", eks_name])
 
     @hyperpod.command(
         "events", help="Print historical events",
