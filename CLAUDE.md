@@ -450,6 +450,34 @@ No alternate screen; all rendering anchored with DECSC/DECRC (`ESC 7` / `ESC 8`)
 - `suspend_terminal_modes() / restore_terminal_modes()` — generate escape sequences to undo/redo DEC private modes (alt screen, mouse, app cursor keys) tracked across switches
 - `kill()` — send SIGTERM
 
+### Spawning interactive subprocesses from Python commands
+
+A Python `@registry.command` runs in a background thread inside a `PythonCommandSlot`. While it runs, the main thread holds stdin in raw mode and forwards bytes to the slot via `write_stdin`. If the command body calls `subprocess.run([...])` directly, the child inherits the real terminal stdin — and now the main thread *and* the subprocess are both calling `read()` on fd 0. Whoever wins each keystroke gets it; the other sees nothing. Symptoms: dropped keys, garbled input, Ctrl+] sometimes reaches the subprocess.
+
+External commands typed at the prompt (e.g. plain `aws ssm start-session`) don't have this problem because they're routed through `ProcessSlot`, which gives them a dedicated PTY pair. The main thread is the *only* reader of real stdin; it copies bytes into the PTY master.
+
+The fix for Python commands is the same shape: spawn the subprocess against a slot-owned PTY and let the existing forwarding loop do its job. Use `cshell2.passthrough_run`:
+
+```python
+from cshell2 import passthrough_run
+
+@registry.command(name="my_ssm", ...)
+def my_ssm():
+    passthrough_run(["aws", "ssm", "start-session", "--target", target])
+```
+
+`passthrough_run` allocates a PTY on the enclosing `PythonCommandSlot`, starts the subprocess against the slave, and spawns a reader thread that copies output to stdout (or buffers it while the context is backgrounded). The main thread keeps reading real stdin in raw mode, intercepts Ctrl+] for context switching, and forwards every other byte to `slot.write_stdin` — which now writes to the PTY master. Ctrl+C is delivered to the subprocess (not the Python thread) while a passthrough subprocess is active. Window resizes propagate via `slot.resize()` → `TIOCSWINSZ` + `SIGWINCH` on the child's process group.
+
+Outside a Python command thread (e.g. inside a synchronous handler that doesn't run on a slot), `passthrough_run` falls through to plain `subprocess.run`.
+
+**When you don't need it.** Three cases that look like subprocesses but don't race for stdin:
+
+1. **Non-interactive subprocesses** (`subprocess.run(..., capture_output=True)`, `$()` substitution, completer queries that shell out to `git`/`docker`/`aws`). The child doesn't read fd 0, so there's no race. Plain `subprocess.run` is fine.
+2. **`subprocess.Popen` with explicit pipes/redirections** in pipeline stages. The shell already wires stdin/stdout to file descriptors that aren't the terminal, so the child never touches real stdin.
+3. **`pexpect.popen_spawn.PopenSpawn`** (and any other library that drives the child via its own pipe). PopenSpawn passes `stdin=subprocess.PIPE` and writes via `sendline()`, so the child's stdin is owned entirely by the parent process — the user's keystrokes never reach it.
+
+Rule of thumb: if a subprocess spawned from a Python command would, when run standalone in a terminal, read keystrokes from the user (SSH-like sessions, TUIs, MFA prompts, anything that calls `getpass`), wrap it with `passthrough_run`. Otherwise leave it as `subprocess.run`.
+
 ### prompt.py — Prompt Function
 
 ```python
@@ -663,3 +691,5 @@ Python registered commands (`@registry.command`) in a pipeline or with redirects
 7. **System command fallback** — anything not registered as a Python command is passed to the system shell via PTY, so cshell2 is a drop-in replacement for daily use.
 
 8. **Python-backed variables mirror the command registry pattern** — `Var` subclasses handle `get`/`set` logic; a single logical name (e.g. `aws_region`) can drive multiple `os.environ` keys or arbitrary side effects. The `var` command dispatches through `VarRegistry` before falling back to plain env writes, so the shell surface (`var KEY=VALUE`) is unchanged. `VarCompleter` handles `=`-split completion locally without touching the global tokenizer.
+
+9. **One reader for real stdin** — when a Python command spawns an interactive subprocess, the child must not inherit fd 0 directly. The main forwarding thread is already reading stdin in raw mode; a second reader (the subprocess) splits keystrokes unpredictably between them. `passthrough_run` enforces the rule by allocating a slot-owned PTY for the child, so the chain stays `stdin → main → master → subprocess`. This is the same architecture `ProcessSlot` uses for external commands; `passthrough_run` extends it to subprocesses launched from inside a `PythonCommandSlot`.
