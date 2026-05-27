@@ -4,15 +4,15 @@ A **recipe** adds TAB completion to an external (system) command — one that ru
 
 ## Anatomy of a Recipe File
 
-Every recipe file must expose a single `register(registry)` function. `enable("name")` imports the module and calls it:
+Every recipe file must expose a single `register()` function (no arguments). `enable("name")` imports the module and calls it; the recipe imports the module-level `registry` singleton directly:
 
 ```python
 # src/cshell2/recipes/mytool.py
 
-from ..commands import CommandRegistry
+from ..commands import registry
 from ..completion import OptionsCompleter, FileCompleter
 
-def register(registry: CommandRegistry) -> None:
+def register() -> None:
     registry.register_external_completers("mytool", {
         None: OptionsCompleter({"-v": "verbose", "-o": "output file"},
                                args={"-o": "FILE"}),
@@ -20,7 +20,7 @@ def register(registry: CommandRegistry) -> None:
     })
 ```
 
-The dict passed to `register_external_completers` is the same completer dict used by `@registry.command`:
+The dict passed to `register_external_completers` follows the same `{None: options, N: positional}` shape that the registry builds internally for `@registry.command(params=[...])`:
 
 | Key | Completer activated when… |
 |-----|--------------------------|
@@ -39,7 +39,7 @@ Use this for simple commands whose only useful completions are flags. `OptionsCo
 
 ```python
 # Example: ls recipe (abbreviated)
-from ..commands import CommandRegistry
+from ..commands import registry
 from ..completion import FileCompleter, OptionsCompleter
 
 LS_OPTIONS = {
@@ -50,7 +50,7 @@ LS_OPTIONS = {
     "-t": "sort by modification time",
 }
 
-def register(registry: CommandRegistry) -> None:
+def register() -> None:
     registry.register_external_completers("ls", {
         None: OptionsCompleter(LS_OPTIONS),
         0: FileCompleter(),
@@ -79,7 +79,7 @@ The engine detects when the user has just completed such a flag and either shows
 
 ```python
 # Example: make recipe (abbreviated)
-from ..commands import CommandRegistry
+from ..commands import registry
 from ..completion import DirCompleter, FileCompleter, OptionsCompleter
 
 MAKE_OPTIONS = {
@@ -95,7 +95,7 @@ MAKE_ARGS = {
     "-j": "N",                       # hint only
 }
 
-def register(registry: CommandRegistry) -> None:
+def register() -> None:
     target_completer = MakeTargetCompleter()
     registry.register_external_completers("make", {
         None: OptionsCompleter(MAKE_OPTIONS, args=MAKE_ARGS),
@@ -192,7 +192,7 @@ class GitArgCompleter(Completer):
             return self._branch.complete(ctx)
         return []
 
-def register(registry: CommandRegistry) -> None:
+def register() -> None:
     registry.register_external_completers("git", {
         None: GitSubcommandOptionsCompleter(),
         0: GitSubcommandCompleter(),
@@ -274,7 +274,7 @@ class DockerSubcommandOptionsCompleter(Completer):
 A single recipe can register completers for several related commands:
 
 ```python
-def register(registry: CommandRegistry) -> None:
+def register() -> None:
     registry.register_external_completers("kill", {
         None: OptionsCompleter(KILL_OPTIONS),
         0: ProcessCompleter(),   # completes PIDs
@@ -289,7 +289,7 @@ def register(registry: CommandRegistry) -> None:
 
 ## Checklist for a New Recipe
 
-1. **Create `src/cshell2/recipes/<name>.py`** with a `register(registry)` function.
+1. **Create `src/cshell2/recipes/<name>.py`** with a `register()` function (no arguments — import `registry` from `..commands`).
 2. **Add the recipe name** to the docstring in `src/cshell2/recipes/__init__.py` (the `Available recipes:` list).
 3. **Cover common flags** with `OptionsCompleter`. Include both long and short forms where both exist.
 4. **Use `args=` for value-taking flags** — hint-only `"N"` for numerics/free-text, `("HINT", SomeCompleter())` when a picker is useful.

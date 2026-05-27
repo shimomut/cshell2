@@ -99,7 +99,7 @@ Create `~/.cshell2/config.py` to define custom commands and completers. This fil
 
 ```python
 # ~/.cshell2/config.py
-from cshell2.commands import registry
+from cshell2.commands import registry, arg
 from cshell2.completion import Completer, Completion, ChoiceCompleter
 from cshell2.recipes import enable
 
@@ -114,14 +114,14 @@ class InstanceCompleter(Completer):
 
 @registry.command(
     name="connect",
-    completers={
-        0: ChoiceCompleter(["prod", "staging"]),
-        1: ChoiceCompleter(["us-east-1", "us-west-2"]),
-        2: InstanceCompleter(),
-    }
+    help="SSH into an EC2 instance.",
+    params=[
+        arg("account", choices=["prod", "staging"]),
+        arg("region",  choices=["us-east-1", "us-west-2"]),
+        arg("instance_id", completer=InstanceCompleter()),
+    ],
 )
 def connect(account, region, instance_id):
-    """SSH into an EC2 instance."""
     import os
     os.system(f"ssh {instance_id}")
 ```

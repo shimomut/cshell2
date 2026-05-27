@@ -71,12 +71,13 @@ Entry point and orchestrator. Owns the REPL cycle: read input, parse, dispatch, 
 
 Provides the `CommandRegistry` class and a global `registry` singleton.
 
-- `@registry.command()` decorator for registering Python functions as commands
+- `@registry.command(name=..., help=..., params=[arg(...)])` decorator for registering Python functions as commands. `params=` declares positionals and flags; the registry derives both an argparse parser and a per-position completer dict from the same list.
+- `arg(*names, completer=None, **argparse_kwargs)` builder used inside `params=`. Values from `choices=` automatically populate a `ChoiceCompleter` if no explicit `completer=` is given.
 - `registry.register()` for imperative registration
-- `registry.register_external_completers(name, completers)` for attaching completers to system commands (e.g. `git`, `docker`) without wrapping them as Python commands
+- `registry.register_external_completers(name, completers)` for attaching a `{None: OptionsCompleter, N: positional}` dict to a system command (e.g. `git`, `docker`) without wrapping it as a Python command
 - `registry.mark_builtins()` / `registry.clear_user_commands()` for hot-reload support
-- Each `Command` holds: name, callable, per-argument completers dict, help text
-- Help text is automatically extracted from the function's docstring
+- Each `Command` holds: name, callable, `params: list[Arg] | None`, derived per-argument completers dict, help text, description
+- Description comes from the explicit `help=` kwarg, falling back to the function's docstring
 
 ### completion.py — Completion Engine
 
@@ -218,7 +219,8 @@ cshell2/
 │       ├── __init__.py         # exports set_prompt
 │       ├── __main__.py         # entry point (calls Shell().run())
 │       ├── shell.py            # main loop, command dispatch, pipeline execution
-│       ├── commands.py         # command registry, @command decorator
+│       ├── commands.py         # command registry, @command decorator, arg() builder
+│       ├── variables.py        # Var ABC, VarRegistry, EnvVar, VarCompleter
 │       ├── completion.py       # Completer ABC, CompletionContext, built-in completers
 │       ├── context.py          # Context, ContextManager, ContextState
 │       ├── history.py          # history storage and search
@@ -246,7 +248,12 @@ cshell2/
     ├── test_commands.py
     ├── test_completion.py
     ├── test_context.py
-    └── test_parsing.py
+    ├── test_parsing.py
+    ├── test_pipeline.py
+    ├── test_process.py
+    ├── test_recipes.py
+    ├── test_shell_continuation.py
+    └── test_variables.py
 ```
 
 ## Design Decisions

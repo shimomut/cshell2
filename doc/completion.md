@@ -174,31 +174,44 @@ The **fallback to `FileCompleter`** only triggers when **no completer** is regis
 
 ## Per-Argument Binding
 
-Commands declare completers as a dict mapping argument index (or `None` for options) to completer:
+Python commands declare arguments via a single `params=[arg(...)]` list. Each `arg()` configures argparse (validation, type coercion, defaults, action) **and** TAB completion in one place — `completer=` on a positional drives completion of the value at that position; `completer=` on a value-taking flag drives completion of the value typed after the flag. The registry derives the underlying `{arg_index: Completer, None: OptionsCompleter}` dict automatically.
 
 ```python
+from cshell2.commands import registry, arg
+from cshell2.completion import ChoiceCompleter
+
 @registry.command(
     name="deploy",
-    completers={
-        None: OptionsCompleter({"-v": "verbose", "--dry-run": "dry run"}),
-        0: ChoiceCompleter(["prod", "staging"]),
-        1: RegionCompleter(),
-        2: ServiceCompleter(),  # can inspect ctx.args[0], ctx.args[1]
-    }
+    help="Deploy a service to an environment.",
+    params=[
+        # choices= drives both argparse validation AND TAB completion.
+        arg("environment", choices=["prod", "staging", "dev"]),
+        arg("region",      completer=RegionCompleter()),
+        arg("service",     completer=ServiceCompleter()),  # may inspect ctx.args
+        # Boolean flags
+        arg("-v", "--verbose",  action="store_true",   help="verbose output"),
+        arg("-n", "--dry-run",  action="store_true",   help="skip execution"),
+        # Value-taking flag with a value completer
+        arg("-t", "--timeout",  type=int, metavar="SECONDS",
+                                completer=ChoiceCompleter(["30", "60", "120"])),
+    ],
 )
-def deploy(env, region, service):
+def deploy(environment, region, service, verbose, dry_run, timeout):
     ...
 ```
 
 This design means:
-- Each position is independent — no need to declare all positions
-- Gaps are allowed (positions 0 and 2 but not 1 → position 1 falls back to file completion)
+- Each `arg()` is independent — positionals declared in order, flags can appear anywhere in the list
+- Positionals without a `completer=` (and no `choices=`) fall back to file completion at that index
 - Later completers see earlier args via `ctx.args`
-- `None` key activates at any position when the user types a `-` prefix
+- All flags collected into a single `OptionsCompleter` under `None` — activated whenever the user types a `-`-prefixed token
 
-For system commands that should not be wrapped as Python functions:
+For system commands that should not be wrapped as Python functions, the registry exposes the underlying `{None: ..., N: ...}` dict directly:
 
 ```python
+from cshell2.commands import registry
+from cshell2.completion import FileCompleter, OptionsCompleter
+
 registry.register_external_completers("rsync", {
     None: OptionsCompleter({"-a": "archive", "-v": "verbose", "-n": "dry run",
                             "--exclude": "exclude pattern"},

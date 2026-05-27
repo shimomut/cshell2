@@ -82,17 +82,21 @@ Entry point. Reads input, parses lines, dispatches commands.
 ### commands.py — Command Registry
 
 ```python
-registry = CommandRegistry()
+from cshell2.commands import registry, arg
 
-@registry.command(name="hello", completers={0: UsernameCompleter()})
-def hello(name: str):
+@registry.command(
+    name="hello",
+    help="Greet someone by name.",
+    params=[arg("name", completer=UsernameCompleter())],
+)
+def hello(name):
     print(f"Hello, {name}!")
 ```
 
 Methods:
-- `command(name, completers)` — decorator to register a Python function
-- `register(func, name, completers)` — imperative alternative
-- `register_external_completers(command_name, completers)` — attach completers to a system command (e.g. `git`, `docker`) without wrapping it as a Python command
+- `command(name, *, help=None, params=None)` — decorator to register a Python function. `params=[arg(...)]` declares positionals and flags; the registry derives both an argparse parser and the per-position completer dict from the same list.
+- `register(func, name, ...)` — imperative alternative
+- `register_external_completers(command_name, completers)` — attach a `{None: OptionsCompleter, N: positional}` dict to a system command (e.g. `git`, `docker`) without wrapping it as a Python command
 - `mark_builtins()` — snapshot current commands as builtins (not removed on `reload`)
 - `clear_user_commands()` — remove non-builtin commands and all external completers
 
@@ -278,23 +282,25 @@ class ConditionalCompleter(Completer):     # pick sub-completer based on precedi
 
 #### Per-Argument Completer Binding
 
-Commands declare completers by argument position. The special key `None` registers an **options completer** that activates whenever the user types a `-`-prefixed token at any position:
+Python commands declare positionals and flags via a single `params=[arg(...)]` list. Each `arg()` configures argparse (validation, defaults, action) **and** TAB completion in one place — `completer=` on a positional drives completion at that position; `completer=` on a value-taking flag drives completion of the value typed after the flag. The registry derives the underlying `{arg_index: Completer, None: OptionsCompleter}` dict automatically.
 
 ```python
 @registry.command(
     name="ssh_instance",
-    completers={
-        None: OptionsCompleter({"-v": "verbose", "-p": "port", ...},
-                               args={"-p": "PORT"}),
-        0: ChoiceCompleter(["account-A", "account-B"]),
-        1: RegionCompleter(),
-        2: EC2InstanceCompleter(),  # uses ctx.args[0] and ctx.args[1]
-    }
+    help="SSH into an EC2 instance.",
+    params=[
+        arg("account", choices=["account-A", "account-B"]),
+        arg("region",  completer=RegionCompleter()),
+        arg("instance_id", completer=EC2InstanceCompleter()),  # may inspect ctx.args[0]/[1]
+        arg("-v", "--verbose", action="store_true", help="verbose"),
+        arg("-p", "--port",    type=int, metavar="PORT",
+                               help="port number"),
+    ],
 )
-def ssh_instance(account: str, region: str, instance_id: str): ...
+def ssh_instance(account, region, instance_id, verbose=False, port=22): ...
 ```
 
-External completers for system commands follow the same dict format:
+External completers for system commands take the underlying `{None: ..., N: ...}` dict directly:
 
 ```python
 registry.register_external_completers("git", {
@@ -510,7 +516,7 @@ Users define custom commands and completers here. Loaded at shell startup; reloa
 
 ```python
 # ~/.cshell2/config.py
-from cshell2.commands import registry
+from cshell2.commands import registry, arg
 from cshell2.completion import Completer, Completion, ChoiceCompleter
 from cshell2.recipes import enable
 
@@ -525,14 +531,14 @@ class MyInstanceCompleter(Completer):
 
 @registry.command(
     name="connect",
-    completers={
-        0: ChoiceCompleter(["prod", "staging"]),
-        1: ChoiceCompleter(["us-east-1", "us-west-2", "eu-west-1"]),
-        2: MyInstanceCompleter(),
-    }
+    help="SSH into an EC2 instance.",
+    params=[
+        arg("account", choices=["prod", "staging"]),
+        arg("region",  choices=["us-east-1", "us-west-2", "eu-west-1"]),
+        arg("instance_id", completer=MyInstanceCompleter()),
+    ],
 )
 def connect(account, region, instance_id):
-    """SSH into an EC2 instance."""
     import os
     os.system(f"ssh {instance_id}")
 ```
