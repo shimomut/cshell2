@@ -15,9 +15,9 @@ import os
 import subprocess
 from pathlib import Path
 
-from ..commands import registry, arg
+from ..commands import registry as command_registry, arg
 from ..completion import Completer, Completion, CompletionContext, FileCompleter
-from ..variables import EnvVar, Var, var_registry
+from ..variables import EnvVar, Var, registry as var_registry
 
 # ─── AWS regions ─────────────────────────────────────────────────────────────
 
@@ -221,7 +221,7 @@ _TRANSFER_OPTIONS = [
 
 
 def register() -> None:
-    aws = registry.command(
+    aws = command_registry.command(
         "aws", help="AWS CLI",
         params=[
             arg("--color",        metavar="WHEN",     help="color output (on|off|auto)"),

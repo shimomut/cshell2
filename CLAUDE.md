@@ -152,8 +152,11 @@ When a variable needs to write multiple env keys (e.g. `AWS_REGION` + `AWS_DEFAU
 
 #### Registry
 
+The module-level singleton is named `registry` inside `variables.py` (mirroring `commands.py`). Importers typically alias it as `var_registry` to disambiguate from the command registry:
+
 ```python
-var_registry = VarRegistry()   # module-level singleton, like `registry`
+from cshell2.variables import registry as var_registry
+# or, equivalently, `from cshell2 import var_registry`
 
 # Methods:
 var_registry.register(var: Var) -> None

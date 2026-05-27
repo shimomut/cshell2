@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..commands import registry
+from ..commands import registry as command_registry
 from ..completion import FileCompleter, OptionsCompleter
 
 GREP_OPTIONS: dict[str, str] = {
@@ -58,4 +58,4 @@ def register() -> None:
         2: FileCompleter(),
     }
     for cmd in ("grep", "egrep", "fgrep", "rgrep"):
-        registry.register_external_completers(cmd, completers)
+        command_registry.register_external_completers(cmd, completers)

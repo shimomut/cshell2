@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 
-from ..commands import registry
+from ..commands import registry as command_registry
 from ..completion import Completer, Completion, CompletionContext, OptionsCompleter
 
 SSH_OPTIONS: dict[str, str] = {
@@ -96,7 +96,7 @@ class SSHHostCompleter(Completer):
 
 
 def register() -> None:
-    registry.register_external_completers("ssh", {
+    command_registry.register_external_completers("ssh", {
         None: OptionsCompleter(SSH_OPTIONS, args=SSH_ARGS),
         0: SSHHostCompleter(),
     })

@@ -1,9 +1,9 @@
 """Python-backed shell variables — Var ABC, VarRegistry, convenience subclasses, VarCompleter.
 
-Users subclass Var and register instances with var_registry to define variables
-that have custom get/set logic and optional value completion.  The built-in
-``var`` command dispatches through VarRegistry before falling back to plain
-os.environ writes.
+Users subclass Var and register instances with the module-level ``registry``
+to define variables that have custom get/set logic and optional value
+completion.  The built-in ``var`` command dispatches through VarRegistry
+before falling back to plain os.environ writes.
 
 Example::
 
@@ -38,6 +38,10 @@ Example::
         completer=CallbackCompleter(list_aws_profiles),
         description="AWS named profile",
     ))
+
+The module-level singleton is named ``registry`` inside this module; importers
+typically alias it as ``var_registry`` to distinguish it from the command
+registry.
 """
 
 from __future__ import annotations
@@ -52,7 +56,7 @@ from .completion import Completer, Completion, CompletionContext
 class Var(ABC):
     """Base class for a Python-backed shell variable.
 
-    Subclass and register with ``var_registry`` to define a variable with
+    Subclass and register with the module-level ``registry`` to define a variable with
     custom get/set logic and an optional value completer.  The env_keys
     property tells the shell which ``os.environ`` keys to save/restore on
     context switch.
@@ -155,8 +159,9 @@ class EnvVar(Var):
 class VarRegistry:
     """Registry of Python-backed shell variables.
 
-    A module-level singleton ``var_registry`` is provided; use that unless
-    you need an isolated instance for testing.
+    A module-level singleton ``registry`` is provided; importers typically
+    alias it as ``var_registry`` to distinguish it from the command registry.
+    Use the singleton unless you need an isolated instance for testing.
     """
 
     def __init__(self) -> None:
@@ -185,7 +190,8 @@ class VarRegistry:
 
 
 #: Module-level singleton — import and use this in config.py / recipes.
-var_registry = VarRegistry()
+#: Typically aliased as ``var_registry`` by importers.
+registry = VarRegistry()
 
 
 class VarCompleter(Completer):
@@ -206,7 +212,7 @@ class VarCompleter(Completer):
 
         if "=" in prefix:
             key, _, val_prefix = prefix.partition("=")
-            var = var_registry.get(key)
+            var = registry.get(key)
             if var is not None and var.value_completer is not None:
                 sub_ctx = dataclasses.replace(ctx, prefix=val_prefix)
                 return [
@@ -222,7 +228,7 @@ class VarCompleter(Completer):
             seen: set[str] = set()
 
             # Registered Python-backed vars first (richer descriptions).
-            for v in var_registry.all():
+            for v in registry.all():
                 if v.name.startswith(prefix):
                     results.append(Completion(
                         value=f"{v.name}=",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from ..commands import registry
+from ..commands import registry as command_registry
 from ..completion import FileCompleter, OptionsCompleter
 
 # macOS du  (BSD du — from `man du` on Darwin)
@@ -81,7 +81,7 @@ def register() -> None:
     else:
         options, args = _LINUX_OPTIONS, _LINUX_ARGS
 
-    registry.register_external_completers("du", {
+    command_registry.register_external_completers("du", {
         None: OptionsCompleter(options, args=args),
         0: FileCompleter(),
         1: FileCompleter(),

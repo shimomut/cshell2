@@ -15,14 +15,14 @@ import traceback
 import tty
 from pathlib import Path
 
-from .commands import arg, CommandRegistry, registry
+from .commands import arg, CommandRegistry, registry as command_registry
 from .completion import (
     CommandNameCompleter,
     CompletionContext,
     FileCompleter,
     Completion,
 )
-from .variables import var_registry, VarCompleter
+from .variables import registry as var_registry, VarCompleter
 from .context import ContextManager, ContextState
 from .lineedit import CONTEXT_CHANGED_SENTINEL, History, LineEditor, SWITCH_SENTINEL
 from .parsing import expand_vars, split_for_completion, tokenize
@@ -399,7 +399,7 @@ def _positional_index(args: list[str], options_completer) -> int:
 
 class Shell:
     def __init__(self):
-        self.registry = registry
+        self.registry = command_registry
         self.context_manager = ContextManager()
         self.context_manager.create("default")
         self._register_builtins()

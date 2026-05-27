@@ -126,16 +126,16 @@ class TestVarCompleter:
         """Return a (VarRegistry, VarCompleter) pair sharing an isolated registry."""
         reg = VarRegistry()
         completer = VarCompleter()
-        # Monkey-patch the module-level var_registry used inside VarCompleter.
+        # Monkey-patch the module-level registry used inside VarCompleter.
         import cshell2.variables as _vmod
-        self._original_registry = _vmod.var_registry
-        _vmod.var_registry = reg
+        self._original_registry = _vmod.registry
+        _vmod.registry = reg
         return reg, completer
 
     def teardown_method(self):
         import cshell2.variables as _vmod
         if hasattr(self, "_original_registry"):
-            _vmod.var_registry = self._original_registry
+            _vmod.registry = self._original_registry
 
     def test_complete_name_prefix(self):
         reg, c = self._make_registry_and_completer()

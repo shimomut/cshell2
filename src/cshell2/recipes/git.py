@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 
-from ..commands import registry, arg
+from ..commands import registry as command_registry, arg
 from ..completion import Completer, Completion, CompletionContext, FileCompleter
 
 
@@ -93,7 +93,7 @@ class GitRefCompleter(Completer):
 # ─── Tree definition ─────────────────────────────────────────────────────────
 
 def register() -> None:
-    git = registry.command("git", help="distributed version control")
+    git = command_registry.command("git", help="distributed version control")
 
     # ── add ──
     git.command(
