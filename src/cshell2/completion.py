@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -284,3 +285,203 @@ class ConditionalCompleter(Completer):
             if partial_key in self.mapping:
                 return self.mapping[partial_key].complete(ctx)
         return []
+
+
+# ---------------------------------------------------------------------------
+# Cobra-protocol fallback
+# ---------------------------------------------------------------------------
+#
+# Most modern Go CLIs (kubectl, helm, gh, argocd, k9s, doctl, linkerd, …) are
+# built on the spf13/cobra framework, which exposes a hidden ``__complete``
+# subcommand.  When a tool registers shell completions, cobra inserts a
+# function that re-invokes the tool itself like::
+#
+#     $ kubectl __complete get po ""
+#     pod         retrieve a list of pods
+#     pods        (alias)
+#     poddisruptionbudget
+#     poddisruptionbudgets
+#     :4          ← directive byte (4 = nospace, 2 = nofiles, …)
+#
+# Lines before the trailing ``:N`` are candidates; each line is
+# ``name\tdescription`` (description optional).  This module drives that
+# protocol directly — no bash, no bash-completion script needed.
+
+
+# Sentinel returned by the probe to indicate "not a cobra command".
+_NOT_COBRA = object()
+
+
+class CobraCompleter(Completer):
+    """Fallback completer that calls a tool's hidden ``__complete`` subcommand.
+
+    Cobra-based CLIs (kubectl, helm, gh, argocd, k9s, doctl, …) ship a
+    completion function that's just a wrapper around ``<cmd> __complete``.
+    Calling that subcommand directly skips bash entirely, returns richer
+    data (descriptions per candidate), and works on any host that has the
+    tool itself installed.
+
+    Per-command detection: on first encounter of a command, we run
+    ``<cmd> __complete --help`` once and check whether the response looks
+    like a cobra completion handler.  Result is cached for the rest of the
+    shell session.
+    """
+
+    def __init__(self, *, timeout: float = 1.5) -> None:
+        self._timeout = timeout
+        # Per-command probe cache: command name → bool.
+        # Missing entry means "not yet probed".
+        self._is_cobra: dict[str, bool] = {}
+        # Per-line completion cache: line → list[(value, description)].
+        self._results: dict[str, list[tuple[str, str]]] = {}
+
+    def should_activate(self, ctx: CompletionContext) -> bool:
+        if not ctx.command:
+            return False
+        # Only activate for commands resolvable on PATH — avoids spawning a
+        # subprocess for typos / unknown words.
+        if shutil.which(ctx.command) is None:
+            return False
+        return self._is_cobra_command(ctx.command)
+
+    def complete(self, ctx: CompletionContext) -> list[Completion]:
+        if not ctx.command or not self._is_cobra_command(ctx.command):
+            return []
+        line = ctx.line
+        if line in self._results:
+            results = self._results[line]
+        else:
+            results = self._invoke(ctx.command, ctx.args, ctx.prefix)
+            self._results[line] = results
+        prefix = ctx.prefix
+        return [
+            Completion(value=v, description=d)
+            for v, d in results
+            if v.startswith(prefix)
+        ]
+
+    # ── detection ────────────────────────────────────────────────────────
+
+    def _is_cobra_command(self, command: str) -> bool:
+        """Return True if *command* responds to ``__complete --help`` like cobra.
+
+        Probes once per command per shell session; result is cached.
+        """
+        if command in self._is_cobra:
+            return self._is_cobra[command]
+        result = self._probe(command)
+        self._is_cobra[command] = result
+        return result
+
+    def _probe(self, command: str) -> bool:
+        """One-shot probe: does *command* speak the cobra protocol?"""
+        try:
+            proc = subprocess.run(
+                [command, "__complete", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+        # Cobra's __complete help text contains a recognizable phrase.  Both
+        # stdout and stderr are checked because cobra writes to stdout but
+        # other tools may surface our probe via stderr.
+        blob = (proc.stdout or "") + (proc.stderr or "")
+        if "shell completion" in blob.lower() or "ShellCompDirective" in blob:
+            return True
+        # Heuristic fallback: cobra always exits 0 on `__complete --help` and
+        # mentions "__complete" itself in the usage line.  Many non-cobra
+        # tools either error out or emit completely unrelated help text.
+        if proc.returncode == 0 and "__complete" in blob:
+            return True
+        return False
+
+    # ── invocation ───────────────────────────────────────────────────────
+
+    def _invoke(
+        self, command: str, args: list[str], prefix: str
+    ) -> list[tuple[str, str]]:
+        """Run ``<cmd> __complete <args> <prefix>``; return [(value, desc), …]."""
+        argv = [command, "__complete", *args, prefix]
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return []
+        # Cobra exits 0 on success; some tools may return non-zero when no
+        # candidates apply.  Treat non-zero as empty.
+        if proc.returncode != 0:
+            return []
+        return _parse_cobra_output(proc.stdout)
+
+
+def _parse_cobra_output(stdout: str) -> list[tuple[str, str]]:
+    """Parse cobra ``__complete`` stdout into (value, description) pairs.
+
+    Format::
+
+        name\tdescription
+        name              (description optional)
+        :N                ← trailing directive byte; ignored
+        Completion ended ← optional trailing trace line; ignored
+
+    Blank lines are dropped.
+    """
+    results: list[tuple[str, str]] = []
+    for line in stdout.splitlines():
+        if not line:
+            continue
+        # Trailing directive byte — always last non-blank line.
+        if line.startswith(":") and line[1:].isdigit():
+            continue
+        # Some cobra builds append a "Completion ended with directive: …" line.
+        if line.startswith("Completion ended"):
+            continue
+        if "\t" in line:
+            value, _, desc = line.partition("\t")
+        else:
+            value, desc = line, ""
+        results.append((value, desc))
+    return results
+
+
+# Module-level singleton + enable/disable API.  Default: enabled.
+
+_cobra_fallback: CobraCompleter | None = None
+_cobra_enabled: bool = True
+
+
+def enable_cobra_fallback(*, timeout: float = 1.5) -> CobraCompleter:
+    """Enable the cobra-protocol fallback.
+
+    Returns the configured :class:`CobraCompleter`.  The default state is
+    *enabled* — call this only to override the timeout.
+    """
+    global _cobra_fallback, _cobra_enabled
+    _cobra_fallback = CobraCompleter(timeout=timeout)
+    _cobra_enabled = True
+    return _cobra_fallback
+
+
+def disable_cobra_fallback() -> None:
+    """Disable the cobra-protocol fallback for this session."""
+    global _cobra_enabled
+    _cobra_enabled = False
+
+
+def get_cobra_fallback() -> CobraCompleter | None:
+    """Return the active cobra fallback, or ``None`` if disabled.
+
+    Lazily initialises on first call.
+    """
+    global _cobra_fallback
+    if not _cobra_enabled:
+        return None
+    if _cobra_fallback is None:
+        _cobra_fallback = CobraCompleter()
+    return _cobra_fallback

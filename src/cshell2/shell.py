@@ -25,6 +25,7 @@ from .completion import (
     CompletionContext,
     FileCompleter,
     Completion,
+    get_cobra_fallback,
 )
 from .variables import registry as var_registry, VarCompleter
 from .context import ContextManager, ContextState
@@ -688,6 +689,14 @@ class Shell:
                 has_completer = True
                 if positional_completer.should_activate(ctx):
                     completions = positional_completer.complete(ctx)
+
+        # Cobra-protocol fallback: many modern Go CLIs (kubectl, helm, gh,
+        # argocd, …) expose a hidden ``__complete`` subcommand.  Try it when
+        # no registered completer produced candidates, before file fallback.
+        if not completions:
+            cobra = get_cobra_fallback()
+            if cobra is not None and cobra.should_activate(ctx):
+                completions = cobra.complete(ctx)
 
         if not completions and not has_completer:
             completions = self._file_completer.complete(ctx)
