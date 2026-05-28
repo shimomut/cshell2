@@ -103,8 +103,11 @@ def _load_recipe(name: str):
     # 1. Try built-in package first.
     try:
         return import_module(f".{name}", package=__package__)
-    except ImportError:
-        pass
+    except ImportError as e:
+        # Only swallow the error if the recipe module itself is missing.
+        # If a dependency (e.g. boto3) is missing, propagate the error.
+        if e.name != f"{__package__}.{name}":
+            raise
 
     # 2. Walk recipe_search_path; return the first match.
     for directory in recipe_search_path:
