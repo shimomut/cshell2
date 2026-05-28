@@ -1,25 +1,43 @@
-"""Completion recipe for the AWS CLI, modelled as a sub-command tree.
+"""Completion recipe for the AWS CLI.
 
-Currently models the ``aws s3`` service group and its sub-commands:
-ls, cp, mv, sync, rm, mb, rb, presign, website.
+Drives the official ``aws_completer`` binary that ships with AWS CLI v2.
+It speaks a simple protocol: set ``COMP_LINE`` and ``COMP_POINT`` in the
+environment, run ``aws_completer`` with no args, and read candidates one
+per line on stdout.
 
-Global flags (``--region``, ``--profile``, …) are declared at the root and
-inherit down to every leaf, so they can be typed at any position once the
-defining ancestor is reached in the walk.
+What aws_completer knows out of the box:
+
+* every service (``ec2``, ``s3``, ``iam``, …) and every operation per service
+* every flag for the current operation (operation-specific + global)
+* values for ``--region``, ``--profile``, ``--output``
+* live AWS API resource discovery — EC2 instance IDs, IAM roles, etc.
+  (uses your current credentials and respects ``--region``/``--profile``
+  already typed on the command line)
+
+If the user has AWS CLI v2 installed, a single ``enable("aws")`` call gives
+them account-aware completion for the entire AWS surface — no per-service
+recipe needed.
+
+This recipe also registers the ``aws_region`` and ``aws_profile`` Python-
+backed variables, so users can do ``var aws_region=us-east-1`` to set
+``AWS_REGION`` (and ``AWS_DEFAULT_REGION``) without remembering both keys.
 """
 
 from __future__ import annotations
 
 import configparser
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
-from ..commands import registry as command_registry, arg
-from ..completion import Completer, Completion, CompletionContext, FileCompleter
+from ..commands import registry as command_registry
+from ..completion import Completer, Completion, CompletionContext
 from ..variables import EnvVar, Var, registry as var_registry
 
-# ─── AWS regions ─────────────────────────────────────────────────────────────
+
+# ─── AWS regions (used by AwsRegionVar's value completer) ───────────────────
 
 AWS_REGIONS: list[tuple[str, str]] = [
     ("af-south-1",      "Africa (Cape Town)"),
@@ -56,17 +74,6 @@ AWS_REGIONS: list[tuple[str, str]] = [
     ("us-west-1",       "US West (N. California)"),
     ("us-west-2",       "US West (Oregon)"),
 ]
-
-
-def _run_aws(args: list[str], timeout: float = 5.0) -> list[str]:
-    try:
-        result = subprocess.run(
-            ["aws"] + args,
-            capture_output=True, text=True, timeout=timeout,
-        )
-        return [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
-    except (OSError, subprocess.TimeoutExpired):
-        return []
 
 
 # ─── Completers ──────────────────────────────────────────────────────────────
@@ -121,228 +128,72 @@ class AwsProfileCompleter(Completer):
         return sorted(profiles)
 
 
-class S3PathCompleter(Completer):
-    """Completes S3 URIs (s3://bucket/key) and local filesystem paths."""
+class AwsCompleter(Completer):
+    """Drives the AWS CLI v2 ``aws_completer`` binary.
 
-    _file = FileCompleter()
+    The protocol: set ``COMP_LINE`` (the full command line up to the cursor)
+    and ``COMP_POINT`` (cursor byte offset) in the environment, run
+    ``aws_completer`` with no args, and read candidates one per line.
+    Returns ``[]`` when the binary is missing, errors, or times out.
+    """
+
+    def __init__(self, *, timeout: float = 5.0, binary: str = "aws_completer") -> None:
+        # 5s default: aws_completer's live AWS API calls (e.g. listing
+        # instance IDs, IAM roles) routinely take 1.5–3s on a typical
+        # network.  Tight timeouts cause silent empty results.
+        self._timeout = timeout
+        self._binary = binary
+        # Cache: (line, point) → list of candidate strings.
+        self._cache: dict[tuple[str, int], list[str]] = {}
+
+    def should_activate(self, ctx: CompletionContext) -> bool:
+        return shutil.which(self._binary) is not None
 
     def complete(self, ctx: CompletionContext) -> list[Completion]:
-        if ctx.prefix.startswith("s3://"):
-            return self._complete_s3(ctx.prefix)
-        return self._file.complete(ctx)
-
-    def _complete_s3(self, prefix: str) -> list[Completion]:
-        rest = prefix[5:]
-        slash_pos = rest.find("/")
-        if slash_pos == -1:
-            return self._list_buckets(rest)
-        bucket = rest[:slash_pos]
-        key_part = rest[slash_pos + 1:]
-        last_slash = key_part.rfind("/")
-        if last_slash == -1:
-            parent_uri = f"s3://{bucket}/"
-            partial = key_part
+        if not self.should_activate(ctx):
+            return []
+        line = ctx.line
+        # ctx.line is the input up to the cursor, so cursor position equals
+        # its byte length.
+        point = len(line.encode("utf-8"))
+        key = (line, point)
+        if key in self._cache:
+            words = self._cache[key]
         else:
-            parent_key = key_part[: last_slash + 1]
-            parent_uri = f"s3://{bucket}/{parent_key}"
-            partial = key_part[last_slash + 1:]
-        return self._list_objects(parent_uri, partial)
+            words = self._invoke(line, point)
+            self._cache[key] = words
+        prefix = ctx.prefix
+        return [Completion(value=w) for w in words if w.startswith(prefix)]
 
-    def _list_buckets(self, partial: str) -> list[Completion]:
-        lines = _run_aws(["s3", "ls"])
-        completions = []
-        for line in lines:
-            parts = line.split()
-            if len(parts) >= 3:
-                bucket = parts[-1]
-                if bucket.startswith(partial):
-                    completions.append(Completion(
-                        value=f"s3://{bucket}/",
-                        display=f"{bucket}/",
-                        description="bucket",
-                    ))
-        return completions
-
-    def _list_objects(self, parent_uri: str, partial: str) -> list[Completion]:
-        lines = _run_aws(["s3", "ls", parent_uri])
-        completions = []
-        for line in lines:
-            if "PRE " in line:
-                idx = line.index("PRE ") + 4
-                name = line[idx:].strip()
-                if name.startswith(partial):
-                    completions.append(Completion(
-                        value=parent_uri + name,
-                        display=name,
-                        description="prefix",
-                    ))
-            else:
-                parts = line.split(None, 3)
-                if len(parts) >= 4:
-                    name = parts[3]
-                    size = parts[2]
-                    if name.startswith(partial):
-                        completions.append(Completion(
-                            value=parent_uri + name,
-                            display=name,
-                            description=f"{size} B",
-                        ))
-        return completions
+    def _invoke(self, line: str, point: int) -> list[str]:
+        env = dict(os.environ)
+        env["COMP_LINE"] = line
+        env["COMP_POINT"] = str(point)
+        try:
+            proc = subprocess.run(
+                [self._binary],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+            )
+        except subprocess.TimeoutExpired:
+            # AWS API calls can be slow.  Tell the user instead of silently
+            # falling through to file completion (which is misleading).
+            sys.stderr.write(
+                f"\r\n[aws_completer timed out after {self._timeout:.1f}s — "
+                "try again or narrow the query]\r\n"
+            )
+            sys.stderr.flush()
+            return []
+        except OSError:
+            return []
+        if proc.returncode != 0:
+            return []
+        return [w for w in proc.stdout.splitlines() if w]
 
 
-# ─── Tree definition ─────────────────────────────────────────────────────────
-
-# Shared option lists for transfer-style commands
-_TRANSFER_OPTIONS = [
-    arg("--acl",                metavar="ACL",          help="ACL (private|public-read|...)"),
-    arg("--cache-control",      metavar="VALUE",        help="Cache-Control header"),
-    arg("--content-disposition", metavar="VALUE",       help="Content-Disposition header"),
-    arg("--content-encoding",   metavar="VALUE",        help="Content-Encoding header"),
-    arg("--content-language",   metavar="VALUE",        help="Content-Language header"),
-    arg("--content-type",       metavar="VALUE",        help="Content-Type header"),
-    arg("--dryrun",             action="store_true",    help="display operations without executing"),
-    arg("--exclude",            metavar="PATTERN",      help="exclude matching files"),
-    arg("--follow-symlinks",    action="store_true",    help="follow symbolic links"),
-    arg("--include",            metavar="PATTERN",      help="include matching files"),
-    arg("--metadata",           metavar="KEY=VAL",      help="metadata pairs"),
-    arg("--metadata-directive", metavar="DIRECTIVE",    help="copy or replace metadata"),
-    arg("--no-follow-symlinks", action="store_true",    help="do not follow symlinks"),
-    arg("--no-guess-mime-type", action="store_true",    help="do not guess MIME type"),
-    arg("--no-progress",        action="store_true",    help="hide progress bar"),
-    arg("--only-show-errors",   action="store_true",    help="only show errors"),
-    arg("--quiet",              action="store_true",    help="suppress all output"),
-    arg("--recursive",          action="store_true",    help="recurse into directories"),
-    arg("--request-payer",      metavar="REQUESTER",    help="confirm requester pays"),
-    arg("--source-region",      metavar="REGION",       help="source bucket region"),
-    arg("--sse",                metavar="ALGO",         help="server-side encryption (AES256|aws:kms)"),
-    arg("--sse-kms-key-id",     metavar="KEY_ID",       help="customer master key ID"),
-    arg("--storage-class",      metavar="CLASS",        help="storage class"),
-]
-
-
-def register() -> None:
-    aws = command_registry.command(
-        "aws", help="AWS CLI",
-        params=[
-            arg("--color",        metavar="WHEN",     help="color output (on|off|auto)"),
-            arg("--debug",        action="store_true", help="turn on debug logging"),
-            arg("--endpoint-url", metavar="URL",      help="override endpoint URL"),
-            arg("--no-cli-pager", action="store_true", help="disable pager"),
-            arg("--no-color",     action="store_true", help="disable color output"),
-            arg("--no-verify-ssl", action="store_true", help="disable SSL verification"),
-            arg("--output",       metavar="FORMAT",   help="output format (json|text|table|yaml)"),
-            arg("--profile",      metavar="PROFILE",  help="named profile",
-                                  completer=AwsProfileCompleter()),
-            arg("--region",       metavar="REGION",   help="override endpoint region",
-                                  completer=AwsRegionCompleter()),
-        ],
-    )
-
-    s3 = aws.command("s3", help="Amazon S3 — object storage")
-
-    s3.command(
-        "ls", help="list S3 objects under a bucket or prefix",
-        params=[
-            arg("path", nargs="?", completer=S3PathCompleter()),
-            arg("--human-readable", action="store_true", help="human readable sizes"),
-            arg("--page-size",      metavar="N", type=int, help="API page size"),
-            arg("--recursive",      action="store_true", help="recurse"),
-            arg("--request-payer",  metavar="REQUESTER", help="requester pays"),
-            arg("--summarize",      action="store_true", help="show summary"),
-        ],
-    )
-
-    s3.command(
-        "cp", help="copy a local file or S3 object to another location",
-        params=[
-            arg("src", completer=S3PathCompleter()),
-            arg("dst", completer=S3PathCompleter()),
-            *_TRANSFER_OPTIONS,
-            arg("--expected-size",    metavar="BYTES", help="expected file size"),
-            arg("--grants",           metavar="GRANT", help="grant permissions"),
-            arg("--website-redirect", metavar="URL",   help="website redirect"),
-        ],
-    )
-
-    s3.command(
-        "mv", help="move a local file or S3 object to another location",
-        params=[
-            arg("src", completer=S3PathCompleter()),
-            arg("dst", completer=S3PathCompleter()),
-            *_TRANSFER_OPTIONS,
-            arg("--grants",           metavar="GRANT", help="grant permissions"),
-            arg("--website-redirect", metavar="URL",   help="website redirect"),
-        ],
-    )
-
-    s3.command(
-        "sync", help="sync directories and S3 prefixes",
-        params=[
-            arg("src", completer=S3PathCompleter()),
-            arg("dst", completer=S3PathCompleter()),
-            *_TRANSFER_OPTIONS,
-            arg("--delete",            action="store_true", help="delete extras at dst"),
-            arg("--exact-timestamps",  action="store_true", help="exact timestamp match"),
-            arg("--grants",            metavar="GRANT",     help="grant permissions"),
-            arg("--size-only",         action="store_true", help="compare by size only"),
-        ],
-    )
-
-    s3.command(
-        "rm", help="delete an S3 object",
-        params=[
-            arg("path", completer=S3PathCompleter()),
-            arg("--dryrun",          action="store_true", help="dry run"),
-            arg("--exclude",         metavar="PATTERN",   help="exclude pattern"),
-            arg("--include",         metavar="PATTERN",   help="include pattern"),
-            arg("--no-progress",     action="store_true", help="hide progress"),
-            arg("--only-show-errors", action="store_true", help="only show errors"),
-            arg("--page-size",       metavar="N", type=int, help="API page size"),
-            arg("--quiet",           action="store_true", help="suppress output"),
-            arg("--recursive",       action="store_true", help="delete recursively"),
-            arg("--request-payer",   metavar="REQUESTER", help="requester pays"),
-        ],
-    )
-
-    s3.command(
-        "mb", help="make a new S3 bucket",
-        params=[arg("path", completer=S3PathCompleter())],
-    )
-
-    s3.command(
-        "rb", help="remove an empty S3 bucket",
-        params=[
-            arg("path", completer=S3PathCompleter()),
-            arg("--force", action="store_true", help="remove contents first"),
-        ],
-    )
-
-    s3.command(
-        "presign", help="generate a pre-signed URL for an S3 object",
-        params=[
-            arg("path", completer=S3PathCompleter()),
-            arg("--expires-in", metavar="SECONDS", type=int, help="expiry seconds"),
-        ],
-    )
-
-    s3.command(
-        "website", help="set the website configuration for a bucket",
-        params=[
-            arg("path", completer=S3PathCompleter()),
-            arg("--index-document", metavar="KEY", help="index document"),
-            arg("--error-document", metavar="KEY", help="error document"),
-        ],
-    )
-
-    # ─── Variables ───────────────────────────────────────────────────────
-    var_registry.register(_AwsRegionVar())
-    var_registry.register(EnvVar(
-        name="aws_profile",
-        env_var="AWS_PROFILE",
-        completer=AwsProfileCompleter(),
-        description="AWS named profile",
-    ))
-
+# ─── Variables ───────────────────────────────────────────────────────────────
 
 class _AwsRegionVar(Var):
     """Sets AWS_REGION and AWS_DEFAULT_REGION together from one logical name."""
@@ -373,3 +224,39 @@ class _AwsRegionVar(Var):
     @property
     def value_completer(self) -> Completer:
         return AwsRegionCompleter()
+
+
+class _AwsCompletersDict(dict):
+    """Completers map that routes every lookup to a single ``AwsCompleter``.
+
+    The shell's dispatch chain calls ``completers.get(None)`` for flag
+    completion and ``completers.get(<positional_index>)`` for value
+    completion.  ``aws_completer`` itself decides the correct response from
+    ``COMP_LINE``/``COMP_POINT``, so we serve the same completer for every
+    key — no need to enumerate positional indices.
+    """
+
+    def __init__(self, completer: Completer) -> None:
+        super().__init__()
+        self._completer = completer
+
+    def get(self, key, default=None):
+        if key is None or isinstance(key, int):
+            return self._completer
+        return default
+
+
+# ─── Recipe entry point ──────────────────────────────────────────────────────
+
+def register() -> None:
+    command_registry.register_external_completers(
+        "aws", _AwsCompletersDict(AwsCompleter()),
+    )
+
+    var_registry.register(_AwsRegionVar())
+    var_registry.register(EnvVar(
+        name="aws_profile",
+        env_var="AWS_PROFILE",
+        completer=AwsProfileCompleter(),
+        description="AWS named profile",
+    ))
