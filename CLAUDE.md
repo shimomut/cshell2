@@ -495,10 +495,12 @@ Opt-in completion recipes for system commands. Enable in `~/.cshell2/config.py`:
 
 ```python
 from cshell2.recipes import enable
-enable("make", "git", "docker", "ssh", "kill", "tail", "ls", "grep", "find", "du", "df", "aws")
+enable("make", "git", "ssh", "kill", "tail", "ls", "grep", "find", "du", "df", "aws")
 ```
 
-Available built-in recipes: `aws`, `df`, `docker`, `du`, `find`, `git`, `grep`, `kill`, `ls`, `make`, `ssh`, `tail`.
+Available built-in recipes: `aws`, `df`, `du`, `find`, `git`, `grep`, `kill`, `ls`, `make`, `ssh`, `tail`.
+
+Tools built on cobra (`docker`, `kubectl`, `helm`, `gh`, …) are handled automatically by `CobraCompleter` — no recipe needed.
 
 Each recipe calls `registry.register_external_completers(name, {...})` with an `OptionsCompleter` under `None` and positional completers as needed.
 
@@ -603,7 +605,6 @@ cshell2/
 │           ├── __init__.py     # enable(*names) helper
 │           ├── aws.py
 │           ├── df.py
-│           ├── docker.py
 │           ├── du.py
 │           ├── find.py
 │           ├── git.py

@@ -9,7 +9,8 @@ A lightweight but powerful terminal shell environment with rich tab completion a
 - **Context switching** — named environments with variables and working directories, with push/pop and `Ctrl+]` live switching
 - **PTY process multiplexing** — run processes in contexts and switch between them without killing them
 - **Custom commands** — define Python functions as shell commands with full completion support
-- **Completion recipes** — opt-in TAB completion for `git`, `docker`, `make`, `ssh`, `aws`, and more
+- **Completion recipes** — opt-in TAB completion for `git`, `make`, `ssh`, `aws`, and more
+- **Cobra-protocol fallback** — automatic completion for any tool that speaks the cobra `__complete` protocol (e.g. `docker`, `kubectl`, `helm`, `gh`)
 - **System command fallback** — anything not a registered command runs through the system shell
 - **History** — persistent history with up/down navigation and `Ctrl+R` search
 
@@ -104,7 +105,7 @@ from cshell2.completion import Completer, Completion, ChoiceCompleter
 from cshell2.recipes import enable
 
 # Enable TAB completion for system commands
-enable("make", "git", "docker", "ssh")
+enable("make", "git", "ssh")
 
 class InstanceCompleter(Completer):
     def complete(self, ctx):
@@ -171,10 +172,12 @@ Built-in recipes add TAB completion for common system commands. Enable them in `
 
 ```python
 from cshell2.recipes import enable
-enable("git", "docker", "make", "ssh", "kill", "ls", "grep", "find", "du", "df", "tail", "aws")
+enable("git", "make", "ssh", "kill", "ls", "grep", "find", "du", "df", "tail", "aws")
 ```
 
-Each recipe registers flag completion (via `OptionsCompleter`) and positional completions (subcommands, files, containers, branches, etc.) for the named command.
+Each recipe registers flag completion (via `OptionsCompleter`) and positional completions (subcommands, files, branches, etc.) for the named command.
+
+Cobra-based tools (`docker`, `kubectl`, `helm`, `gh`, `argocd`, …) don't need a recipe — `CobraCompleter` detects them automatically and drives their `__complete` subcommand for full coverage including live resource enumeration.
 
 #### User-Defined Recipes
 

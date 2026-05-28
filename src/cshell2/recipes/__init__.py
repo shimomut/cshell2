@@ -8,13 +8,12 @@ Recipes provide TAB completion for system commands. Enable them in
     enable("make", "git")    # or pick specific ones
 
 Available recipes:
-    aws       aws s3 subcommands (ls, cp, mv, sync, rm, mb, rb, presign, website),
-              S3 URI completion (s3://bucket/key), per-subcommand flags
+    aws       drives the AWS CLI v2 ``aws_completer`` binary; covers every
+              service, operation, flag, and live AWS resource discovery
     awsut     AWS utility commands — console URL opening, recent cost report,
               ec2 / cloudwatch logs / cloudformation, and SageMaker HyperPod
               cluster operations under `awsut hyperpod ...`
     df        disk-free filesystem usage
-    docker    subcommands, running containers, images, per-subcommand flags
     du        disk usage with size options
     find      filters, type, time, size, actions
     git       subcommands, branches, remotes, stash refs, per-subcommand flags
@@ -25,6 +24,10 @@ Available recipes:
     make      Makefile target names and flags
     ssh       host completion from ~/.ssh/config and known_hosts, options
     tail      follow options and file completion
+
+Tools built on cobra (docker, kubectl, helm, gh, …) are handled
+automatically by the cobra-protocol fallback — no recipe needed.  See
+``CobraCompleter`` in ``cshell2.completion``.
 """
 
 from __future__ import annotations
