@@ -3,8 +3,8 @@
 ## Goal
 
 Provide a single, uniform mechanism for declaring nested command structures
-such as `aws s3 ls`, `git stash pop`, `docker container inspect`, or
-arbitrary-depth user trees like `deploy ec2 instances list`.
+such as `awsut hyperpod cluster create`, `git stash pop`, or arbitrary-depth
+user trees like `deploy ec2 instances list`.
 
 The mechanism must:
 
@@ -53,9 +53,9 @@ Roots are obtained from the registry; everything below comes from chaining
 ```python
 from cshell2.commands import registry, arg
 
-aws = registry.command(
-    "aws",
-    help="AWS CLI",
+awsut = registry.command(
+    "awsut",
+    help="AWS utility commands",
     params=[
         arg("--region",  metavar="REGION",  completer=AwsRegionCompleter()),
         arg("--profile", metavar="PROFILE", completer=AwsProfileCompleter()),
@@ -74,9 +74,8 @@ returned object is a normal `Command` node — everything else uses
 Same method, used **bare** (no decorator):
 
 ```python
-s3 = aws.command("s3", help="Amazon S3")
-ec2 = aws.command("ec2", help="Amazon EC2")
-instances = ec2.command("instances", help="instance management")
+hyperpod = awsut.command("hyperpod", help="SageMaker HyperPod operations")
+cluster = hyperpod.command("cluster", help="cluster management")
 ```
 
 Each call returns the new child node, so callers can keep the reference and
@@ -88,37 +87,34 @@ flags valid at that depth and below.
 Same method, used as a **decorator**, with a Python handler:
 
 ```python
-@s3.command("ls", params=[
-    arg("path", nargs="?", completer=S3PathCompleter()),
-    arg("--recursive",      action="store_true", help="recurse"),
-    arg("--summarize",      action="store_true", help="show summary"),
-    arg("--page-size",      metavar="N", type=int),
+@cluster.command("describe", params=[
+    arg("name", completer=ClusterNameCompleter()),
+    arg("--show-nodes", action="store_true", help="include node list"),
 ])
-def s3_ls(path=None, recursive=False, summarize=False, page_size=None,
-          region=None, profile=None):
+def cluster_describe(name, show_nodes=False, region=None, profile=None):
     ...
 ```
 
-The decorator attaches `s3_ls` as the node's handler. Inherited flags
-(`region`, `profile` from the root) are passed as kwargs alongside the
-node's own parsed args.
+The decorator attaches `cluster_describe` as the node's handler. Inherited
+flags (`region`, `profile` from the root) are passed as kwargs alongside
+the node's own parsed args.
 
 ### Arbitrary Depth
 
 `.command()` on any node returns a node, which itself has `.command()`. So:
 
 ```python
-ec2_instances = aws.command("ec2").command("instances")
+deploy_ec2_instances = registry.command("deploy").command("ec2").command("instances")
 
-@ec2_instances.command("list", params=[
+@deploy_ec2_instances.command("list", params=[
     arg("--filter", action="append", metavar="KEY=VAL"),
 ])
-def ec2_instances_list(filter=None, region=None, profile=None): ...
+def deploy_ec2_instances_list(filter=None, region=None, profile=None): ...
 
-@ec2_instances.command("describe", params=[
+@deploy_ec2_instances.command("describe", params=[
     arg("instance_id", completer=InstanceIdCompleter()),
 ])
-def ec2_instances_describe(instance_id, region=None, profile=None): ...
+def deploy_ec2_instances_describe(instance_id, region=None, profile=None): ...
 ```
 
 There is no built-in depth limit.
@@ -241,10 +237,11 @@ current node and walks up `parent` pointers, merging dictionaries. A flag
 defined at the root is always offered, no matter how deep the user is.
 
 A descendant's flag is **only** offered after its defining node is reached
-in the walk. So `aws s3 --<TAB>` does not offer `--recursive` (defined at
-`aws s3 ls`); the user must type `ls` first. This matches real CLI
-semantics — `aws s3 --recursive ls` fails at runtime — and avoids dumping
-every flag from every leaf into the root's completion menu.
+in the walk. So `awsut hyperpod --<TAB>` does not offer `--show-nodes`
+(defined at `awsut hyperpod cluster describe`); the user must type
+`cluster describe` first. This matches real CLI semantics — placing a
+deep flag before its defining sub-command would fail at runtime — and
+avoids dumping every flag from every leaf into the root's completion menu.
 
 ### Strict vs Permissive
 
@@ -293,15 +290,16 @@ path.
 
 ## Migration of Existing Recipes
 
-`recipes/git.py` and `recipes/aws.py` are the two recipes that already
-hand-roll sub-command dispatch. Migration converts each `_SUBCOMMAND_OPTIONS`
-dict and its dispatcher class into a tree of `.command()` calls. Behavior
-should be identical from the user's perspective; the test suites
-(`tests/test_recipes.py`) anchor that.
+`recipes/git.py` and `recipes/awsut.py` are the recipes that hand-roll
+sub-command dispatch using the tree API. (`recipes/aws.py` no longer
+defines its own subcommand tree — it now drives the AWS CLI v2
+`aws_completer` binary directly, which knows every service, operation,
+and flag.)
 
 Other recipes (`ls`, `du`, `tail`, `kill`, `find`, `grep`, `make`, `ssh`,
-`df`, `docker`) are flat or near-flat and can stay on the existing
-`OptionsCompleter` API; converting them is optional.
+`df`) are flat and stay on the simple `register_external_completers`
+form. Cobra-based tools like `docker`, `kubectl`, and `helm` don't need
+recipes at all — `CobraCompleter` handles them automatically.
 
 ## What Is Out of Scope
 
@@ -314,7 +312,7 @@ Other recipes (`ls`, `du`, `tail`, `kill`, `find`, `grep`, `make`, `ssh`,
 
 ## Open Questions
 
-1. **Help formatting at interior nodes.** Should `aws s3` print a
+1. **Help formatting at interior nodes.** Should `awsut hyperpod` print a
    `git`-style sub-command list, or a `--help` block with usage? Initial
    plan: short list of children with one-line `help=` per child.
 2. **Completing the value of an inherited value-taking flag** when the flag

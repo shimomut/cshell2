@@ -2,6 +2,13 @@
 
 A **recipe** adds TAB completion to an external (system) command — one that runs as a subprocess rather than a Python function registered with `@registry.command`. Recipes live in `src/cshell2/recipes/` and are activated in the user's config with `enable("name")`.
 
+> **Before you write a recipe, check the protocol fallbacks.** cshell2 ships two automatic fallbacks that handle large families of tools without any per-command code:
+>
+> - **Cobra** — covers Go-based CLIs that expose a `__complete` subcommand: `docker`, `kubectl`, `helm`, `gh`, `argocd`, `k9s`, `doctl`, `linkerd`, `istioctl`, `hcloud`, `op`, `hugo`, `oras`, `gitleaks`, … See [cobra-fallback.md](cobra-fallback.md).
+> - **argcomplete** — covers Python CLIs that ship completions via the [argcomplete](https://kislyuk.github.io/argcomplete/) library: `pipx`, `conda`, `pre-commit`, `tox`, `pdm`, `httpie`, `nox`, `virtualenv`, … See [argcomplete-fallback.md](argcomplete-fallback.md).
+>
+> Both activate automatically — no recipe needed. Write a recipe only when neither fallback applies (most classic Unix tools, or when you want richer UX like multi-select flag pickers).
+
 ## Anatomy of a Recipe File
 
 Every recipe file must expose a single `register()` function (no arguments). `enable("name")` imports the module and calls it; the recipe imports the module-level `registry` singleton directly:
@@ -115,33 +122,30 @@ When completions depend on live system state, call the appropriate tool in a `Co
 import subprocess
 from ..completion import Completer, Completion, CompletionContext
 
-class RunningContainerCompleter(Completer):
+class GitBranchCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         try:
             result = subprocess.run(
-                ["docker", "ps", "--format", "{{.Names}}\t{{.Image}}"],
-                capture_output=True, text=True, timeout=3.0,
+                ["git", "branch", "--all", "--format=%(refname:short)"],
+                capture_output=True, text=True, timeout=2.0,
             )
         except (OSError, subprocess.TimeoutExpired):
             return []
         prefix = ctx.prefix
-        completions = []
-        for line in result.stdout.splitlines():
-            parts = line.split("\t")
-            name = parts[0].strip()
-            desc = parts[1].strip() if len(parts) > 1 else ""
-            if name.startswith(prefix):
-                completions.append(Completion(value=name, description=desc))
-        return completions
+        return [
+            Completion(value=ln.strip(), description="branch")
+            for ln in result.stdout.splitlines()
+            if ln.strip().startswith(prefix)
+        ]
 ```
 
 A shared `_run_tool(args, timeout)` helper in the module keeps error handling in one place:
 
 ```python
-def _run_docker(args: list[str], timeout: float = 3.0) -> list[str]:
+def _run_git(args: list[str], timeout: float = 2.0) -> list[str]:
     try:
         result = subprocess.run(
-            ["docker"] + args,
+            ["git"] + args,
             capture_output=True, text=True, timeout=timeout,
         )
         return [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
@@ -153,7 +157,7 @@ def _run_docker(args: list[str], timeout: float = 3.0) -> list[str]:
 
 ### Pattern 4 — Static subcommand list + per-subcommand dispatch
 
-Commands with subcommands (git, docker) need two things: a subcommand completer at position 0, and a dispatcher at later positions that reads `ctx.args[0]` to choose what to complete.
+Commands with subcommands (git, make) need two things: a subcommand completer at position 0, and a dispatcher at later positions that reads `ctx.args[0]` to choose what to complete.
 
 ```python
 GIT_SUBCOMMANDS = {
@@ -236,36 +240,9 @@ Setting `multi_select=True` on every returned completion tells the line editor t
 
 ---
 
-### Pattern 6 — Two-level command groups (docker image ls, docker container run)
+### Pattern 6 — Two-level command groups
 
-Some commands nest two levels deep. One clean approach: key the options dict by a `(group, subcmd)` tuple and look up with the right key in the options completer:
-
-```python
-_SUBCOMMAND_OPTIONS: dict[str | tuple[str, str], dict[str, str]] = {
-    "run":              {"--rm": "auto-remove", "-d": "detach", ...},   # flat
-    ("image",    "ls"): {"--all": "all images", "-q": "IDs only", ...}, # nested
-    ("container","rm"): {"--force": "force", "-v": "remove volumes", ...},
-}
-
-class DockerSubcommandOptionsCompleter(Completer):
-    def should_activate(self, ctx: CompletionContext) -> bool:
-        return ctx.prefix.startswith("-")
-
-    def complete(self, ctx: CompletionContext) -> list[Completion]:
-        if not ctx.args:
-            return []
-        first = ctx.args[0]
-        if first in _MANAGEMENT_GROUPS and len(ctx.args) >= 2:
-            key = (first, ctx.args[1])
-        else:
-            key = first
-        options = _SUBCOMMAND_OPTIONS.get(key, {})
-        return [
-            Completion(value=f, description=d, multi_select=True)
-            for f, d in sorted(options.items())
-            if f.startswith(ctx.prefix)
-        ]
-```
+Some commands nest two levels deep (e.g. `awsut hyperpod cluster create`). For these, the **command tree** API (`Command.command(...)`) is much cleaner than the flat dispatcher pattern — see [subcommands.md](subcommands.md) for the full design. The flat patterns above remain a fine choice for one-level commands like `git checkout` or `make build`.
 
 ---
 

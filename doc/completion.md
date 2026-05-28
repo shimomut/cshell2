@@ -156,8 +156,13 @@ _get_completions(line_before_cursor)
           → options_completer.complete(ctx) if should_activate()
       → No options matches yet, completers[arg_index] present?
           → positional_completer.complete(ctx) if should_activate()
+      → Still no matches?
+          → Try CobraCompleter (if command speaks the cobra __complete protocol)
+          → Try ArgcompleteCompleter (if command is an argcomplete-marked Python script)
       → Still no matches and no completer registered? → FileCompleter fallback
 ```
+
+**Protocol fallbacks** layer onto the dispatch chain after registered completers fail. They use the same `Completer` interface and a per-command probe-cache so a single TAB on a known-cobra/known-argcomplete tool stays fast. See [cobra-fallback.md](cobra-fallback.md) and [argcomplete-fallback.md](argcomplete-fallback.md) for protocol details.
 
 Once completions are returned to the line editor:
 

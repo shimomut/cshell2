@@ -31,6 +31,8 @@ A lightweight but powerful terminal shell environment implemented in Python.
 │  ├── Command name completion                       │
 │  ├── Argument completion (per-command completers)  │
 │  ├── Options completion (flags, multi-select TUI)  │
+│  ├── CobraCompleter — drives <cmd> __complete      │
+│  ├── ArgcompleteCompleter — drives argcomplete IPC │
 │  └── Filesystem completion (fallback)              │
 ├─────────────────────────────────────────────────────┤
 │  TUI Widgets (tui.py)                               │
@@ -96,7 +98,7 @@ def hello(name):
 Methods:
 - `command(name, *, help=None, params=None)` — decorator to register a Python function. `params=[arg(...)]` declares positionals and flags; the registry derives both an argparse parser and the per-position completer dict from the same list.
 - `register(cmd: Command)` — register a pre-built `Command` object (mirrors `var_registry.register(var_object)`)
-- `register_external_completers(command_name, completers)` — attach a `{None: OptionsCompleter, N: positional}` dict to a system command (e.g. `git`, `docker`) without wrapping it as a Python command
+- `register_external_completers(command_name, completers)` — attach a `{None: OptionsCompleter, N: positional}` dict to a system command (e.g. `git`, `make`) without wrapping it as a Python command
 - `mark_builtins()` — snapshot current commands as builtins (not removed on `reload`)
 - `clear_user_commands()` — remove non-builtin commands and all external completers
 
@@ -500,7 +502,10 @@ enable("make", "git", "ssh", "kill", "tail", "ls", "grep", "find", "du", "df", "
 
 Available built-in recipes: `aws`, `df`, `du`, `find`, `git`, `grep`, `kill`, `ls`, `make`, `ssh`, `tail`.
 
-Tools built on cobra (`docker`, `kubectl`, `helm`, `gh`, …) are handled automatically by `CobraCompleter` — no recipe needed.
+**Protocol fallbacks** — auto-activate after recipes, no `enable()` required:
+
+- **`CobraCompleter`** drives `<cmd> __complete` for cobra-based CLIs (`docker`, `kubectl`, `helm`, `gh`, `argocd`, …). See `doc/cobra-fallback.md`.
+- **`ArgcompleteCompleter`** drives the argcomplete protocol (env vars + fd 8) for Python CLIs marked with `# PYTHON_ARGCOMPLETE_OK` (`pipx`, `conda`, `pre-commit`, `tox`, `pdm`, `httpie`, …). See `doc/argcomplete-fallback.md`.
 
 Each recipe calls `registry.register_external_completers(name, {...})` with an `OptionsCompleter` under `None` and positional completers as needed.
 

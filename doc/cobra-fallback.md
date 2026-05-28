@@ -25,7 +25,7 @@ A huge fraction of these tools are built on the [spf13/cobra](https://github.com
 
 ## Non-goals
 
-- Universal protocol detection. We target cobra only. argcomplete (Python tools) and ad-hoc protocols (`npm completion`, etc.) are separate fallbacks for future work.
+- Universal protocol detection. We target cobra only. argcomplete (Python tools) is handled by a sibling fallback — see [argcomplete-fallback.md](argcomplete-fallback.md). Ad-hoc protocols (`npm completion`, etc.) remain out of scope.
 - Honoring cobra's directive byte (`:N` trailer — nospace, nofiles, etc.). We strip it for now; hooking directives into `InlinePicker` is a follow-up.
 - Caching across shell restarts. In-memory only.
 
@@ -118,10 +118,13 @@ bash-completion was the obvious-looking choice but adds a system dependency (the
 - Has a stable, documented protocol — `<cmd> __complete <words>`.
 - Covers most of what users actually reach for in 2026 (kubectl, helm, gh, argocd, k3d, k9s, fluxctl, oras, doctl, linkerd, istioctl, hugo, hcloud, op, gitleaks, …).
 
-The remaining long tail — argcomplete-based Python tools, `complete -C` style tools (`aws`), non-cobra Go tools (`terraform`), shell-only completion (`git`, `ssh`, `ls`) — is well-served by cshell2's own recipes.
+The remaining long tail is covered by:
+
+- The `aws` recipe drives `aws_completer` (AWS CLI v2's protocol — different from cobra; see [recipes/aws.py](../src/cshell2/recipes/aws.py))
+- [argcomplete-fallback.md](argcomplete-fallback.md) for Python CLIs (pipx, conda, pre-commit, tox, …)
+- cshell2's own recipes for shell-only completion (`git`, `ssh`, `ls`, `make`, …)
 
 ## Future work
 
-- **argcomplete fallback** — same shape as `CobraCompleter`, detects via `_ARGCOMPLETE=1`, parses vertical-tab-separated output. Would cover pip, awscli-v2, conda, …
 - **Honor cobra directives** — surface `nospace` and `nofiles` to the line editor so the right thing happens when a candidate is selected.
 - **Concurrent probe** — first TAB on a command currently blocks while the probe runs. Could fire it eagerly the first time the user types a known-PATH command.

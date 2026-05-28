@@ -74,7 +74,7 @@ Provides the `CommandRegistry` class and a global `registry` singleton.
 - `@registry.command(name=..., help=..., params=[arg(...)])` decorator for registering Python functions as commands. `params=` declares positionals and flags; the registry derives both an argparse parser and a per-position completer dict from the same list.
 - `arg(*names, completer=None, **argparse_kwargs)` builder used inside `params=`. Values from `choices=` automatically populate a `ChoiceCompleter` if no explicit `completer=` is given.
 - `registry.register()` for imperative registration
-- `registry.register_external_completers(name, completers)` for attaching a `{None: OptionsCompleter, N: positional}` dict to a system command (e.g. `git`, `docker`) without wrapping it as a Python command
+- `registry.register_external_completers(name, completers)` for attaching a `{None: OptionsCompleter, N: positional}` dict to a system command (e.g. `git`, `make`) without wrapping it as a Python command
 - `registry.mark_builtins()` / `registry.clear_user_commands()` for hot-reload support
 - Each `Command` holds: name, callable, `params: list[Arg] | None`, derived per-argument completers dict, help text, description
 - Description comes from the explicit `help=` kwarg, falling back to the function's docstring
@@ -87,6 +87,9 @@ Defines the `Completer` protocol, `CompletionContext`, and built-in completers.
 - `Completer` ABC with `complete()` and optional `should_activate()` guard
 - Built-in completers: `FileCompleter`, `DirCompleter`, `CommandNameCompleter`, `ChoiceCompleter`, `CallbackCompleter`, `OptionsCompleter`, `ConditionalCompleter`
 - `OptionsCompleter` supports multi-select flag TUI, flag arg-hints, value completers, and flag deduplication
+- **Protocol fallbacks** auto-activate after registered/recipe completers fail, before file completion:
+  - `CobraCompleter` drives `<cmd> __complete <words>` for cobra-based CLIs (docker, kubectl, helm, gh, argocd, …) — see `doc/cobra-fallback.md`
+  - `ArgcompleteCompleter` drives the argcomplete protocol (env vars + fd 8) for Python CLIs (pipx, conda, pre-commit, tox, pdm, httpie, …) — see `doc/argcomplete-fallback.md`
 
 ### context.py — Context Manager
 
@@ -139,8 +142,10 @@ Opt-in completion recipes for system commands. Each recipe registers completers 
 
 ```python
 from cshell2.recipes import enable
-enable("git", "docker", "make", "ssh", "kill", "ls", "grep", "find", "du", "df", "tail", "aws")
+enable("git", "make", "ssh", "kill", "ls", "grep", "find", "du", "df", "tail", "aws")
 ```
+
+Cobra-based tools (`docker`, `kubectl`, `helm`, `gh`, …) and argcomplete-based Python CLIs (`pipx`, `conda`, …) don't need a recipe — `CobraCompleter` and `ArgcompleteCompleter` detect them automatically.
 
 ### parsing.py — Line Tokenization
 
@@ -234,7 +239,6 @@ cshell2/
 │           ├── __init__.py     # enable(*names) helper
 │           ├── aws.py
 │           ├── df.py
-│           ├── docker.py
 │           ├── du.py
 │           ├── find.py
 │           ├── git.py
@@ -245,6 +249,10 @@ cshell2/
 │           ├── ssh.py
 │           └── tail.py
 └── tests/
+    ├── test_alias_expansion.py
+    ├── test_argcomplete_fallback.py
+    ├── test_aws_recipe.py
+    ├── test_cobra_completion.py
     ├── test_commands.py
     ├── test_completion.py
     ├── test_context.py
@@ -253,6 +261,7 @@ cshell2/
     ├── test_process.py
     ├── test_recipes.py
     ├── test_shell_continuation.py
+    ├── test_subcommands.py
     └── test_variables.py
 ```
 

@@ -10,7 +10,7 @@ A lightweight but powerful terminal shell environment with rich tab completion a
 - **PTY process multiplexing** — run processes in contexts and switch between them without killing them
 - **Custom commands** — define Python functions as shell commands with full completion support
 - **Completion recipes** — opt-in TAB completion for `git`, `make`, `ssh`, `aws`, and more
-- **Cobra-protocol fallback** — automatic completion for any tool that speaks the cobra `__complete` protocol (e.g. `docker`, `kubectl`, `helm`, `gh`)
+- **Protocol fallbacks** — automatic completion for cobra-based tools (`docker`, `kubectl`, `helm`, `gh`, …) and argcomplete-based Python CLIs (`pipx`, `conda`, `pre-commit`, `tox`, …) — no recipe needed
 - **System command fallback** — anything not a registered command runs through the system shell
 - **History** — persistent history with up/down navigation and `Ctrl+R` search
 
@@ -177,7 +177,10 @@ enable("git", "make", "ssh", "kill", "ls", "grep", "find", "du", "df", "tail", "
 
 Each recipe registers flag completion (via `OptionsCompleter`) and positional completions (subcommands, files, branches, etc.) for the named command.
 
-Cobra-based tools (`docker`, `kubectl`, `helm`, `gh`, `argocd`, …) don't need a recipe — `CobraCompleter` detects them automatically and drives their `__complete` subcommand for full coverage including live resource enumeration.
+Two protocol fallbacks activate automatically — no recipe needed:
+
+- **Cobra-based tools** (`docker`, `kubectl`, `helm`, `gh`, `argocd`, …) — `CobraCompleter` drives their `__complete` subcommand, including live resource enumeration (running containers, k8s resources, GitHub issues, …). See [doc/cobra-fallback.md](doc/cobra-fallback.md).
+- **argcomplete-based Python CLIs** (`pipx`, `conda`, `pre-commit`, `tox`, `pdm`, `httpie`, …) — `ArgcompleteCompleter` detects the `# PYTHON_ARGCOMPLETE_OK` marker and drives the argcomplete protocol. See [doc/argcomplete-fallback.md](doc/argcomplete-fallback.md).
 
 #### User-Defined Recipes
 
