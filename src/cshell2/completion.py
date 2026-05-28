@@ -485,3 +485,286 @@ def get_cobra_fallback() -> CobraCompleter | None:
     if _cobra_fallback is None:
         _cobra_fallback = CobraCompleter()
     return _cobra_fallback
+
+
+# ---------------------------------------------------------------------------
+# argcomplete fallback
+# ---------------------------------------------------------------------------
+#
+# argcomplete (https://kislyuk.github.io/argcomplete/) is the de-facto
+# completion library for Python CLIs.  Tools that opt in include pipx, conda,
+# pre-commit, tox, pdm, httpie, nox, virtualenv, plus many internal Amazon
+# Python tools.
+#
+# Protocol::
+#
+#     _ARGCOMPLETE=1                # enable completion mode
+#     _ARGCOMPLETE_IFS=$'\v'        # candidate separator (vertical tab)
+#     COMP_LINE="<full line>"
+#     COMP_POINT="<cursor pos>"
+#     <tool>                         # write candidates to fd 8
+#
+# fd 8 receives the candidate list joined by ``_ARGCOMPLETE_IFS``.
+#
+# Detection MUST be done before invocation because non-argcomplete tools
+# silently ignore the env vars and run normally — invoking ``rm`` or any
+# other side-effecting binary in completion mode would actually run it.
+# We detect by inspecting the executable: it must be a Python script (shim
+# for a setuptools console_script, or a plain script with the marker), and
+# the imported module's first 1024 bytes must contain ``PYTHON_ARGCOMPLETE_OK``.
+
+
+# Script that runs the marker check using the target tool's own Python
+# interpreter — which gives us the right sys.path for finding the imported
+# module without executing the user's package code.
+_ARGCOMPLETE_PROBE_SCRIPT = r"""
+import importlib.util, sys
+mod = sys.argv[1]
+spec = importlib.util.find_spec(mod)
+if spec is None or spec.origin is None:
+    sys.exit(2)
+try:
+    with open(spec.origin) as f:
+        head = f.read(1024)
+except OSError:
+    sys.exit(3)
+sys.exit(0 if "PYTHON_ARGCOMPLETE_OK" in head else 1)
+"""
+
+import re as _re
+
+# Setuptools console_script shim:
+#     #!/path/to/python
+#     ...
+#     from <module> import <func>
+#     ...
+#     sys.exit(<func>())
+_SHIM_IMPORT_RE = _re.compile(r"^from\s+([\w\.]+)\s+import\s+\w+\s*$", _re.MULTILINE)
+
+
+class ArgcompleteCompleter(Completer):
+    """Fallback completer that drives argcomplete-aware Python CLIs.
+
+    Detection per command (cached):
+      1. The executable on PATH must be readable.
+      2. Either the file itself contains ``PYTHON_ARGCOMPLETE_OK`` in its
+         first 1024 bytes, OR it's a setuptools console_script shim and
+         the imported module's first 1024 bytes contain the marker.
+
+    On a hit, completion runs ``<tool>`` in argcomplete mode with fd 8
+    captured; candidates come back joined by ``_ARGCOMPLETE_IFS``.
+
+    Returns ``Completion(value=..., description="")`` — argcomplete does
+    support descriptions but only with a separate, less stable wire
+    format; we ignore those for now.
+    """
+
+    _IFS = "\v"
+
+    def __init__(self, *, timeout: float = 2.0) -> None:
+        self._timeout = timeout
+        # Per-command probe cache: command name → bool.
+        self._is_argcomplete: dict[str, bool] = {}
+        # Per-line completion cache: line → list[str].
+        self._results: dict[str, list[str]] = {}
+
+    def should_activate(self, ctx: CompletionContext) -> bool:
+        if not ctx.command:
+            return False
+        if shutil.which(ctx.command) is None:
+            return False
+        return self._is_argcomplete_command(ctx.command)
+
+    def complete(self, ctx: CompletionContext) -> list[Completion]:
+        if not ctx.command or not self._is_argcomplete_command(ctx.command):
+            return []
+        line = ctx.line
+        if line in self._results:
+            words = self._results[line]
+        else:
+            words = self._invoke(ctx.command, line)
+            self._results[line] = words
+        prefix = ctx.prefix
+        return [Completion(value=w) for w in words if w.startswith(prefix)]
+
+    # ── detection ────────────────────────────────────────────────────────
+
+    def _is_argcomplete_command(self, command: str) -> bool:
+        if command in self._is_argcomplete:
+            return self._is_argcomplete[command]
+        result = self._probe(command)
+        self._is_argcomplete[command] = result
+        return result
+
+    def _probe(self, command: str) -> bool:
+        """Inspect the executable for the argcomplete marker."""
+        path = shutil.which(command)
+        if path is None:
+            return False
+        try:
+            # Read as bytes — many executables on PATH are binaries (ls,
+            # grep, …) and decoding them as text would raise.  We only need
+            # to find an ASCII marker so bytes-level scanning is fine.
+            with open(path, "rb") as f:
+                head_bytes = f.read(2048)
+        except OSError:
+            return False
+        # If the file isn't text-decodable as UTF-8, it can't be a Python
+        # script (or its shim) — it's a compiled binary.
+        try:
+            head = head_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            return False
+
+        # Marker present directly in the script (plain Python script that
+        # opted in via ``# PYTHON_ARGCOMPLETE_OK``).
+        if "PYTHON_ARGCOMPLETE_OK" in head:
+            return True
+
+        # Setuptools console_script shim — locate the imported module and
+        # check it.  Bail if the shebang doesn't point at a python interpreter.
+        first_line = head.split("\n", 1)[0]
+        if not first_line.startswith("#!") or "py" not in first_line.lower():
+            return False
+        python_path = first_line[2:].strip().split()[0]
+        if not os.path.isfile(python_path):
+            return False
+
+        match = _SHIM_IMPORT_RE.search(head)
+        if not match:
+            return False
+        module = match.group(1)
+
+        try:
+            proc = subprocess.run(
+                [python_path, "-c", _ARGCOMPLETE_PROBE_SCRIPT, module],
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+        return proc.returncode == 0
+
+    # ── invocation ───────────────────────────────────────────────────────
+
+    def _invoke(self, command: str, line: str) -> list[str]:
+        """Run *command* in argcomplete mode, capture candidates from fd 8.
+
+        argcomplete writes candidates to fd 8 specifically (debug output
+        goes to fd 9).  We allocate a pipe, move its write end onto parent
+        fd 8 via ``dup2``, then pass fd 8 to the child via ``pass_fds``.
+        The child inherits fd 8 pointing to the pipe; argcomplete writes
+        candidates there; we read them back from the pipe's read end.
+        """
+        env = dict(os.environ)
+        env["_ARGCOMPLETE"] = "1"
+        env["_ARGCOMPLETE_IFS"] = self._IFS
+        env["_ARGCOMPLETE_SHELL"] = "bash"
+        env["_ARGCOMPLETE_SUPPRESS_SPACE"] = "1"
+        env["COMP_LINE"] = line
+        env["COMP_POINT"] = str(len(line.encode("utf-8")))
+        env["COMP_TYPE"] = "9"  # 9 = TAB
+
+        try:
+            r_fd, w_fd = os.pipe()
+        except OSError:
+            return []
+
+        # Snapshot whatever was on parent fd 8 before we clobber it (rare
+        # but possible).  We restore it after Popen returns.
+        saved_fd8 = -1
+        try:
+            saved_fd8 = os.dup(8)
+        except OSError:
+            saved_fd8 = -1  # fd 8 wasn't open; nothing to restore
+
+        try:
+            os.dup2(w_fd, 8)
+            os.close(w_fd)
+            w_fd = -1
+            try:
+                proc = subprocess.Popen(
+                    [command],
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    pass_fds=(8,),
+                )
+            except (OSError, ValueError):
+                os.close(r_fd)
+                return []
+        finally:
+            # Restore parent fd 8 (or close it if it wasn't open before).
+            if saved_fd8 >= 0:
+                try:
+                    os.dup2(saved_fd8, 8)
+                    os.close(saved_fd8)
+                except OSError:
+                    pass
+            else:
+                try:
+                    os.close(8)
+                except OSError:
+                    pass
+
+        chunks: list[bytes] = []
+        try:
+            proc.wait(timeout=self._timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=1.0)
+            os.close(r_fd)
+            return []
+
+        while True:
+            try:
+                chunk = os.read(r_fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            chunks.append(chunk)
+        os.close(r_fd)
+
+        if proc.returncode != 0:
+            return []
+        raw = b"".join(chunks).decode("utf-8", errors="replace")
+        # argcomplete joins candidates with _IFS; trailing IFS is normal.
+        words = [w for w in raw.split(self._IFS) if w]
+        return words
+
+
+# Module-level singleton + enable/disable API.
+
+_argcomplete_fallback: ArgcompleteCompleter | None = None
+_argcomplete_enabled: bool = True
+
+
+def enable_argcomplete_fallback(*, timeout: float = 2.0) -> ArgcompleteCompleter:
+    """Enable the argcomplete fallback.
+
+    Returns the configured :class:`ArgcompleteCompleter`.  The default
+    state is *enabled* — call this only to override the timeout.
+    """
+    global _argcomplete_fallback, _argcomplete_enabled
+    _argcomplete_fallback = ArgcompleteCompleter(timeout=timeout)
+    _argcomplete_enabled = True
+    return _argcomplete_fallback
+
+
+def disable_argcomplete_fallback() -> None:
+    """Disable the argcomplete fallback for this session."""
+    global _argcomplete_enabled
+    _argcomplete_enabled = False
+
+
+def get_argcomplete_fallback() -> ArgcompleteCompleter | None:
+    """Return the active argcomplete fallback, or ``None`` if disabled."""
+    global _argcomplete_fallback
+    if not _argcomplete_enabled:
+        return None
+    if _argcomplete_fallback is None:
+        _argcomplete_fallback = ArgcompleteCompleter()
+    return _argcomplete_fallback

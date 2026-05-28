@@ -25,6 +25,7 @@ from .completion import (
     CompletionContext,
     FileCompleter,
     Completion,
+    get_argcomplete_fallback,
     get_cobra_fallback,
 )
 from .variables import registry as var_registry, VarCompleter
@@ -697,6 +698,15 @@ class Shell:
             cobra = get_cobra_fallback()
             if cobra is not None and cobra.should_activate(ctx):
                 completions = cobra.complete(ctx)
+
+        # argcomplete fallback: the de-facto Python CLI completion library
+        # (pipx, conda, pre-commit, tox, pdm, httpie, …).  Detection is done
+        # by inspecting the script for the ``PYTHON_ARGCOMPLETE_OK`` marker,
+        # so it never invokes side-effecting tools blindly.
+        if not completions:
+            argc = get_argcomplete_fallback()
+            if argc is not None and argc.should_activate(ctx):
+                completions = argc.complete(ctx)
 
         if not completions and not has_completer:
             completions = self._file_completer.complete(ctx)
