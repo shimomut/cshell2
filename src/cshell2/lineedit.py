@@ -801,11 +801,13 @@ class LineEditor:
         value = _shell_quote(completion.value)
         # Append a trailing space so the next argument can be typed immediately.
         # Skip when: (a) the value ends with "/" — a directory, where the user
-        # may continue typing the path; (b) post already starts with whitespace.
+        # may continue typing the path; (b) the value ends with "=" — a KEY=
+        # completion where the user will continue typing the value; (c) post
+        # already starts with whitespace.
         # arg_hint flags always get a space — _prompt_for_arg uses it as a separator.
         if completion.arg_hint:
             value = value + " "
-        elif not value.endswith("/") and not post[:1].isspace():
+        elif not value.endswith(("/", "=")) and not post[:1].isspace():
             value = value + " "
         self._buf = pre + value + post
         self._cursor = len(pre) + len(value)
