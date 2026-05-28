@@ -192,8 +192,9 @@ class InlinePicker(Generic[T]):
     def _reserve(self) -> None:
         """Create blank lines below cursor and save the top position with DECSC."""
         sys.stdout.write("\n" * self._height)
-        col_move = f"\033[{self._col}C" if self._col > 0 else ""
-        sys.stdout.write(_csi(f"{self._height}A") + "\r" + col_move + "\0337")
+        # CHA jumps to the target column atomically; \r + cursor-forward
+        # would briefly render the caret at col 0 before moving right.
+        sys.stdout.write(_csi(f"{self._height}A") + f"\033[{self._col + 1}G\0337")
         sys.stdout.flush()
 
     def _render(self) -> None:
@@ -208,13 +209,13 @@ class InlinePicker(Generic[T]):
                 out.append("\n")
 
         # Re-save anchor, then move cursor to prompt caret position.
+        # CHA (\033[{N}G) sets the column atomically — `\r` + cursor-forward
+        # flickers because the terminal briefly renders the caret at col 0.
         out.append("\0338\0337")
         if self._rows_above > 0:
             out.append(f"\033[{self._rows_above}A")
         caret_col_now = self._col + self._initial_offset + len(self._typed)
-        out.append("\r")
-        if caret_col_now > 0:
-            out.append(f"\033[{caret_col_now}C")
+        out.append(f"\033[{caret_col_now + 1}G")
 
         sys.stdout.write("".join(out))
         sys.stdout.flush()
@@ -272,9 +273,19 @@ class InlinePicker(Generic[T]):
         return row
 
     def _cleanup(self) -> None:
-        """Restore to anchor and erase the picker area."""
-        sys.stdout.write("\0338\r\033[J")
-        sys.stdout.flush()
+        """Restore to anchor and erase the picker area.
+
+        Skip the flush so the bytes batch with whatever the caller writes next
+        (typically a ``\\033[{rows_above}A`` to return to the prompt caret, then
+        a redraw or the next picker's ``_reserve``). Flushing here would render
+        an intermediate cursor position below the prompt, producing flicker.
+
+        Skip the leading ``\\r`` for the same reason: the picker only ever
+        wrote from ``self._col`` onwards (each row uses ``\\r{col_move}{...}``
+        within the same buffered render), so the area to the left of the
+        anchor on the anchor row was never touched and doesn't need clearing.
+        """
+        sys.stdout.write("\0338\033[J")
 
     # ── char input ──────────────────────────────────────────────────────────
 
@@ -628,12 +639,12 @@ class InlineMultiPicker(Generic[T]):
                 out.append("\n")
 
         # Re-save anchor, then move cursor back to the prompt caret.
+        # CHA (\033[{N}G) sets the column atomically — `\r` + cursor-forward
+        # flickers because the terminal briefly renders the caret at col 0.
         out.append("\0338\0337")
         if self._rows_above > 0:
             out.append(f"\033[{self._rows_above}A")
-        out.append("\r")
-        if self._caret_col > 0:
-            out.append(f"\033[{self._caret_col}C")
+        out.append(f"\033[{self._caret_col + 1}G")
 
         sys.stdout.write("".join(out))
         sys.stdout.flush()

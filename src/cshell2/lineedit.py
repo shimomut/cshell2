@@ -276,19 +276,19 @@ class LineEditor:
         if self._hint:
             # Append the hint on the line below the buffer (starting at col 0).
             sys.stdout.write(f"\n\r\033[2m{self._hint}\033[0m")
-            # Move back up to the caret row.
+            # Move back up to the caret row (column gets fixed by the CHA below).
             rows_up = end_row + 1 - self._cursor_row
-            sys.stdout.write(f"\r\033[{rows_up}A")
+            sys.stdout.write(f"\033[{rows_up}A")
         else:
             # Navigate from end of content back to where the cursor belongs.
             rows_up = end_row - self._cursor_row
             if rows_up > 0:
                 sys.stdout.write(f"\033[{rows_up}A")
-            sys.stdout.write("\r")
 
+        # Use CHA (absolute column) so the caret jumps to its final position in
+        # one atomic move — `\r` followed by `\033[{N}C` flickers through col 0.
         cursor_col = _pending_wrap_col(cursor_char, cols)
-        if cursor_col > 0:
-            sys.stdout.write(f"\033[{cursor_col}C")
+        sys.stdout.write(f"\033[{cursor_col + 1}G")
 
         sys.stdout.flush()
 
@@ -498,8 +498,10 @@ class LineEditor:
 
         # Picker cleanup left cursor at the anchor (col 0 of the blank line).
         # Move back up to the caret row so _redraw() can take over from there.
+        # Skip the flush so the up-move batches with the redraw the caller
+        # performs next — otherwise the terminal briefly renders the caret at
+        # col 0 of the prompt row.
         sys.stdout.write(f"\033[{rows_above}A")
-        sys.stdout.flush()
 
         # Prompt text may have changed after a context switch.
         self._prompt_str = self._get_prompt()
@@ -599,11 +601,13 @@ class LineEditor:
             )
             selected = picker.run()
 
-            # Picker cleanup leaves cursor at the anchor row (first blank line).
-            # Move up rows_above lines to reach the caret row, then let _redraw
-            # handle the rest.
+            # Picker cleanup leaves cursor at the anchor (col `picker._col` of
+            # the first blank row) WITHOUT flushing. Move up to the caret row
+            # and skip the flush so these bytes batch with the next render
+            # (either the reopened picker's _reserve or _redraw on return) —
+            # otherwise the terminal briefly shows the caret at the start of
+            # the token being completed.
             sys.stdout.write(f"\033[{rows_above}A")
-            sys.stdout.flush()
 
             if picker.reopen:
                 # TAB-complete typed chars; commit to buffer and reopen at new position.
@@ -649,8 +653,9 @@ class LineEditor:
         )
         selected = picker.run()
 
+        # No flush — let these bytes batch with the next _redraw so the caret
+        # doesn't briefly land at the picker's anchor column on the prompt row.
         sys.stdout.write(f"\033[{rows_above}A")
-        sys.stdout.flush()
 
         if not selected:
             return
@@ -747,8 +752,8 @@ class LineEditor:
         )
         selected = picker.run()
 
+        # No flush — let the up-move batch with _redraw on return.
         sys.stdout.write("\033[1A")
-        sys.stdout.flush()
 
         if selected is not None:
             self._buf = selected
@@ -852,9 +857,9 @@ class LineEditor:
             value = arg_prompt.run()
 
             # InlineArgPrompt._cleanup() left the cursor at anchor (col 0 of the
-            # prompt line, end_row + 1 below render-top). Move back to caret_row.
+            # prompt line, end_row + 1 below render-top). Move back to caret_row
+            # without flushing so the up-move batches with _redraw on return.
             sys.stdout.write(f"\033[{end_row + 1 - caret_row}A")
-            sys.stdout.flush()
 
             if value is None:
                 return False
@@ -908,10 +913,11 @@ class LineEditor:
             )
             selected = picker.run()
 
-            # Picker cleanup left cursor at col 0 of (end_row + 1).
-            # Go back up to where the caret was before the picker opened.
+            # Picker cleanup left cursor at col `picker._col` of (end_row + 1).
+            # Go back up to the caret row, but don't flush — let these bytes
+            # batch with the next render so we don't briefly show the caret
+            # at the picker's anchor column on the prompt row.
             sys.stdout.write(f"\033[{rows_above}A")
-            sys.stdout.flush()
 
             if picker.reopen:
                 # TAB was pressed inside the picker: extend the typed chars into
