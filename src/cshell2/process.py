@@ -38,6 +38,7 @@ _TRACKED_MODES = {
     b"1002": "mouse_btn",    # mouse button tracking
     b"1003": "mouse_all",    # all mouse motion tracking
     b"1006": "mouse_sgr",    # SGR mouse mode
+    b"1004": "focus",        # focus in/out reporting
 }
 
 
