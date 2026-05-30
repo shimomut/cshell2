@@ -1604,12 +1604,18 @@ class Shell:
             sys.stdout.flush()
         if slot.terminal_modes.get("alt_screen", False):
             slot.activate()
+            # Force the app to do a full clear+redraw by wiggling the PTY
+            # size — without this, ncurses' shadow buffer matches what it
+            # thinks is on screen and the freshly-restored alt-screen stays
+            # blank.  Wiggle by one column instead of toward (1,1): nano
+            # (and likely others) bail with assertion/die() on intermediate
+            # tiny sizes, but every TUI tolerates a one-column shrink.
             try:
                 rows, cols = os.get_terminal_size(sys.stdin.fileno())
             except OSError:
                 rows, cols = 0, 0
-            if rows and cols:
-                slot.resize(1, 1)
+            if rows and cols and cols > 1:
+                slot.resize(rows, cols - 1)
                 slot.resize(rows, cols)
         else:
             slot.activate(replay_missed=True)
