@@ -48,7 +48,11 @@ class ProcessSlot:
         self.pid: int = -1
         self.master_fd: int = -1
         self.argv: list[str] = []
+        # Full history — replayed for alt-screen TUIs (idempotent paints).
         self.buffer: OutputBuffer = OutputBuffer()
+        # Bytes received while backgrounded — replayed once for streaming
+        # output so users don't lose lines but also don't see duplicates.
+        self.missed: OutputBuffer = OutputBuffer()
         self.active: bool = False
         self.exit_code: int | None = None
         self._exit_event = threading.Event()
@@ -127,6 +131,8 @@ class ProcessSlot:
                 if self.active:
                     sys.stdout.buffer.write(data)
                     sys.stdout.buffer.flush()
+                else:
+                    self.missed.append(data)
         finally:
             try:
                 _, status = os.waitpid(self.pid, 0)
@@ -166,8 +172,21 @@ class ProcessSlot:
                         self.terminal_modes[name] = False
             i = end + 1 if end > idx else idx + 1
 
-    def activate(self) -> None:
-        self.active = True
+    def activate(self, *, replay_missed: bool = False) -> None:
+        """Resume writing reader output to stdout.
+
+        If *replay_missed* is True, flush bytes that arrived while inactive
+        to stdout before clearing the missed-buffer. Done under the same
+        buffer lock the reader takes, so nothing is dropped or duplicated
+        across the activation boundary.
+        """
+        with self.missed._lock:
+            if replay_missed:
+                for chunk in self.missed._buf:
+                    sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
+            self.missed._buf.clear()
+            self.active = True
 
     def deactivate(self) -> None:
         self.active = False

@@ -1579,6 +1579,41 @@ class Shell:
             return None
         return (selected, False)
 
+    def _resume_pty_slot(self, slot: ProcessSlot) -> None:
+        """Restore terminal modes and re-activate a backgrounded PTY slot.
+
+        Used both when resuming after a context switch and when the user
+        cancels the switch picker.  Two strategies, picked by alt-screen
+        state:
+          • Alt-screen TUIs (vi, tfm, less): rely on the app's own
+            redraw.  We force a SIGWINCH-driven repaint by wiggling the
+            PTY size: (1, 1) then the real (rows, cols).  This guarantees
+            ncurses sees a real resize event (not a no-op short-circuit)
+            and triggers KEY_RESIZE → full clear+redraw.  Snapshot replay
+            of the buffer is unsafe — paint commands are size-dependent
+            and the deque-bounded history can be partial, leaving stale
+            cells (selection markers, mis-positioned separators) that
+            ncurses' shadow won't consider dirty.
+          • Streaming output (logs, build): activate(replay_missed=True)
+            atomically prints bytes that arrived while inactive and
+            clears the missed-buffer under the buffer lock.
+        """
+        restore_seq = slot.restore_terminal_modes()
+        if restore_seq:
+            sys.stdout.write(restore_seq)
+            sys.stdout.flush()
+        if slot.terminal_modes.get("alt_screen", False):
+            slot.activate()
+            try:
+                rows, cols = os.get_terminal_size(sys.stdin.fileno())
+            except OSError:
+                rows, cols = 0, 0
+            if rows and cols:
+                slot.resize(1, 1)
+                slot.resize(rows, cols)
+        else:
+            slot.activate(replay_missed=True)
+
     def _handle_switch(self) -> bool:
         """Handle Ctrl+] switch request.
 
@@ -1599,8 +1634,9 @@ class Shell:
             # buffered output will be replayed correctly (with raw_mode=True) the
             # next time _enter_python_forwarding_mode is called from run().
             if ctx and ctx.process_slot and ctx.process_slot.is_alive():
-                if not isinstance(ctx.process_slot, PythonCommandSlot):
-                    ctx.process_slot.activate()
+                slot = ctx.process_slot
+                if not isinstance(slot, PythonCommandSlot):
+                    self._resume_pty_slot(slot)
             return False
 
         target_name, is_new = result
@@ -1615,16 +1651,11 @@ class Shell:
 
         new_ctx = self.context_manager.current()
         if new_ctx and new_ctx.process_slot:
-            slot = new_ctx.process_slot
-            # PTY processes: activate immediately so the reader thread resumes
-            # streaming output (run() will enter forwarding mode right after).
-            # PythonCommandSlots: leave deactivated.  _enter_python_forwarding_mode
-            # calls activate(raw_mode=True) which converts \n→\r\n correctly.
-            # Also handles the finished-but-not-replayed case: returning True here
-            # makes lineedit exit so run() calls replay_buffer() immediately,
-            # rather than waiting for the user to press Enter.
-            if slot.is_alive() and not isinstance(slot, PythonCommandSlot):
-                slot.activate()
+            # Don't activate the slot here — leave that to run()'s resume
+            # path so it can choose between snapshot replay (TUI) and
+            # missed-buffer flush (streaming) based on alt-screen state.
+            # Returning True makes lineedit exit so run() takes over
+            # immediately rather than waiting for the user to press Enter.
             return True
         return False
 
@@ -1669,12 +1700,7 @@ class Shell:
                             continue
                     else:
                         # Resume a PTY subprocess.
-                        slot.buffer.drain()
-                        restore_seq = slot.restore_terminal_modes()
-                        if restore_seq:
-                            sys.stdout.write(restore_seq)
-                            sys.stdout.flush()
-                        slot.activate()
+                        self._resume_pty_slot(slot)
                         result = self._enter_forwarding_mode(slot, force_redraw=True)
                         slot.deactivate()
                         if result == "switched":
