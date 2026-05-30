@@ -31,15 +31,26 @@ class OutputBuffer:
             return chunks
 
 
-_TRACKED_MODES = {
-    b"1": "app_cursor_keys", # DECCKM — application cursor key sequences (vi, less, …)
-    b"1049": "alt_screen",   # alternate screen buffer
-    b"1000": "mouse_click",  # mouse click tracking
-    b"1002": "mouse_btn",    # mouse button tracking
-    b"1003": "mouse_all",    # all mouse motion tracking
-    b"1006": "mouse_sgr",    # SGR mouse mode
-    b"1004": "focus",        # focus in/out reporting
+# mode_num -> (name, default_action)
+# default_action is the byte ('h' or 'l') the terminal sits at when no app
+# has touched the mode.  True in self.terminal_modes means "an app has put
+# the mode into its non-default state" — so suspend emits default_action to
+# revert, and restore emits the opposite to re-apply.
+_TRACKED_MODES: dict[bytes, tuple[str, bytes]] = {
+    b"1":    ("app_cursor_keys",  b"l"),  # DECCKM — application cursor key sequences
+    b"25":   ("cursor_visible",   b"h"),  # DECTCEM — default is *visible*
+    b"1000": ("mouse_click",      b"l"),
+    b"1002": ("mouse_btn",        b"l"),
+    b"1003": ("mouse_all",        b"l"),
+    b"1004": ("focus",            b"l"),  # focus in/out reporting
+    b"1006": ("mouse_sgr",        b"l"),
+    b"1049": ("alt_screen",       b"l"),  # alternate screen buffer
+    b"2004": ("bracketed_paste",  b"l"),  # paste wrapped in \x1b[200~ … \x1b[201~
 }
+
+
+def _opposite(action: bytes) -> bytes:
+    return b"l" if action == b"h" else b"h"
 
 
 class ProcessSlot:
@@ -59,7 +70,7 @@ class ProcessSlot:
         self._exit_event = threading.Event()
         self._reader_thread: threading.Thread | None = None
         self.terminal_modes: dict[str, bool] = {
-            name: False for name in _TRACKED_MODES.values()
+            name: False for name, _ in _TRACKED_MODES.values()
         }
 
     def start(self, argv: list[str], env: dict[str, str], cwd: str) -> None:
@@ -166,10 +177,10 @@ class ProcessSlot:
                 mode_num = data[start:end]
                 action = data[end:end + 1]
                 if mode_num in _TRACKED_MODES:
-                    name = _TRACKED_MODES[mode_num]
-                    if action == b"h":
+                    name, default_action = _TRACKED_MODES[mode_num]
+                    if action == _opposite(default_action):
                         self.terminal_modes[name] = True
-                    elif action == b"l":
+                    elif action == default_action:
                         self.terminal_modes[name] = False
             i = end + 1 if end > idx else idx + 1
 
@@ -194,24 +205,22 @@ class ProcessSlot:
 
     def suspend_terminal_modes(self) -> str:
         """Return escape sequences to undo active terminal modes on switch-away."""
-        _MODE_CODES = {v: k for k, v in _TRACKED_MODES.items()}
+        _BY_NAME = {name: (num, default) for num, (name, default) in _TRACKED_MODES.items()}
         seq = ""
         for name, active in self.terminal_modes.items():
             if active:
-                code = _MODE_CODES[name].decode()
-                seq += f"\x1b[?{code}l"
-        if self.terminal_modes.get("alt_screen"):
-            seq += "\x1b[?25h"  # show cursor
+                num, default_action = _BY_NAME[name]
+                seq += f"\x1b[?{num.decode()}{default_action.decode()}"
         return seq
 
     def restore_terminal_modes(self) -> str:
         """Return escape sequences to re-enable terminal modes on switch-back."""
-        _MODE_CODES = {v: k for k, v in _TRACKED_MODES.items()}
+        _BY_NAME = {name: (num, default) for num, (name, default) in _TRACKED_MODES.items()}
         seq = ""
         for name, active in self.terminal_modes.items():
             if active:
-                code = _MODE_CODES[name].decode()
-                seq += f"\x1b[?{code}h"
+                num, default_action = _BY_NAME[name]
+                seq += f"\x1b[?{num.decode()}{_opposite(default_action).decode()}"
         return seq
 
     def replay_buffer(self) -> None:
