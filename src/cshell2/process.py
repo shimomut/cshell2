@@ -36,6 +36,34 @@ class OutputBuffer:
 # has touched the mode.  True in self.terminal_modes means "an app has put
 # the mode into its non-default state" — so suspend emits default_action to
 # revert, and restore emits the opposite to re-apply.
+#
+# Adding a new mode here is only safe when all three hold:
+#   1. Default polarity is unambiguous across the terminals we care about.
+#      Wrong polarity → the parser misclassifies enable/disable and the
+#      leak we were trying to plug becomes a silent no-op.
+#   2. \x1b[?Nh / \x1b[?Nl is a true symmetric toggle with no compound side
+#      effects (no save/restore of cursor position, no implicit clear).
+#      Counter-examples to NOT track: 1047 (alt-screen without save) and
+#      1048 (cursor save) overlap with 1049 — toggling them independently
+#      on switch-back can lose the saved cursor or double-clear.  9 (X10
+#      mouse) is fire-once, not a sustained mode, so re-enabling on
+#      switch-back is meaningless.
+#   3. Real apps leak it across context switches.  1005/1015/1016
+#      (alternate mouse encodings) qualify if we ever see an app use them
+#      alongside 1006; 7 (autowrap) and 12 (cursor blink) are rarely
+#      toggled in a way that crosses contexts.
+#
+# Known limitations of the surrounding machinery (not fatal, but worth
+# knowing before extending this table):
+#   - The parser in _track_terminal_modes() reads one mode number per
+#     ESC[?…h/l sequence.  Compound forms like \x1b[?1000;1002;1006h
+#     register only the first number; subsequent ones are skipped.  Apps
+#     in practice tend to send each mode separately, so this hasn't
+#     bitten us yet.
+#   - Mouse-tracking modes 1000/1002/1003 are mutually exclusive at the
+#     terminal level (enabling one implicitly disables the others), but
+#     we track them as independent booleans.  Suspend may emit redundant
+#     resets — harmless, but it's not a faithful mirror of terminal state.
 _TRACKED_MODES: dict[bytes, tuple[str, bytes]] = {
     b"1":    ("app_cursor_keys",  b"l"),  # DECCKM — application cursor key sequences
     b"25":   ("cursor_visible",   b"h"),  # DECTCEM — default is *visible*
