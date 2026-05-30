@@ -61,13 +61,13 @@ class ProcessSlot:
         self.argv = argv
         master_fd, slave_fd = pty.openpty()
 
-        # Set PTY size before fork so child sees correct dimensions immediately
+        # Set PTY size before fork so child sees correct dimensions immediately.
+        # Don't set LINES/COLUMNS in env: ncurses honors those over TIOCGWINSZ
+        # and then ignores SIGWINCH-driven resize (KEY_RESIZE never fires).
         rows, cols = self._get_real_terminal_size()
         if rows and cols:
             winsize = struct.pack("HHHH", rows, cols, 0, 0)
             fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, winsize)
-            env["COLUMNS"] = str(cols)
-            env["LINES"] = str(rows)
 
         pid = os.fork()
         if pid == 0:
