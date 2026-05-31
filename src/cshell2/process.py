@@ -113,22 +113,62 @@ class ProcessSlot:
             winsize = struct.pack("HHHH", rows, cols, 0, 0)
             fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, winsize)
 
+        # Pipe for the child to report exec failure to the parent. CLOEXEC
+        # on the write end means a successful exec auto-closes it and the
+        # parent reads EOF. On exec failure the child writes the errno and
+        # exits, so the parent can surface a real FileNotFoundError instead
+        # of leaving a dead PTY slot registered with the failed argv.
+        err_r, err_w = os.pipe()
+        flags = fcntl.fcntl(err_w, fcntl.F_GETFD)
+        fcntl.fcntl(err_w, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)
+
         pid = os.fork()
         if pid == 0:
             # Child process
-            os.close(master_fd)
-            os.setsid()
-            fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
-            os.dup2(slave_fd, 0)
-            os.dup2(slave_fd, 1)
-            os.dup2(slave_fd, 2)
-            if slave_fd > 2:
-                os.close(slave_fd)
-            os.chdir(cwd)
-            os.execvpe(argv[0], argv, env)
+            try:
+                os.close(master_fd)
+                os.close(err_r)
+                os.setsid()
+                fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+                os.dup2(slave_fd, 0)
+                os.dup2(slave_fd, 1)
+                os.dup2(slave_fd, 2)
+                if slave_fd > 2:
+                    os.close(slave_fd)
+                os.chdir(cwd)
+                os.execvpe(argv[0], argv, env)
+            except BaseException as e:
+                errno_val = getattr(e, "errno", 0) or 0
+                try:
+                    os.write(err_w, errno_val.to_bytes(4, "little", signed=True))
+                except OSError:
+                    pass
+            os._exit(127)
         else:
             # Parent process
             os.close(slave_fd)
+            os.close(err_w)
+            try:
+                err_data = b""
+                while len(err_data) < 4:
+                    chunk = os.read(err_r, 4 - len(err_data))
+                    if not chunk:
+                        break
+                    err_data += chunk
+            finally:
+                os.close(err_r)
+            if err_data:
+                # Child reported exec failure — reap it and raise.
+                try:
+                    os.waitpid(pid, 0)
+                except ChildProcessError:
+                    pass
+                try:
+                    os.close(master_fd)
+                except OSError:
+                    pass
+                errno_val = int.from_bytes(err_data.ljust(4, b"\x00"), "little", signed=True)
+                raise OSError(errno_val, os.strerror(errno_val) if errno_val else "exec failed", argv[0])
             self.pid = pid
             self.master_fd = master_fd
             self._reader_thread = threading.Thread(
