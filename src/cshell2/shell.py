@@ -1604,19 +1604,20 @@ class Shell:
             sys.stdout.flush()
         if slot.terminal_modes.get("alt_screen", False):
             slot.activate()
-            # Force the app to do a full clear+redraw by wiggling the PTY
-            # size — without this, ncurses' shadow buffer matches what it
-            # thinks is on screen and the freshly-restored alt-screen stays
-            # blank.  Wiggle by one column instead of toward (1,1): nano
-            # (and likely others) bail with assertion/die() on intermediate
-            # tiny sizes, but every TUI tolerates a one-column shrink.
-            try:
-                rows, cols = os.get_terminal_size(sys.stdin.fileno())
-            except OSError:
-                rows, cols = 0, 0
-            if rows and cols and cols > 1:
-                slot.resize(rows, cols - 1)
-                slot.resize(rows, cols)
+            # Force the app to do a full clear+redraw.  The freshly-
+            # restored alt-screen is blank, but the app's internal shadow
+            # still matches what was on screen pre-suspend, so a passive
+            # resume leaves the screen empty until the app repaints.
+            #
+            # Send Ctrl+L (\x0c, FF) — the universal TUI convention for
+            # "force full redraw".  Bound by default in vim, nvim, nano,
+            # less, mc, emacs, htop, etc.  Apps that don't handle it
+            # (and aren't simply ignoring it) should — it's the standard
+            # contract.  Wiggling the PTY size to fire SIGWINCH/KEY_RESIZE
+            # works around non-conforming apps but introduces its own
+            # artifacts (vim's per-column diff redraw confusion when the
+            # file exceeds viewport height), so we no longer do that.
+            slot.write_stdin(b"\x0c")
         else:
             slot.activate(replay_missed=True)
 
