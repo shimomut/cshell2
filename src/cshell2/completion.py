@@ -11,6 +11,17 @@ from dataclasses import dataclass, field
 from .context import Context
 
 
+def _to_slash(path: str) -> str:
+    """Normalize OS path separators to ``/``.
+
+    The shell uses ``/`` as the canonical separator on every platform (Windows
+    file APIs accept it), keeping ``\\`` free for POSIX escaping.  ``os.path``
+    helpers emit native ``\\`` on Windows, so completer output is run through
+    this.  No-op on POSIX (``os.altsep`` is None there).
+    """
+    return path.replace(os.sep, "/") if os.altsep else path
+
+
 @dataclass
 class CompletionContext:
     command: str | None
@@ -73,7 +84,9 @@ class DirCompleter(Completer):
                         if prefix and os.path.dirname(prefix)
                         else entry
                     )
-                    result.append(Completion(value=display_path + "/", display=entry + "/"))
+                    result.append(
+                        Completion(value=_to_slash(display_path) + "/", display=entry + "/")
+                    )
         return result
 
 
@@ -101,6 +114,7 @@ class FileCompleter(Completer):
             if entry.lower().startswith(partial.lower()):
                 full_path = os.path.join(directory, entry)
                 display_path = os.path.join(os.path.dirname(prefix), entry) if prefix and os.path.dirname(prefix) else entry
+                display_path = _to_slash(display_path)
                 if os.path.isdir(full_path):
                     dirs.append(Completion(value=display_path + "/", display=entry + "/"))
                 else:
