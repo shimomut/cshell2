@@ -18,7 +18,7 @@ else
     VENV_STAMP := $(VENV_BIN)/activate
 endif
 
-.PHONY: install test clean run
+.PHONY: install test clean run install-launcher
 
 $(VENV_STAMP):
 	"$(PYTHON_BOOTSTRAP)" -m venv $(VENV)
@@ -33,6 +33,9 @@ test: $(VENV_STAMP)
 
 run: $(VENV_STAMP)
 	"$(PYTHON)" -m cshell2
+
+install-launcher: $(VENV_STAMP)
+	"$(PYTHON)" scripts/install_launcher.py
 
 clean:
 	"$(PYTHON_BOOTSTRAP)" -c "import shutil, pathlib; shutil.rmtree('$(VENV)', ignore_errors=True); shutil.rmtree('src/cshell2.egg-info', ignore_errors=True); [shutil.rmtree(p, ignore_errors=True) for p in pathlib.Path('.').rglob('__pycache__')]"
