@@ -4,15 +4,12 @@ from __future__ import annotations
 
 import os
 import re
-import select
-import signal
 import sys
-import termios
-import tty
 import unicodedata
 from pathlib import Path
 from typing import Callable
 
+from . import terminal
 from .completion import Completion
 
 SWITCH_SENTINEL = "\x1d__SWITCH__"
@@ -195,22 +192,17 @@ class LineEditor:
         self._prompt_len = _visible_len(self._prompt_str)
 
         fd = sys.stdin.fileno()
-        old_attrs = termios.tcgetattr(fd)
-        old_sigwinch = signal.getsignal(signal.SIGWINCH)
+        old_attrs = terminal.get_mode(fd)
+        old_sigwinch = terminal.install_resize_handler(self._on_resize)
 
         try:
             self._update_cols()
             self._cursor_row = 0
-            # Use TCSADRAIN (not the default TCSAFLUSH) so that bytes already
-            # buffered in the kernel's input queue — e.g. the remainder of a
-            # pasted multi-line block after the first \r was consumed — are
-            # preserved rather than discarded when entering raw mode.
-            tty.setraw(fd, termios.TCSADRAIN)
-            signal.signal(signal.SIGWINCH, self._on_resize)
+            terminal.set_raw(fd)
             self._redraw()
 
             while True:
-                key = self._read_key(fd)
+                key = terminal.read_key(fd)
                 result = self._handle_key(key, fd)
                 if result is not None:
                     self._cursor = len(self._buf)
@@ -224,8 +216,8 @@ class LineEditor:
             sys.stdout.flush()
             raise
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
-            signal.signal(signal.SIGWINCH, old_sigwinch)
+            terminal.restore_mode(fd, old_attrs)
+            terminal.restore_resize_handler(old_sigwinch)
 
     # ── terminal size ────────────────────────────────────────────────────────
 
@@ -293,14 +285,6 @@ class LineEditor:
         sys.stdout.flush()
 
     # ── input ────────────────────────────────────────────────────────────────
-
-    def _read_key(self, fd: int) -> bytes:
-        data = os.read(fd, 1)
-        if data == b"\x1b":
-            r, _, _ = select.select([fd], [], [], 0.05)
-            if r:
-                data += os.read(fd, 8)
-        return data
 
     def _handle_key(self, key: bytes, fd: int) -> str | None:
         """Return a result string to finish, or None to keep editing."""
@@ -436,17 +420,12 @@ class LineEditor:
             self._cursor += 1
             return None
 
-        # UTF-8 multi-byte (first byte >= 0xC0)
-        if len(key) == 1 and key[0] >= 0xC0:
-            rest_len = (
-                1 if key[0] < 0xE0 else 2 if key[0] < 0xF0 else 3
-            )
-            r, _, _ = select.select([fd], [], [], 0.05)
-            if r:
-                key += os.read(fd, rest_len)
+        # UTF-8 multi-byte char (already fully assembled by terminal.read_key)
+        if key[:1] >= b"\x80":
             ch = key.decode("utf-8", errors="replace")
-            self._buf = self._buf[: self._cursor] + ch + self._buf[self._cursor :]
-            self._cursor += 1
+            if ch.isprintable():
+                self._buf = self._buf[: self._cursor] + ch + self._buf[self._cursor :]
+                self._cursor += 1
             return None
 
         return None

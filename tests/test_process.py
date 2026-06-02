@@ -3,6 +3,8 @@
 import os
 import time
 
+import pytest
+
 from cshell2.process import OutputBuffer, ProcessSlot
 
 
@@ -29,6 +31,10 @@ class TestOutputBuffer:
         assert chunks == [b"chunk2", b"chunk3", b"chunk4"]
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="ProcessSlot is PTY-backed (pty/fcntl/termios) — POSIX only",
+)
 class TestProcessSlot:
     def test_start_and_exit(self):
         slot = ProcessSlot()

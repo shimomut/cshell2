@@ -162,6 +162,10 @@ def test_cwd_saved_and_restored_on_switch():
         cm.switch("ctx_b")  # saves ctx_a's cwd as real_a, restores ctx_b -> real_b
         assert os.getcwd() == real_b
 
+        # Leave the temp dirs before the context manager cleans them up:
+        # Windows refuses to remove a directory that is the process cwd.
+        os.chdir(original_cwd)
+
     os.chdir(original_cwd)
 
 
@@ -187,5 +191,9 @@ def test_cwd_saved_and_restored_on_push_pop():
 
         cm.pop()            # pop saves ctx_b, restores ctx_a -> real_a
         assert os.getcwd() == real_a
+
+        # Leave the temp dirs before the context manager cleans them up:
+        # Windows refuses to remove a directory that is the process cwd.
+        os.chdir(original_cwd)
 
     os.chdir(original_cwd)
