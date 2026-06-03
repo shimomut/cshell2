@@ -159,6 +159,7 @@ class LineEditor:
         self._hist_idx = 0
         self._saved_buf = ""
         self._cols = 80
+        self._lines = 24
         self._prompt_str = ""
         self._prompt_len = 0
         self._cursor_row = 0  # rows below render-top where cursor sits
@@ -168,6 +169,7 @@ class LineEditor:
         # re-render explicitly instead of relying on terminal reflow.
         self._terminal_reflows = os.environ.get("TERM_PROGRAM", "") != "vscode"
         self._hint: str = ""  # transient hint shown after TAB; cleared on next keypress
+        self._hint_visible: bool = False  # whether the status bar is currently showing a hint
 
     def add_to_history(self, line: str) -> None:
         """Add *line* to history from outside the editor (e.g. after joining continuation lines)."""
@@ -223,9 +225,12 @@ class LineEditor:
 
     def _update_cols(self) -> None:
         try:
-            self._cols = os.get_terminal_size().columns
+            sz = os.get_terminal_size()
+            self._cols = sz.columns
+            self._lines = sz.lines
         except OSError:
             self._cols = 80
+            self._lines = 24
 
     def _on_resize(self, _sig, _frame) -> None:
         old_cursor_row = self._cursor_row
@@ -265,22 +270,34 @@ class LineEditor:
         # After writing the buffer the cursor is at the end of content.
         end_row = _pending_wrap_row(total_char, cols)
 
-        if self._hint:
-            # Append the hint on the line below the buffer (starting at col 0).
-            sys.stdout.write(f"\n\r\033[2m{self._hint}\033[0m")
-            # Move back up to the caret row (column gets fixed by the CHA below).
-            rows_up = end_row + 1 - self._cursor_row
+        # Navigate from end of content back to where the cursor belongs.
+        rows_up = end_row - self._cursor_row
+        if rows_up > 0:
             sys.stdout.write(f"\033[{rows_up}A")
-        else:
-            # Navigate from end of content back to where the cursor belongs.
-            rows_up = end_row - self._cursor_row
-            if rows_up > 0:
-                sys.stdout.write(f"\033[{rows_up}A")
 
         # Use CHA (absolute column) so the caret jumps to its final position in
         # one atomic move — `\r` followed by `\033[{N}C` flickers through col 0.
         cursor_col = _pending_wrap_col(cursor_char, cols)
         sys.stdout.write(f"\033[{cursor_col + 1}G")
+
+        # Render arg-hint in the status bar (bottom line); clear when dismissed.
+        if self._hint:
+            from .tui import _statusbar
+            text = self._hint.strip()
+            if "  —  " in text:
+                label_part, desc_part = text.split("  —  ", 1)
+            else:
+                label_part, desc_part = text, ""
+            sys.stdout.write("\0337")
+            sys.stdout.write(f"\033[{self._lines};1H")
+            sys.stdout.write(_statusbar(label_part, desc_part, self._cols))
+            sys.stdout.write("\0338")
+            self._hint_visible = True
+        elif self._hint_visible:
+            sys.stdout.write("\0337")
+            sys.stdout.write(f"\033[{self._lines};1H\033[2K")
+            sys.stdout.write("\0338")
+            self._hint_visible = False
 
         sys.stdout.flush()
 
@@ -490,6 +507,21 @@ class LineEditor:
 
     # ── completion ───────────────────────────────────────────────────────────
 
+    def _completion_label(self, completions: list[Completion], prefix: str) -> str:
+        """Human-readable label for the status bar describing what's being completed."""
+        from .parsing import split_for_completion
+        tokens, _ = split_for_completion(self._buf[: self._cursor])
+        if not tokens:
+            return "command"
+        cmd = tokens[0]
+        preceding = tokens[1:]  # completed args before the current token
+        if completions and all(c.multi_select for c in completions):
+            return f"{cmd}  option"
+        if prefix.startswith("-"):
+            return f"{cmd}  option"
+        positional_n = sum(1 for a in preceding if not a.startswith("-"))
+        return f"{cmd}  arg {positional_n + 1}"
+
     def _complete(self, fd: int) -> None:
         from .tui import InlinePicker
 
@@ -577,6 +609,7 @@ class LineEditor:
                 value_fn=lambda c: c.value,
                 completion_prefix=prefix,
                 reopen_when=lambda items: bool(items) and all(c.multi_select for c in items),
+                status_label=self._completion_label(completions, prefix),
             )
             selected = picker.run()
 
@@ -629,6 +662,7 @@ class LineEditor:
             max_height=12,
             rows_above=rows_above,
             caret_col=caret_col,
+            status_label=self._completion_label(completions, prefix),
         )
         selected = picker.run()
 
@@ -728,6 +762,7 @@ class LineEditor:
             rows_above=1,
             refresh_fn=refresh,
             value_fn=None,  # disable tab-complete inside the search picker
+            status_label="history search",
         )
         selected = picker.run()
 
@@ -818,6 +853,11 @@ class LineEditor:
         end_col = _pending_wrap_col(end_char, self._cols)
         caret_row = self._cursor_row  # updated by _redraw()
 
+        from .parsing import split_for_completion as _sfc
+        _tokens, _ = _sfc(self._buf[: self._cursor])
+        _cmd = _tokens[0] if _tokens else ""
+        _flag_label = f"{_cmd}  {opt.value}" if _cmd else opt.value
+
         if not completions:
             # ── free-text fallback: InlineArgPrompt (original behaviour) ──────
             rows_to_end = end_row - caret_row
@@ -832,6 +872,7 @@ class LineEditor:
             arg_prompt = InlineArgPrompt(
                 label=f"{opt.value} <{opt.arg_hint}>",
                 description=opt.description,
+                status_label=_flag_label,
             )
             value = arg_prompt.run()
 
@@ -889,6 +930,7 @@ class LineEditor:
                 refresh_fn=refresh,
                 value_fn=lambda c: c.value,
                 completion_prefix=prefix,
+                status_label=_flag_label,
             )
             selected = picker.run()
 

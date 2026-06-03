@@ -58,11 +58,12 @@ def _wcs_ljust(s: str, width: int) -> str:
     return s + " " * max(0, width - _wcswidth(s))
 
 
-def _statusbar(hints: str, cols: int) -> str:
+def _statusbar(label: str, hints: str, cols: int) -> str:
     """Render a full-width status-bar string for the bottom line of the terminal."""
     s = get_color_scheme()
-    text = f"  {hints}  "
-    padded = _wcs_ljust(_wcs_clip(text, cols), cols)
+    parts = [p for p in (label, hints) if p]
+    text = "   ".join(parts)
+    padded = _wcs_ljust(_wcs_clip(f"  {text}  " if text else "", cols), cols)
     return f"{_bg(*s.statusbar_bg)}{_fg(*s.statusbar_fg)}{padded}\033[0m"
 
 
@@ -102,6 +103,7 @@ class InlinePicker(Generic[T]):
         reopen_when: Callable[[list[T]], bool] | None = None,
         min_width: int = 0,
         hide_cursor: bool = False,
+        status_label: str = "",
     ):
         self._items = items
         self._display_fn = display_fn
@@ -116,6 +118,7 @@ class InlinePicker(Generic[T]):
         self._reopen_when = reopen_when
         self._min_width = min_width
         self._hide_cursor = hide_cursor
+        self._status_label = status_label
         self._typed = ""
         self.reopen = False          # set True when tab-complete typed chars; caller should reopen
         self.apply_backspace = False  # set True when backspace pressed with no typed chars
@@ -216,7 +219,7 @@ class InlinePicker(Generic[T]):
 
         # Draw status bar at the bottom line, then return to caret via anchor.
         out.append(f"\033[{self._lines};1H")
-        out.append(_statusbar("↑↓ Navigate   Enter Select   Esc Cancel", self._cols))
+        out.append(_statusbar(self._status_label, "↑↓ Navigate   Enter Select   Esc Cancel", self._cols))
         out.append("\0338")
         if self._rows_above > 0:
             out.append(f"\033[{self._rows_above}A")
@@ -407,9 +410,10 @@ class InlineArgPrompt:
     command line) before calling run() and moving the cursor back afterward.
     """
 
-    def __init__(self, label: str, description: str = ""):
+    def __init__(self, label: str, description: str = "", status_label: str = ""):
         self._label = label
         self._description = description
+        self._status_label = status_label
         self._buf = ""
         self._cancelled = False
         try:
@@ -472,7 +476,7 @@ class InlineArgPrompt:
         # Draw status bar at the bottom line, then return to end-of-input via anchor.
         cursor_col = _wcswidth(self._label) + 2 + _wcswidth(self._buf)
         out.append(f"\033[{self._lines};1H")
-        out.append(_statusbar("Enter Confirm   Esc Cancel", self._cols))
+        out.append(_statusbar(self._status_label, "Enter Confirm   Esc Cancel", self._cols))
         out.append("\0338")  # restore to anchor
         if self._description:
             out.append("\033[B\r")  # down to label row, col 0
@@ -513,6 +517,7 @@ class InlineMultiPicker(Generic[T]):
         max_height: int = 12,
         rows_above: int = 1,
         caret_col: int = 0,
+        status_label: str = "",
     ):
         self._items = items
         self._display_fn = display_fn
@@ -520,6 +525,7 @@ class InlineMultiPicker(Generic[T]):
         self._max_height = max_height
         self._rows_above = rows_above
         self._caret_col = caret_col
+        self._status_label = status_label
 
         self._selected = 0
         self._offset = 0
@@ -630,7 +636,7 @@ class InlineMultiPicker(Generic[T]):
 
         # Draw status bar at the bottom line, then return to caret via anchor.
         out.append(f"\033[{self._lines};1H")
-        out.append(_statusbar("↑↓ Navigate   Space Toggle   Enter Confirm   Esc Cancel", self._cols))
+        out.append(_statusbar(self._status_label, "↑↓ Navigate   Space Toggle   Enter Confirm   Esc Cancel", self._cols))
         out.append("\0338")
         if self._rows_above > 0:
             out.append(f"\033[{self._rows_above}A")
