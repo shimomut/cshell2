@@ -9,7 +9,8 @@ from cshell2.completion import ChoiceCompleter
 @command_registry.command(
     name="hello",
     help="Greet someone by name.",        # shell-facing description; no docstring needed
-    params=[arg("name", nargs="?", default="world", completer=ChoiceCompleter(["world", "there"]))],
+    params=[arg("name", nargs="?", default="world", help="name of the person to greet",
+                completer=ChoiceCompleter(["world", "there"]))],
 )
 def hello(name):
     print(f"Hello, {name}!")
@@ -45,9 +46,11 @@ deploy = command_registry.command(
     help="Deploy a service to an environment.",
     params=[
         # choices= drives argparse validation AND TAB completion simultaneously.
-        arg("environment", choices=["prod", "staging", "dev"]),
+        arg("environment", choices=["prod", "staging", "dev"],
+                           help="target environment"),
         arg("service",     nargs="?", default="all",
-                           choices=["api", "web", "worker"]),
+                           choices=["api", "web", "worker"],
+                           help="service to deploy, or 'all'"),
         # Value-taking flags: completer= drives TAB completion for the value.
         arg("-t", "--timeout", type=int, default=60, metavar="SECONDS",
                                help="deployment timeout in seconds",
@@ -82,9 +85,11 @@ def deploy_app(environment, service, dry_run, verbose, timeout, branch):
     "rollback",
     help="Roll back a deployment to the previous revision.",
     params=[
-        arg("environment", choices=["prod", "staging", "dev"]),
+        arg("environment", choices=["prod", "staging", "dev"],
+                           help="target environment"),
         arg("service",     nargs="?", default="all",
-                           choices=["api", "web", "worker"]),
+                           choices=["api", "web", "worker"],
+                           help="service to roll back, or 'all'"),
     ],
 )
 def deploy_rollback(environment, service, dry_run, verbose):
@@ -100,7 +105,8 @@ def deploy_rollback(environment, service, dry_run, verbose):
     "status",
     help="Show deployment status for an environment.",
     params=[
-        arg("environment", choices=["prod", "staging", "dev"]),
+        arg("environment", choices=["prod", "staging", "dev"],
+                           help="environment to inspect"),
     ],
 )
 def deploy_status(environment, verbose):
@@ -195,10 +201,10 @@ from cshell2 import set_prompt
 
 def my_prompt(context_manager):
     """Replicates the built-in default prompt: [context] parent/cwd HH:MM:SS [bg:N]>."""
-    CYAN_BOLD = "\033[1;36m"
-    BLUE_BOLD = "\033[1;34m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
+    CYAN_BOLD = "\033[1m\033[38;2;0;188;212m"
+    BLUE_BOLD = "\033[1m\033[38;2;100;149;237m"
+    GREEN = "\033[38;2;80;200;100m"
+    YELLOW = "\033[38;2;229;192;123m"
     RESET = "\033[0m"
 
     parts = []
@@ -240,3 +246,34 @@ def my_prompt(context_manager):
     return " ".join(parts) + "> "
 
 set_prompt(my_prompt)
+
+
+# ── Color scheme ──────────────────────────────────────────────────────────────
+#
+# Choose a built-in scheme or define a fully custom one.
+# Applies to both the prompt colors and the TUI picker colors.
+# Built-in schemes: "dark" (default), "light".
+#
+# Uncomment one of the examples below:
+
+from cshell2 import set_color_scheme, ColorScheme
+
+# Built-in schemes (for light- or dark-background terminals):
+# set_color_scheme("dark")   # default
+# set_color_scheme("light")
+
+# Fully custom scheme — specify any subset of colors as (R, G, B) tuples:
+# set_color_scheme(ColorScheme(
+#     prompt_context=(180, 100, 255),      # context name in prompt
+#     prompt_path=(100, 149, 237),         # cwd in prompt
+#     prompt_time=(80, 200, 100),          # timestamp in prompt
+#     prompt_bg_count=(229, 192, 123),     # [bg:N] indicator in prompt
+#     picker_row_bg=(50, 50, 60),          # non-selected picker row background
+#     picker_row_fg=(220, 220, 220),       # non-selected picker row foreground
+#     picker_sel_bg=(80, 40, 160),         # selected row background
+#     picker_sel_fg=(255, 255, 255),       # selected row foreground
+#     picker_scroll_thumb=(120, 120, 120), # scrollbar thumb
+#     picker_scroll_track=(40, 40, 50),    # scrollbar track
+#     statusbar_bg=(30, 30, 30),           # status bar background
+#     statusbar_fg=(130, 130, 130),        # status bar foreground
+# ))

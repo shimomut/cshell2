@@ -431,18 +431,33 @@ DIY raw-mode line editor. No prompt_toolkit or readline.
 - History search (`Ctrl+R`) opens a filterable picker over all history entries
 - Multi-line wrapping is tracked so `_redraw()` correctly repositions the cursor after wraps
 - VSCode integrated terminal detection: skips reflow-based repositioning, falls back to explicit clear+redraw on resize (`TERM_PROGRAM=vscode`)
+- All raw-mode entry and key reading goes through `terminal.py` (not `termios`/`tty`/`select` directly), so the editor runs unchanged on POSIX and native Windows.
+
+### terminal.py — Cross-Platform Terminal Layer
+
+The single place that touches OS-specific terminal APIs. `lineedit.py`, `tui.py`, and the POSIX forwarding loops in `shell.py` drive the terminal through this module so the rendering/key-dispatch code stays platform-agnostic.
+
+- `init()` — one-time setup. On Windows: enables VT output processing (so the ANSI escapes the renderer emits are honoured) and disables Python's `\n`→`\r\n` translation on the std streams. No-op on POSIX.
+- `get_mode(fd)` / `set_raw(fd)` / `restore_mode(fd, saved)` — enter/leave raw mode. POSIX: `termios`/`tty` (TCSADRAIN). Windows: toggles `DISABLE_NEWLINE_AUTO_RETURN` so a bare `\n` is a pure line-feed while rendering and reverts to auto-CR for cooked output.
+- `read_key(fd)` — block for one *complete logical key* as bytes: a control byte, a full UTF-8 char (all continuation bytes), or a complete escape sequence (`b"\x1b[A"`). POSIX reads via `os.read`+`select`; Windows reads via `msvcrt`, translating the `\x00`/`\xe0` scan-code prefixes into the same ANSI sequences POSIX produces. Callers compare against fixed byte patterns and never re-read the stream.
+- `wait_readable(fd, timeout)` — POSIX `select`; Windows polls `msvcrt.kbhit`.
+- `install_resize_handler` / `restore_resize_handler` / `HAS_SIGWINCH` — SIGWINCH wiring on POSIX; no-ops on Windows (where the TUI widgets detect resize by polling `terminal_size()` between key reads and cancel, same as they did on SIGWINCH).
+
+**Path separators.** The shell uses `/` as the canonical separator on every platform (like Git Bash / MSYS) — Windows file APIs and executables accept it natively. This keeps `\` free for its POSIX meaning (escaping, `\`-line-continuation), so a path can never be mistaken for a continuation (`cd C:/Users/` not `cd C:\Users\`). `os.path` helpers emit native `\` on Windows, so completer output is normalized with `completion._to_slash` and the prompt renders `/` too. Users type `/` for paths; `\` still escapes as usual.
+
+**Platform support.** The full interactive shell — line editing, completion, all TUI pickers, history, pipelines, redirects, built-ins, and `Ctrl+]` context switching at the prompt — runs natively on both POSIX and Windows. The one POSIX-only piece is **PTY-backed multiplexing of a live external process** (`process.py`'s `ProcessSlot`, the `passthrough_run` PTY, and the `_enter_forwarding_mode` loops): backgrounding a *running* native program via `Ctrl+]` and resuming it. On Windows, external commands run on the real console with inherited stdio (`_execute_external_windows`, with a `cmd /c` fallback for `cmd` builtins like `dir`/`echo`), and Python `@registry.command`s run synchronously on the main thread. Reviving that subsystem on Windows would mean a ConPTY (`CreatePseudoConsole`) backend for `ProcessSlot`.
 
 ### tui.py — Inline TUI Widgets
 
-No alternate screen; all rendering anchored with DECSC/DECRC (`ESC 7` / `ESC 8`). Cancels on SIGWINCH.
+No alternate screen; all rendering anchored with DECSC/DECRC (`ESC 7` / `ESC 8`). On POSIX a resize arrives via SIGWINCH; on Windows it is detected by polling `terminal.terminal_size()` between key reads. Either way the picker cancels (redrawing without an alt-screen is unreliable — the user presses TAB again).
 
 - **`InlinePicker`** — single-select list rendered inline below the current line. Supports narrowing by typing, TAB-extend common prefix, scrollbar, optional `meta_fn` for right-aligned labels.
 - **`InlineMultiPicker`** — multi-select list with Space to toggle checkboxes. Jump-to by typing a letter. Returns checked items (or highlighted item if nothing checked).
 - **`InlineArgPrompt`** — single-line text prompt for a flag's argument. Shows an optional description line above.
 
-### process.py — PTY Process Slots
+### process.py — PTY Process Slots (POSIX only)
 
-`ProcessSlot` manages a single PTY-backed subprocess with output buffering, enabling context multiplexing.
+`ProcessSlot` manages a single PTY-backed subprocess with output buffering, enabling context multiplexing. It depends on `pty`/`fcntl`/`termios` and is never instantiated on Windows (the module still imports cleanly there — the Unix-only imports are guarded — but `_execute_external` takes the inherited-stdio path instead). See the Platform support note under `terminal.py`.
 
 - `start(argv, env, cwd)` — fork + exec in a new PTY; spawns a reader thread
 - `activate() / deactivate()` — controls whether output is written to stdout

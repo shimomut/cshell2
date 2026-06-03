@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import re
 import textwrap
 from pathlib import Path
 
@@ -96,7 +97,7 @@ class TestUserRecipes:
     def test_error_message_lists_searched_dirs(self, tmp_path, monkeypatch):
         _reset_search_path(monkeypatch, [tmp_path])
 
-        with pytest.raises(ImportError, match=str(tmp_path)):
+        with pytest.raises(ImportError, match=re.escape(str(tmp_path))):
             recipes_pkg.enable("ghost")
 
 

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import os
-import select
-import signal
 import sys
-import termios
-import tty
 import unicodedata
 from typing import Callable, Generic, TypeVar
+
+from . import terminal
+from .colors import _bg, _fg, get_color_scheme
 
 T = TypeVar("T")
 
@@ -59,6 +58,15 @@ def _wcs_ljust(s: str, width: int) -> str:
     return s + " " * max(0, width - _wcswidth(s))
 
 
+def _statusbar(label: str, hints: str, cols: int) -> str:
+    """Render a full-width status-bar string for the bottom line of the terminal."""
+    s = get_color_scheme()
+    parts = [p for p in (label, hints) if p]
+    text = "   ".join(parts)
+    padded = _wcs_ljust(_wcs_clip(f"  {text}  " if text else "", cols), cols)
+    return f"{_bg(*s.statusbar_bg)}{_fg(*s.statusbar_fg)}{padded}\033[0m"
+
+
 def _common_prefix(strings: list[str]) -> str:
     if not strings:
         return ""
@@ -95,6 +103,7 @@ class InlinePicker(Generic[T]):
         reopen_when: Callable[[list[T]], bool] | None = None,
         min_width: int = 0,
         hide_cursor: bool = False,
+        status_label: str = "",
     ):
         self._items = items
         self._display_fn = display_fn
@@ -109,6 +118,7 @@ class InlinePicker(Generic[T]):
         self._reopen_when = reopen_when
         self._min_width = min_width
         self._hide_cursor = hide_cursor
+        self._status_label = status_label
         self._typed = ""
         self.reopen = False          # set True when tab-complete typed chars; caller should reopen
         self.apply_backspace = False  # set True when backspace pressed with no typed chars
@@ -116,6 +126,7 @@ class InlinePicker(Generic[T]):
         self._selected = 0
         self._offset = 0
         self._cols = 80
+        self._lines = 24
         self._height = min(max_height, len(items))
         self._cancelled = False
 
@@ -123,13 +134,8 @@ class InlinePicker(Generic[T]):
         if not self._items:
             return None
 
-        fd = sys.stdin.fileno()
-        old_attrs = termios.tcgetattr(fd)
-        old_sigwinch = signal.getsignal(signal.SIGWINCH)
-
-        sig_r, sig_w = os.pipe()
-        os.set_blocking(sig_w, False)
-        old_wakeup_fd = signal.set_wakeup_fd(sig_w, warn_on_full_buffer=False)
+        self._fd = sys.stdin.fileno()
+        old_attrs = terminal.get_mode(self._fd)
 
         result: T | None = None
         if self._hide_cursor:
@@ -137,13 +143,13 @@ class InlinePicker(Generic[T]):
             sys.stdout.flush()
         try:
             self._update_size()
+            self._last_size = terminal.terminal_size()
             self._reserve()
-            tty.setraw(fd)
-            signal.signal(signal.SIGWINCH, self._on_resize)
+            terminal.set_raw(self._fd)
             self._render()
 
             while True:
-                action = self._dispatch(self._read_key(fd, sig_r))
+                action = self._dispatch(self._read_key())
                 if action == "accept":
                     result = self._items[self._selected] if self._items else None
                     break
@@ -165,11 +171,7 @@ class InlinePicker(Generic[T]):
                     if self._handle_char(action):
                         break
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
-            signal.signal(signal.SIGWINCH, old_sigwinch)
-            signal.set_wakeup_fd(old_wakeup_fd)
-            os.close(sig_r)
-            os.close(sig_w)
+            terminal.restore_mode(self._fd, old_attrs)
             self._cleanup()
             if self._hide_cursor:
                 sys.stdout.write("\x1b[?25h")
@@ -182,10 +184,8 @@ class InlinePicker(Generic[T]):
     def _update_size(self) -> None:
         sz = os.get_terminal_size()
         self._cols = sz.columns
-        self._height = min(self._max_height, len(self._items), max(1, sz.lines - 3))
-
-    def _on_resize(self, _sig, _frame) -> None:
-        self._cancelled = True
+        self._lines = sz.lines
+        self._height = min(self._max_height, len(self._items), max(1, sz.lines - 4))
 
     # ── drawing ─────────────────────────────────────────────────────────────
 
@@ -217,19 +217,25 @@ class InlinePicker(Generic[T]):
         caret_col_now = self._col + self._initial_offset + len(self._typed)
         out.append(f"\033[{caret_col_now + 1}G")
 
+        # Draw status bar at the bottom line, then return to caret via anchor.
+        out.append(f"\033[{self._lines};1H")
+        out.append(_statusbar(self._status_label, "", self._cols))
+        out.append("\0338")
+        if self._rows_above > 0:
+            out.append(f"\033[{self._rows_above}A")
+        out.append(f"\033[{caret_col_now + 1}G")
+
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
-    _BG = "\033[48;5;238m"      # non-selected row background (dark gray, visible on all themes)
-    _SEL = "\033[48;5;24m\033[97m"   # selected: dark-blue bg + bright-white fg
-
     def _scrollbar_char(self, row_index: int) -> str:
+        s = get_color_scheme()
         n = len(self._items)
         thumb_start = self._offset * self._height // n
         thumb_end = max(thumb_start + 1, (self._offset + self._height) * self._height // n)
         if thumb_start <= row_index < thumb_end:
-            return "\033[48;5;244m \033[0m"
-        return "\033[48;5;236m \033[0m"
+            return _bg(*s.picker_scroll_thumb) + " \033[0m"
+        return _bg(*s.picker_scroll_track) + " \033[0m"
 
     def _compute_panel_w(self) -> int:
         """Width that fits all items (respecting min_width), bounded by available columns."""
@@ -259,13 +265,16 @@ class InlinePicker(Generic[T]):
         content_w = _wcswidth(label) + (2 + _wcswidth(meta) if meta else 0)
         pad = " " * max(0, panel_w - content_w)
 
+        s = get_color_scheme()
+        bg = _bg(*s.picker_row_bg) + _fg(*s.picker_row_fg)
+        sel = _bg(*s.picker_sel_bg) + _fg(*s.picker_sel_fg)
         col_move = f"\033[{self._col}C" if self._col > 0 else ""
         if selected:
             inner = label + (f"  {meta}" if meta else "")
-            row = f"\r{col_move}{self._SEL}{inner}{pad}\033[0m"
+            row = f"\r{col_move}{sel}{inner}{pad}\033[0m"
         else:
             inner = label + (f"  \033[2m{meta}\033[22m" if meta else "")
-            row = f"\r{col_move}{self._BG}{inner}{pad}\033[0m"
+            row = f"\r{col_move}{bg}{inner}{pad}\033[0m"
 
         if has_scrollbar:
             sb_col = self._col + panel_w + 1  # 1-indexed terminal column
@@ -352,22 +361,17 @@ class InlinePicker(Generic[T]):
 
     # ── input ───────────────────────────────────────────────────────────────
 
-    def _read_key(self, fd: int, sig_r: int) -> bytes:
+    def _read_key(self) -> bytes:
         while True:
             if self._cancelled:
                 return b"\x1b"  # triggers "cancel" in _dispatch
-            r, _, _ = select.select([fd, sig_r], [], [], 1.0)
-            if sig_r in r:
-                os.read(sig_r, 256)  # drain wakeup bytes, loop to check _cancelled
-                continue
-            if not r:
-                continue
-            data = os.read(fd, 1)
-            if data == b"\x1b":
-                r2, _, _ = select.select([fd], [], [], 0.05)
-                if r2:
-                    data += os.read(fd, 8)
-            return data
+            if terminal.wait_readable(self._fd, 0.1):
+                return terminal.read_key(self._fd)
+            # No key within the poll window — check for a resize so the picker
+            # can cancel. Redrawing after a resize without an alt-screen is
+            # unreliable, so the user just presses TAB again.
+            if terminal.terminal_size() != self._last_size:
+                self._cancelled = True
 
     def _dispatch(self, key: bytes) -> str:
         if key in (b"\r", b"\n"):
@@ -406,34 +410,33 @@ class InlineArgPrompt:
     command line) before calling run() and moving the cursor back afterward.
     """
 
-    def __init__(self, label: str, description: str = ""):
+    def __init__(self, label: str, description: str = "", status_label: str = ""):
         self._label = label
         self._description = description
+        self._status_label = status_label
         self._buf = ""
         self._cancelled = False
         try:
-            self._cols = os.get_terminal_size().columns
+            sz = os.get_terminal_size()
+            self._cols = sz.columns
+            self._lines = sz.lines
         except OSError:
             self._cols = 80
+            self._lines = 24
 
     def run(self) -> str | None:
-        fd = sys.stdin.fileno()
-        old_attrs = termios.tcgetattr(fd)
-        old_sigwinch = signal.getsignal(signal.SIGWINCH)
-
-        sig_r, sig_w = os.pipe()
-        os.set_blocking(sig_w, False)
-        old_wakeup_fd = signal.set_wakeup_fd(sig_w, warn_on_full_buffer=False)
+        self._fd = sys.stdin.fileno()
+        old_attrs = terminal.get_mode(self._fd)
+        self._last_size = terminal.terminal_size()
 
         result: str | None = None
         try:
             self._reserve()
-            tty.setraw(fd)
-            signal.signal(signal.SIGWINCH, self._on_resize)
+            terminal.set_raw(self._fd)
             self._render()
 
             while True:
-                key = self._read_key(fd, sig_r)
+                key = self._read_key()
                 if self._cancelled or key in (b"\x1b", b"\x03"):
                     break
                 if key in (b"\r", b"\n"):
@@ -447,17 +450,10 @@ class InlineArgPrompt:
                     self._buf += key.decode()
                     self._render()
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
-            signal.signal(signal.SIGWINCH, old_sigwinch)
-            signal.set_wakeup_fd(old_wakeup_fd)
-            os.close(sig_r)
-            os.close(sig_w)
+            terminal.restore_mode(self._fd, old_attrs)
             self._cleanup()
 
         return result
-
-    def _on_resize(self, _sig, _frame) -> None:
-        self._cancelled = True
 
     def _reserve(self) -> None:
         """Save anchor at col 0 of the current line (caller moved us here).
@@ -477,6 +473,14 @@ class InlineArgPrompt:
         # \r ensures col 0 — raw-mode \n is a bare line-feed and leaves the
         # cursor at the column where the description text ended.
         out.append(f"\r\033[2m{self._label}:\033[0m {self._buf}")
+        # Draw status bar at the bottom line, then return to end-of-input via anchor.
+        cursor_col = _wcswidth(self._label) + 2 + _wcswidth(self._buf)
+        out.append(f"\033[{self._lines};1H")
+        out.append(_statusbar(self._status_label, "", self._cols))
+        out.append("\0338")  # restore to anchor
+        if self._description:
+            out.append("\033[B\r")  # down to label row, col 0
+        out.append(f"\033[{cursor_col + 1}G")
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
@@ -484,22 +488,14 @@ class InlineArgPrompt:
         sys.stdout.write("\0338\r\033[J")
         sys.stdout.flush()
 
-    def _read_key(self, fd: int, sig_r: int) -> bytes:
+    def _read_key(self) -> bytes:
         while True:
             if self._cancelled:
                 return b"\x1b"
-            r, _, _ = select.select([fd, sig_r], [], [], 1.0)
-            if sig_r in r:
-                os.read(sig_r, 256)
-                continue
-            if not r:
-                continue
-            data = os.read(fd, 1)
-            if data == b"\x1b":
-                r2, _, _ = select.select([fd], [], [], 0.05)
-                if r2:
-                    data += os.read(fd, 8)
-            return data
+            if terminal.wait_readable(self._fd, 0.1):
+                return terminal.read_key(self._fd)
+            if terminal.terminal_size() != self._last_size:
+                self._cancelled = True
 
 
 class InlineMultiPicker(Generic[T]):
@@ -521,6 +517,7 @@ class InlineMultiPicker(Generic[T]):
         max_height: int = 12,
         rows_above: int = 1,
         caret_col: int = 0,
+        status_label: str = "",
     ):
         self._items = items
         self._display_fn = display_fn
@@ -528,11 +525,13 @@ class InlineMultiPicker(Generic[T]):
         self._max_height = max_height
         self._rows_above = rows_above
         self._caret_col = caret_col
+        self._status_label = status_label
 
         self._selected = 0
         self._offset = 0
         self._checked: set[int] = set()
         self._cols = 80
+        self._lines = 24
         self._height = min(max_height, len(items))
         self._cancelled = False
         self._label_col_w = max((_wcswidth(display_fn(item)) for item in items), default=4)
@@ -542,24 +541,19 @@ class InlineMultiPicker(Generic[T]):
         if not self._items:
             return None
 
-        fd = sys.stdin.fileno()
-        old_attrs = termios.tcgetattr(fd)
-        old_sigwinch = signal.getsignal(signal.SIGWINCH)
-
-        sig_r, sig_w = os.pipe()
-        os.set_blocking(sig_w, False)
-        old_wakeup_fd = signal.set_wakeup_fd(sig_w, warn_on_full_buffer=False)
+        self._fd = sys.stdin.fileno()
+        old_attrs = terminal.get_mode(self._fd)
 
         result: list[T] | None = None
         try:
             self._update_size()
+            self._last_size = terminal.terminal_size()
             self._reserve()
-            tty.setraw(fd)
-            signal.signal(signal.SIGWINCH, self._on_resize)
+            terminal.set_raw(self._fd)
             self._render()
 
             while True:
-                action = self._dispatch(self._read_key(fd, sig_r))
+                action = self._dispatch(self._read_key())
                 if action == "accept":
                     if self._checked:
                         result = [self._items[i] for i in sorted(self._checked)]
@@ -585,11 +579,7 @@ class InlineMultiPicker(Generic[T]):
                     self._jump_to(action[5:])
                     self._render()
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
-            signal.signal(signal.SIGWINCH, old_sigwinch)
-            signal.set_wakeup_fd(old_wakeup_fd)
-            os.close(sig_r)
-            os.close(sig_w)
+            terminal.restore_mode(self._fd, old_attrs)
             self._cleanup()
 
         return result
@@ -599,10 +589,8 @@ class InlineMultiPicker(Generic[T]):
     def _update_size(self) -> None:
         sz = os.get_terminal_size()
         self._cols = sz.columns
-        self._height = min(self._max_height, len(self._items), max(1, sz.lines - 3))
-
-    def _on_resize(self, _sig, _frame) -> None:
-        self._cancelled = True
+        self._lines = sz.lines
+        self._height = min(self._max_height, len(self._items), max(1, sz.lines - 4))
 
     # ── drawing ─────────────────────────────────────────────────────────────
 
@@ -646,21 +634,28 @@ class InlineMultiPicker(Generic[T]):
             out.append(f"\033[{self._rows_above}A")
         out.append(f"\033[{self._caret_col + 1}G")
 
+        # Draw status bar at the bottom line, then return to caret via anchor.
+        out.append(f"\033[{self._lines};1H")
+        out.append(_statusbar(self._status_label, "", self._cols))
+        out.append("\0338")
+        if self._rows_above > 0:
+            out.append(f"\033[{self._rows_above}A")
+        out.append(f"\033[{self._caret_col + 1}G")
+
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
-    _BG = "\033[48;5;238m"          # non-selected background (dark gray, visible on all themes)
-    _SEL = "\033[48;5;24m\033[97m"  # selected: dark-blue bg + bright-white fg
     _CHECK_ON = "[x] "
     _CHECK_OFF = "[ ] "
 
     def _scrollbar_char(self, row_index: int) -> str:
+        s = get_color_scheme()
         n = len(self._items)
         thumb_start = self._offset * self._height // n
         thumb_end = max(thumb_start + 1, (self._offset + self._height) * self._height // n)
         if thumb_start <= row_index < thumb_end:
-            return "\033[48;5;244m \033[0m"
-        return "\033[48;5;236m \033[0m"
+            return _bg(*s.picker_scroll_thumb) + " \033[0m"
+        return _bg(*s.picker_scroll_track) + " \033[0m"
 
     def _format_row(self, item: T, *, checked: bool, selected: bool, row_index: int = 0, panel_w: int = 0) -> str:
         label = self._display_fn(item)
@@ -678,12 +673,15 @@ class InlineMultiPicker(Generic[T]):
         content_w = len(check) + label_col + (2 + _wcswidth(meta) if meta else 0)
         pad = " " * max(0, panel_w - content_w)
 
+        s = get_color_scheme()
+        bg = _bg(*s.picker_row_bg) + _fg(*s.picker_row_fg)
+        sel = _bg(*s.picker_sel_bg) + _fg(*s.picker_sel_fg)
         if selected:
             inner = check + label_padded + (f"  {meta}" if meta else "")
-            row = f"\r{self._SEL}{inner}{pad}\033[0m"
+            row = f"\r{sel}{inner}{pad}\033[0m"
         else:
             inner = check + label_padded + (f"  \033[2m{meta}\033[22m" if meta else "")
-            row = f"\r{self._BG}{inner}{pad}\033[0m"
+            row = f"\r{bg}{inner}{pad}\033[0m"
 
         if has_scrollbar:
             sb_col = panel_w + 1  # 1-indexed terminal column
@@ -697,22 +695,14 @@ class InlineMultiPicker(Generic[T]):
 
     # ── input ───────────────────────────────────────────────────────────────
 
-    def _read_key(self, fd: int, sig_r: int) -> bytes:
+    def _read_key(self) -> bytes:
         while True:
             if self._cancelled:
                 return b"\x1b"
-            r, _, _ = select.select([fd, sig_r], [], [], 1.0)
-            if sig_r in r:
-                os.read(sig_r, 256)
-                continue
-            if not r:
-                continue
-            data = os.read(fd, 1)
-            if data == b"\x1b":
-                r2, _, _ = select.select([fd], [], [], 0.05)
-                if r2:
-                    data += os.read(fd, 8)
-            return data
+            if terminal.wait_readable(self._fd, 0.1):
+                return terminal.read_key(self._fd)
+            if terminal.terminal_size() != self._last_size:
+                self._cancelled = True
 
     def _dispatch(self, key: bytes) -> str:
         if key in (b"\r", b"\n"):

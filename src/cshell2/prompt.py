@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Callable
 if TYPE_CHECKING:
     from .context import ContextManager
 
+from .colors import _fg, get_color_scheme
+
 PromptFunc = Callable[["ContextManager"], str]
 
 _prompt_func: PromptFunc | None = None
@@ -30,10 +32,11 @@ def get_prompt_func() -> PromptFunc:
 
 def default_prompt(context_manager: "ContextManager") -> str:
     """Default prompt: [context] parent/cwd HH:MM:SS [bg:N]> with ANSI colors."""
-    CYAN_BOLD = "\033[1;36m"
-    BLUE_BOLD = "\033[1;34m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
+    s = get_color_scheme()
+    CYAN_BOLD = "\033[1m" + _fg(*s.prompt_context)
+    BLUE_BOLD = "\033[1m" + _fg(*s.prompt_path)
+    GREEN = _fg(*s.prompt_time)
+    YELLOW = _fg(*s.prompt_bg_count)
     RESET = "\033[0m"
 
     parts = []
@@ -52,13 +55,18 @@ def default_prompt(context_manager: "ContextManager") -> str:
         if len(rel_parts) <= 2:
             short_path = "~/" + rel
         else:
-            short_path = os.sep.join(rel_parts[-2:])
+            short_path = "/".join(rel_parts[-2:])
     else:
         abs_parts = cwd.lstrip(os.sep).split(os.sep)
         if len(abs_parts) <= 2:
-            short_path = "/" + os.sep.join(abs_parts)
+            # POSIX absolute paths need their leading separator restored;
+            # Windows paths carry their drive letter (C:\...) already.
+            prefix = "" if os.name == "nt" else "/"
+            short_path = prefix + "/".join(abs_parts)
         else:
-            short_path = os.sep.join(abs_parts[-2:])
+            short_path = "/".join(abs_parts[-2:])
+    # The shell uses '/' as the canonical separator on every platform.
+    short_path = short_path.replace(os.sep, "/") if os.altsep else short_path
 
     timestamp = datetime.now().strftime("%H:%M:%S")
     parts.append(f"{BLUE_BOLD}{short_path}{RESET}")
