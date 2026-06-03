@@ -562,16 +562,16 @@ def _positional_label(cmd, pos_idx: int, command_name: str) -> str:
     param list doesn't cover this index.
     """
     if cmd is None or cmd.params is None:
-        return f"{command_name} arg {pos_idx + 1}"
+        return f"arg {pos_idx + 1}"
     positionals = [a for a in cmd.params if a.names and not a.names[0].startswith("-")]
     if pos_idx >= len(positionals):
-        return f"{command_name} arg {pos_idx + 1}"
+        return f"arg {pos_idx + 1}"
     param = positionals[pos_idx]
     name = param.names[0]
     help_text = param.kwargs.get("help", "")
     if help_text:
-        return f"{command_name} {name}: {help_text}"
-    return f"{command_name} {name}"
+        return f"{name}: {help_text}"
+    return name
 
 
 class Shell:
@@ -777,7 +777,7 @@ class Shell:
             # Caret is on the command name itself — show its help text.
             cmd = self.registry.get(token)
             if cmd is not None and cmd.description:
-                return cmd.description
+                return f"{token}: {cmd.description}"
             return None
 
         command_name = tokens_before[0]
