@@ -35,6 +35,7 @@ Available recipes:
     ssh       host completion from ~/.ssh/config and known_hosts, options
     tail      follow options and file completion
     tar       create/extract/list flags, archive-aware file completion
+    terraform subcommand tree, workspace completion, .tfvars file hints
     top       sort-key choices and PID completion (BSD/macOS vs Linux/procps)
     watch     watch's own flags, then delegates completion to the wrapped command
     zip       compression flags, file completion
