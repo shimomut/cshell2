@@ -16,6 +16,14 @@ def _csi(code: str) -> str:
     return f"\033[{code}"
 
 
+def _fg(r: int, g: int, b: int) -> str:
+    return f"\033[38;2;{r};{g};{b}m"
+
+
+def _bg(r: int, g: int, b: int) -> str:
+    return f"\033[48;2;{r};{g};{b}m"
+
+
 def _wcswidth(s: str) -> int:
     """Terminal display width of s (wide/fullwidth chars count as 2 columns).
 
@@ -206,16 +214,16 @@ class InlinePicker(Generic[T]):
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
-    _BG = "\033[48;5;238m"      # non-selected row background (dark gray, visible on all themes)
-    _SEL = "\033[48;5;24m\033[97m"   # selected: dark-blue bg + bright-white fg
+    _BG = _bg(68, 68, 68)      # non-selected row background (dark gray, visible on all themes)
+    _SEL = _bg(0, 95, 135) + _fg(255, 255, 255)   # selected: dark-blue bg + bright-white fg
 
     def _scrollbar_char(self, row_index: int) -> str:
         n = len(self._items)
         thumb_start = self._offset * self._height // n
         thumb_end = max(thumb_start + 1, (self._offset + self._height) * self._height // n)
         if thumb_start <= row_index < thumb_end:
-            return "\033[48;5;244m \033[0m"
-        return "\033[48;5;236m \033[0m"
+            return _bg(128, 128, 128) + " \033[0m"
+        return _bg(48, 48, 48) + " \033[0m"
 
     def _compute_panel_w(self) -> int:
         """Width that fits all items (respecting min_width), bounded by available columns."""
@@ -598,8 +606,8 @@ class InlineMultiPicker(Generic[T]):
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
-    _BG = "\033[48;5;238m"          # non-selected background (dark gray, visible on all themes)
-    _SEL = "\033[48;5;24m\033[97m"  # selected: dark-blue bg + bright-white fg
+    _BG = _bg(68, 68, 68)          # non-selected background (dark gray, visible on all themes)
+    _SEL = _bg(0, 95, 135) + _fg(255, 255, 255)  # selected: dark-blue bg + bright-white fg
     _CHECK_ON = "[x] "
     _CHECK_OFF = "[ ] "
 
@@ -608,8 +616,8 @@ class InlineMultiPicker(Generic[T]):
         thumb_start = self._offset * self._height // n
         thumb_end = max(thumb_start + 1, (self._offset + self._height) * self._height // n)
         if thumb_start <= row_index < thumb_end:
-            return "\033[48;5;244m \033[0m"
-        return "\033[48;5;236m \033[0m"
+            return _bg(128, 128, 128) + " \033[0m"
+        return _bg(48, 48, 48) + " \033[0m"
 
     def _format_row(self, item: T, *, checked: bool, selected: bool, row_index: int = 0, panel_w: int = 0) -> str:
         label = self._display_fn(item)
