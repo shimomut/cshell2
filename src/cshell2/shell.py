@@ -562,16 +562,16 @@ def _positional_label(cmd, pos_idx: int, command_name: str) -> str:
     param list doesn't cover this index.
     """
     if cmd is None or cmd.params is None:
-        return f"{command_name}  arg {pos_idx + 1}"
+        return f"{command_name} arg {pos_idx + 1}"
     positionals = [a for a in cmd.params if a.names and not a.names[0].startswith("-")]
     if pos_idx >= len(positionals):
-        return f"{command_name}  arg {pos_idx + 1}"
+        return f"{command_name} arg {pos_idx + 1}"
     param = positionals[pos_idx]
     name = param.names[0]
     help_text = param.kwargs.get("help", "")
     if help_text:
-        return f"{command_name}  {name}: {help_text}"
-    return f"{command_name}  {name}"
+        return f"{command_name} {name}: {help_text}"
+    return f"{command_name} {name}"
 
 
 class Shell:
@@ -717,7 +717,7 @@ class Shell:
                 has_completer = True
                 if options_completer.should_activate(ctx):
                     completions = options_completer.complete(ctx)
-                    label = f"{command_name}  option"
+                    label = f"{command_name} option"
 
             # Positional completer as fallback (or primary when no "-" prefix).
             if not completions and positional_completer:
@@ -834,8 +834,8 @@ class Shell:
         if node is not None and node.children and pos_idx == 0 and token in node.children:
             child = node.children[token]
             if child.description:
-                return f"{command_name}  {token}: {child.description}"
-            return f"{command_name}  {token}"
+                return f"{command_name} {token}: {child.description}"
+            return f"{command_name} {token}"
 
         return _positional_label(node if node is not None else cmd, pos_idx, command_name)
 
@@ -871,8 +871,8 @@ class Shell:
         # Typing a flag → offer all flags from this node + ancestors.
         if ctx.prefix.startswith("-"):
             if merged_options and merged_options.should_activate(ctx):
-                return merged_options.complete(ctx), prefix, f"{cmd_name}  option"
-            return [], prefix, f"{cmd_name}  option"
+                return merged_options.complete(ctx), prefix, f"{cmd_name} option"
+            return [], prefix, f"{cmd_name} option"
 
         # Compute positional index relative to this node, ignoring flag tokens
         # and their values.
@@ -888,7 +888,7 @@ class Shell:
                 child = node.children[name]
                 if name.startswith(ctx.prefix):
                     results.append(Completion(value=name, description=child.description))
-            return results, prefix, f"{cmd_name}  subcommand"
+            return results, prefix, f"{cmd_name} subcommand"
 
         # Leaf-or-deeper: use the resolved node's own positional completers.
         positional_completer = node.completers.get(pos_idx)

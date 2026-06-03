@@ -849,10 +849,12 @@ class LineEditor:
         end_col = _pending_wrap_col(end_char, self._cols)
         caret_row = self._cursor_row  # updated by _redraw()
 
-        from .parsing import split_for_completion as _sfc
-        _tokens, _ = _sfc(self._buf[: self._cursor])
-        _cmd = _tokens[0] if _tokens else ""
-        _flag_label = f"{_cmd}  {opt.value}" if _cmd else opt.value
+        if opt.description:
+            _flag_label = f"{opt.value}: {opt.description}"
+        elif opt.arg_hint:
+            _flag_label = f"{opt.value} <{opt.arg_hint}>"
+        else:
+            _flag_label = opt.value
 
         if not completions:
             # ── free-text fallback: InlineArgPrompt (original behaviour) ──────
