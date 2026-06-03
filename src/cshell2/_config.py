@@ -274,4 +274,6 @@ from cshell2 import set_color_scheme, ColorScheme
 #     picker_sel_fg=(255, 255, 255),       # selected row foreground
 #     picker_scroll_thumb=(120, 120, 120), # scrollbar thumb
 #     picker_scroll_track=(40, 40, 50),    # scrollbar track
+#     statusbar_bg=(30, 30, 30),           # status bar background
+#     statusbar_fg=(130, 130, 130),        # status bar foreground
 # ))
