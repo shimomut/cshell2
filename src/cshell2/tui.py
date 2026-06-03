@@ -61,6 +61,10 @@ def _wcs_ljust(s: str, width: int) -> str:
 def _statusbar(label: str, hints: str, cols: int) -> str:
     """Render a full-width status-bar string for the bottom line of the terminal."""
     s = get_color_scheme()
+    # Status bar is a single row — collapse any embedded newlines (a help
+    # text's first line is the summary; the rest is detail meant for `help`).
+    label = label.split("\n", 1)[0].rstrip() if label else label
+    hints = hints.split("\n", 1)[0].rstrip() if hints else hints
     parts = [p for p in (label, hints) if p]
     text = "   ".join(parts)
     padded = _wcs_ljust(_wcs_clip(f"  {text}  " if text else "", cols), cols)
