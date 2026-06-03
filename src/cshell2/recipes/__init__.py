@@ -13,6 +13,8 @@ Available recipes:
     awsut     AWS utility commands — console URL opening, recent cost report,
               ec2 / cloudwatch logs / cloudformation, and SageMaker HyperPod
               cluster operations under `awsut hyperpod ...`
+    chmod     mode operands (common octal + symbolic) and file completion
+    chown     USER / USER:GROUP completion (system users + groups), files
     df        disk-free filesystem usage
     du        disk usage with size options
     find      filters, type, time, size, actions
@@ -24,6 +26,13 @@ Available recipes:
     make      Makefile target names and flags
     ssh       host completion from ~/.ssh/config and known_hosts, options
     tail      follow options and file completion
+    tar       create/extract/list flags, archive-aware file completion
+    zip       compression flags, file completion
+    unzip     listing/extraction flags, archive-aware file completion
+
+Recipes for external commands silently skip registration when the
+underlying command is not available on ``PATH`` — ``enable("tar")`` on a
+host without ``tar`` is a no-op rather than a hard failure.
 
 Tools built on cobra (docker, kubectl, helm, gh, …) are handled
 automatically by the cobra-protocol fallback — no recipe needed.  See

@@ -1,0 +1,120 @@
+"""Completion recipe for chown."""
+
+from __future__ import annotations
+
+import shutil
+import subprocess
+
+from ..commands import registry as command_registry
+from ..completion import (
+    Completer,
+    Completion,
+    CompletionContext,
+    FileCompleter,
+    OptionsCompleter,
+)
+
+CHOWN_OPTIONS: dict[str, str] = {
+    "-f": "do not display diagnostic messages on failure",
+    "-h": "change owner of symlink itself, not target",
+    "-H": "with -R, follow symlinks on the command line only",
+    "-L": "with -R, follow all symlinks",
+    "-P": "with -R, do not follow any symlinks (default)",
+    "-R": "recurse into directories",
+    "-v": "verbose — show files as ownership is changed",
+    "-x": "do not cross filesystem boundaries with -R",
+}
+
+
+class OwnerCompleter(Completer):
+    """Completes USER or USER:GROUP for chown.
+
+    Splits the prefix at ':' and completes the user before, the group after.
+    Falls back to silent empty list when the system enumeration commands are
+    unavailable.
+    """
+
+    def complete(self, ctx: CompletionContext) -> list[Completion]:
+        prefix = ctx.prefix
+        if ":" in prefix:
+            user_part, group_part = prefix.split(":", 1)
+            groups = self._list_groups()
+            return [
+                Completion(value=f"{user_part}:{g}", display=g)
+                for g in groups
+                if g.startswith(group_part)
+            ]
+        users = self._list_users()
+        return [Completion(value=u) for u in users if u.startswith(prefix)]
+
+    @staticmethod
+    def _run(cmd: list[str]) -> list[str]:
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=2,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        names: list[str] = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line and not line.startswith("_"):
+                names.append(line)
+        return sorted(set(names))
+
+    def _list_users(self) -> list[str]:
+        # macOS: dscl; Linux: getent passwd; fallback to /etc/passwd.
+        if shutil.which("dscl"):
+            return self._run(["dscl", ".", "-list", "/Users"])
+        if shutil.which("getent"):
+            out = self._run_pairs(["getent", "passwd"])
+            return out
+        return self._read_passwd_file("/etc/passwd")
+
+    def _list_groups(self) -> list[str]:
+        if shutil.which("dscl"):
+            return self._run(["dscl", ".", "-list", "/Groups"])
+        if shutil.which("getent"):
+            return self._run_pairs(["getent", "group"])
+        return self._read_passwd_file("/etc/group")
+
+    @staticmethod
+    def _run_pairs(cmd: list[str]) -> list[str]:
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=2,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        names = []
+        for line in result.stdout.splitlines():
+            name = line.split(":", 1)[0].strip()
+            if name and not name.startswith("_"):
+                names.append(name)
+        return sorted(set(names))
+
+    @staticmethod
+    def _read_passwd_file(path: str) -> list[str]:
+        try:
+            with open(path) as f:
+                lines = f.readlines()
+        except OSError:
+            return []
+        names = []
+        for line in lines:
+            name = line.split(":", 1)[0].strip()
+            if name and not name.startswith("_"):
+                names.append(name)
+        return sorted(set(names))
+
+
+def register() -> None:
+    if shutil.which("chown") is None:
+        return
+    command_registry.register_external_completers("chown", {
+        None: OptionsCompleter(CHOWN_OPTIONS),
+        0: OwnerCompleter(),
+        1: FileCompleter(),
+        2: FileCompleter(),
+        3: FileCompleter(),
+    })
