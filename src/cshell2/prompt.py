@@ -9,11 +9,9 @@ from typing import TYPE_CHECKING, Callable
 if TYPE_CHECKING:
     from .context import ContextManager
 
+from .colors import _fg, get_color_scheme
+
 PromptFunc = Callable[["ContextManager"], str]
-
-
-def _fg(r: int, g: int, b: int) -> str:
-    return f"\033[38;2;{r};{g};{b}m"
 
 _prompt_func: PromptFunc | None = None
 
@@ -34,10 +32,11 @@ def get_prompt_func() -> PromptFunc:
 
 def default_prompt(context_manager: "ContextManager") -> str:
     """Default prompt: [context] parent/cwd HH:MM:SS [bg:N]> with ANSI colors."""
-    CYAN_BOLD = "\033[1m" + _fg(0, 188, 212)
-    BLUE_BOLD = "\033[1m" + _fg(100, 149, 237)
-    GREEN = _fg(80, 200, 100)
-    YELLOW = _fg(229, 192, 123)
+    s = get_color_scheme()
+    CYAN_BOLD = "\033[1m" + _fg(*s.prompt_context)
+    BLUE_BOLD = "\033[1m" + _fg(*s.prompt_path)
+    GREEN = _fg(*s.prompt_time)
+    YELLOW = _fg(*s.prompt_bg_count)
     RESET = "\033[0m"
 
     parts = []

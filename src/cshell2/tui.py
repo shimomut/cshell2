@@ -8,20 +8,13 @@ import unicodedata
 from typing import Callable, Generic, TypeVar
 
 from . import terminal
+from .colors import _bg, _fg, get_color_scheme
 
 T = TypeVar("T")
 
 
 def _csi(code: str) -> str:
     return f"\033[{code}"
-
-
-def _fg(r: int, g: int, b: int) -> str:
-    return f"\033[38;2;{r};{g};{b}m"
-
-
-def _bg(r: int, g: int, b: int) -> str:
-    return f"\033[48;2;{r};{g};{b}m"
 
 
 def _wcswidth(s: str) -> int:
@@ -214,16 +207,14 @@ class InlinePicker(Generic[T]):
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
-    _BG = _bg(68, 68, 68)      # non-selected row background (dark gray, visible on all themes)
-    _SEL = _bg(0, 95, 135) + _fg(255, 255, 255)   # selected: dark-blue bg + bright-white fg
-
     def _scrollbar_char(self, row_index: int) -> str:
+        s = get_color_scheme()
         n = len(self._items)
         thumb_start = self._offset * self._height // n
         thumb_end = max(thumb_start + 1, (self._offset + self._height) * self._height // n)
         if thumb_start <= row_index < thumb_end:
-            return _bg(128, 128, 128) + " \033[0m"
-        return _bg(48, 48, 48) + " \033[0m"
+            return _bg(*s.picker_scroll_thumb) + " \033[0m"
+        return _bg(*s.picker_scroll_track) + " \033[0m"
 
     def _compute_panel_w(self) -> int:
         """Width that fits all items (respecting min_width), bounded by available columns."""
@@ -253,13 +244,16 @@ class InlinePicker(Generic[T]):
         content_w = _wcswidth(label) + (2 + _wcswidth(meta) if meta else 0)
         pad = " " * max(0, panel_w - content_w)
 
+        s = get_color_scheme()
+        bg = _bg(*s.picker_row_bg) + _fg(*s.picker_row_fg)
+        sel = _bg(*s.picker_sel_bg) + _fg(*s.picker_sel_fg)
         col_move = f"\033[{self._col}C" if self._col > 0 else ""
         if selected:
             inner = label + (f"  {meta}" if meta else "")
-            row = f"\r{col_move}{self._SEL}{inner}{pad}\033[0m"
+            row = f"\r{col_move}{sel}{inner}{pad}\033[0m"
         else:
             inner = label + (f"  \033[2m{meta}\033[22m" if meta else "")
-            row = f"\r{col_move}{self._BG}{inner}{pad}\033[0m"
+            row = f"\r{col_move}{bg}{inner}{pad}\033[0m"
 
         if has_scrollbar:
             sb_col = self._col + panel_w + 1  # 1-indexed terminal column
@@ -606,18 +600,17 @@ class InlineMultiPicker(Generic[T]):
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
-    _BG = _bg(68, 68, 68)          # non-selected background (dark gray, visible on all themes)
-    _SEL = _bg(0, 95, 135) + _fg(255, 255, 255)  # selected: dark-blue bg + bright-white fg
     _CHECK_ON = "[x] "
     _CHECK_OFF = "[ ] "
 
     def _scrollbar_char(self, row_index: int) -> str:
+        s = get_color_scheme()
         n = len(self._items)
         thumb_start = self._offset * self._height // n
         thumb_end = max(thumb_start + 1, (self._offset + self._height) * self._height // n)
         if thumb_start <= row_index < thumb_end:
-            return _bg(128, 128, 128) + " \033[0m"
-        return _bg(48, 48, 48) + " \033[0m"
+            return _bg(*s.picker_scroll_thumb) + " \033[0m"
+        return _bg(*s.picker_scroll_track) + " \033[0m"
 
     def _format_row(self, item: T, *, checked: bool, selected: bool, row_index: int = 0, panel_w: int = 0) -> str:
         label = self._display_fn(item)
@@ -635,12 +628,15 @@ class InlineMultiPicker(Generic[T]):
         content_w = len(check) + label_col + (2 + _wcswidth(meta) if meta else 0)
         pad = " " * max(0, panel_w - content_w)
 
+        s = get_color_scheme()
+        bg = _bg(*s.picker_row_bg) + _fg(*s.picker_row_fg)
+        sel = _bg(*s.picker_sel_bg) + _fg(*s.picker_sel_fg)
         if selected:
             inner = check + label_padded + (f"  {meta}" if meta else "")
-            row = f"\r{self._SEL}{inner}{pad}\033[0m"
+            row = f"\r{sel}{inner}{pad}\033[0m"
         else:
             inner = check + label_padded + (f"  \033[2m{meta}\033[22m" if meta else "")
-            row = f"\r{self._BG}{inner}{pad}\033[0m"
+            row = f"\r{bg}{inner}{pad}\033[0m"
 
         if has_scrollbar:
             sb_col = panel_w + 1  # 1-indexed terminal column
