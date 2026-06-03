@@ -206,9 +206,18 @@ class InlinePicker(Generic[T]):
         visible = self._items[self._offset : self._offset + self._height]
         out: list[str] = ["\0338\r\033[J"]  # restore to anchor, clear to end
 
-        panel_w = self._compute_panel_w()
+        label_col, meta_col, panel_w = self._compute_layout()
         for i, item in enumerate(visible):
-            out.append(self._format_row(item, selected=(i + self._offset == self._selected), row_index=i, panel_w=panel_w))
+            out.append(
+                self._format_row(
+                    item,
+                    selected=(i + self._offset == self._selected),
+                    row_index=i,
+                    label_col=label_col,
+                    meta_col=meta_col,
+                    panel_w=panel_w,
+                )
+            )
             if i < len(visible) - 1:
                 out.append("\n")
 
@@ -241,32 +250,55 @@ class InlinePicker(Generic[T]):
             return _bg(*s.picker_scroll_thumb) + " \033[0m"
         return _bg(*s.picker_scroll_track) + " \033[0m"
 
-    def _compute_panel_w(self) -> int:
-        """Width that fits all items (respecting min_width), bounded by available columns."""
+    def _compute_layout(self) -> tuple[int, int, int]:
+        """Return (label_col, meta_col, panel_w).
+
+        ``label_col`` is the width every label is padded to so meta columns
+        align across rows. ``meta_col`` is the cap applied to descriptions —
+        what fits after labels and the 2-space gap inside ``avail``.
+        """
         has_scrollbar = len(self._items) > self._height
         avail = max(1, self._cols - self._col - (1 if has_scrollbar else 0))
-        max_w = self._min_width
-        for item in self._items:
-            label = self._display_fn(item)
-            meta = self._meta_fn(item) if self._meta_fn else ""
-            meta_clip = min(_wcswidth(meta), min(20, avail // 4))
-            label_clip = min(_wcswidth(label), max(1, avail - (meta_clip + 2 if meta_clip else 0)))
-            row_w = label_clip + (2 + meta_clip if meta_clip else 0)
-            max_w = max(max_w, row_w)
-        return min(max_w, avail)
 
-    def _format_row(self, item: T, *, selected: bool, row_index: int = 0, panel_w: int = 0) -> str:
+        max_label = 0
+        max_meta = 0
+        for item in self._items:
+            max_label = max(max_label, _wcswidth(self._display_fn(item)))
+            if self._meta_fn:
+                max_meta = max(max_meta, _wcswidth(self._meta_fn(item)))
+
+        if max_meta:
+            # Reserve at least 2 cols for the gap; squeeze label first if tight.
+            label_col = min(max_label, max(1, avail - 2))
+            meta_col = max(0, min(max_meta, avail - label_col - 2))
+        else:
+            label_col = min(max_label, avail)
+            meta_col = 0
+
+        panel_w = label_col + (2 + meta_col if meta_col else 0)
+        panel_w = max(panel_w, self._min_width)
+        return label_col, meta_col, min(panel_w, avail)
+
+    def _format_row(
+        self,
+        item: T,
+        *,
+        selected: bool,
+        row_index: int = 0,
+        label_col: int = 0,
+        meta_col: int = 0,
+        panel_w: int = 0,
+    ) -> str:
         label = self._display_fn(item)
         meta = self._meta_fn(item) if self._meta_fn else ""
 
         has_scrollbar = len(self._items) > self._height
-        avail = max(1, self._cols - self._col - (1 if has_scrollbar else 0))
-        meta_w = min(_wcswidth(meta), min(20, avail // 4))
-        label_w = min(_wcswidth(label), max(1, panel_w - (meta_w + 2 if meta_w else 0)))
-        label = _wcs_clip(label, label_w)
-        meta = _wcs_clip(meta, meta_w)
+        label = _wcs_clip(label, label_col)
+        # Pad the label to label_col only when there's a meta column to align to.
+        label_disp = _wcs_ljust(label, label_col) if meta_col else label
+        meta = _wcs_clip(meta, meta_col) if meta_col else ""
 
-        content_w = _wcswidth(label) + (2 + _wcswidth(meta) if meta else 0)
+        content_w = _wcswidth(label_disp) + (2 + _wcswidth(meta) if meta else 0)
         pad = " " * max(0, panel_w - content_w)
 
         s = get_color_scheme()
@@ -274,10 +306,10 @@ class InlinePicker(Generic[T]):
         sel = _bg(*s.picker_sel_bg) + _fg(*s.picker_sel_fg)
         col_move = f"\033[{self._col}C" if self._col > 0 else ""
         if selected:
-            inner = label + (f"  {meta}" if meta else "")
+            inner = label_disp + (f"  {meta}" if meta else "")
             row = f"\r{col_move}{sel}{inner}{pad}\033[0m"
         else:
-            inner = label + (f"  \033[2m{meta}\033[22m" if meta else "")
+            inner = label_disp + (f"  \033[2m{meta}\033[22m" if meta else "")
             row = f"\r{col_move}{bg}{inner}{pad}\033[0m"
 
         if has_scrollbar:
