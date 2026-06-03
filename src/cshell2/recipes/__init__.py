@@ -15,6 +15,8 @@ Available recipes:
               cluster operations under `awsut hyperpod ...`
     chmod     mode operands (common octal + symbolic) and file completion
     chown     USER / USER:GROUP completion (system users + groups), files
+    cp        copy flags (BSD/macOS vs GNU/Linux), file completion
+    curl      flag dictionary and HTTP-method choices for -X / --request
     df        disk-free filesystem usage
     du        disk usage with size options
     find      filters, type, time, size, actions
@@ -23,10 +25,18 @@ Available recipes:
     kill      signal options, PID completion from running processes
               (also registers pkill with process-name completion)
     ls        listing flags
+    lsof      flag dictionary, PID completion for -p
     make      Makefile target names and flags
+    mv        move flags (BSD/macOS vs GNU/Linux), file completion
+    ps        select-by-PID/USER/GROUP flag dictionary
+    rm        remove flags (BSD/macOS vs GNU/Linux), file completion
+    rsync     flag dictionary, [user@]host:-aware path completion
+    scp       flag dictionary, [user@]host:-aware path completion
     ssh       host completion from ~/.ssh/config and known_hosts, options
     tail      follow options and file completion
     tar       create/extract/list flags, archive-aware file completion
+    top       sort-key choices and PID completion (BSD/macOS vs Linux/procps)
+    watch     watch's own flags, then delegates completion to the wrapped command
     zip       compression flags, file completion
     unzip     listing/extraction flags, archive-aware file completion
 
