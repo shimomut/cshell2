@@ -130,7 +130,8 @@ class History:
 
 # ── Line editor ───────────────────────────────────────────────────────────────
 
-GetCompletionsFn = Callable[[str], tuple[list[Completion], str]]
+GetCompletionsFn = Callable[[str], tuple[list[Completion], str, str]]
+GetArgInfoFn = Callable[[str, int], str | None]
 
 
 class LineEditor:
@@ -148,11 +149,13 @@ class LineEditor:
         get_completions: GetCompletionsFn,
         get_prompt: Callable[[], str],
         switch_fn: Callable[[], None] | None = None,
+        get_arg_info: GetArgInfoFn | None = None,
     ):
         self._history = history
         self._get_completions = get_completions
         self._get_prompt = get_prompt
         self._switch_fn = switch_fn
+        self._get_arg_info = get_arg_info
 
         self._buf = ""
         self._cursor = 0
@@ -169,7 +172,7 @@ class LineEditor:
         # re-render explicitly instead of relying on terminal reflow.
         self._terminal_reflows = os.environ.get("TERM_PROGRAM", "") != "vscode"
         self._hint: str = ""  # transient hint shown after TAB; cleared on next keypress
-        self._hint_visible: bool = False  # whether the status bar is currently showing a hint
+        self._status_bar_visible: bool = False  # whether the status bar is currently showing something
 
     def add_to_history(self, line: str) -> None:
         """Add *line* to history from outside the editor (e.g. after joining continuation lines)."""
@@ -280,24 +283,32 @@ class LineEditor:
         cursor_col = _pending_wrap_col(cursor_char, cols)
         sys.stdout.write(f"\033[{cursor_col + 1}G")
 
-        # Render arg-hint in the status bar (bottom line); clear when dismissed.
+        # Render arg-hint or token description in the status bar; clear when gone.
+        from .tui import _statusbar
+        statusbar_str: str | None = None
         if self._hint:
-            from .tui import _statusbar
             text = self._hint.strip()
             if "  —  " in text:
                 label_part, desc_part = text.split("  —  ", 1)
             else:
                 label_part, desc_part = text, ""
+            statusbar_str = _statusbar(label_part, desc_part, self._cols)
+        elif self._get_arg_info is not None:
+            info = self._get_arg_info(self._buf, self._cursor)
+            if info:
+                statusbar_str = _statusbar(info, "", self._cols)
+
+        if statusbar_str is not None:
             sys.stdout.write("\0337")
             sys.stdout.write(f"\033[{self._lines};1H")
-            sys.stdout.write(_statusbar(label_part, desc_part, self._cols))
+            sys.stdout.write(statusbar_str)
             sys.stdout.write("\0338")
-            self._hint_visible = True
-        elif self._hint_visible:
+            self._status_bar_visible = True
+        elif self._status_bar_visible:
             sys.stdout.write("\0337")
             sys.stdout.write(f"\033[{self._lines};1H\033[2K")
             sys.stdout.write("\0338")
-            self._hint_visible = False
+            self._status_bar_visible = False
 
         sys.stdout.flush()
 
@@ -507,21 +518,6 @@ class LineEditor:
 
     # ── completion ───────────────────────────────────────────────────────────
 
-    def _completion_label(self, completions: list[Completion], prefix: str) -> str:
-        """Human-readable label for the status bar describing what's being completed."""
-        from .parsing import split_for_completion
-        tokens, _ = split_for_completion(self._buf[: self._cursor])
-        if not tokens:
-            return "command"
-        cmd = tokens[0]
-        preceding = tokens[1:]  # completed args before the current token
-        if completions and all(c.multi_select for c in completions):
-            return f"{cmd}  option"
-        if prefix.startswith("-"):
-            return f"{cmd}  option"
-        positional_n = sum(1 for a in preceding if not a.startswith("-"))
-        return f"{cmd}  arg {positional_n + 1}"
-
     def _complete(self, fd: int) -> None:
         from .tui import InlinePicker
 
@@ -533,7 +529,7 @@ class LineEditor:
                 self._redraw()
                 buf_changed = False
 
-            completions, prefix = self._get_completions(self._buf[: self._cursor])
+            completions, prefix, status_label = self._get_completions(self._buf[: self._cursor])
 
             if not completions:
                 return
@@ -567,7 +563,7 @@ class LineEditor:
 
             # Multi-select options picker.
             if all(c.multi_select for c in completions):
-                self._complete_multi(completions, prefix)
+                self._complete_multi(completions, prefix, status_label)
                 return
 
             # Move to the end of the visible content, then go one line down.
@@ -590,7 +586,7 @@ class LineEditor:
             caret_char_at_tab = caret_char
 
             def refresh(typed: str) -> tuple[list[Completion], int]:
-                new_completions, new_prefix = self._get_completions(buf_at_tab + typed)
+                new_completions, new_prefix, _ = self._get_completions(buf_at_tab + typed)
                 new_caret_col = _pending_wrap_col(
                     caret_char_at_tab + len(typed), self._cols  # typed is always ASCII
                 )
@@ -609,7 +605,7 @@ class LineEditor:
                 value_fn=lambda c: c.value,
                 completion_prefix=prefix,
                 reopen_when=lambda items: bool(items) and all(c.multi_select for c in items),
-                status_label=self._completion_label(completions, prefix),
+                status_label=status_label,
             )
             selected = picker.run()
 
@@ -639,7 +635,7 @@ class LineEditor:
                 self._apply(selected, prefix)
             return
 
-    def _complete_multi(self, completions: list[Completion], prefix: str) -> None:
+    def _complete_multi(self, completions: list[Completion], prefix: str, status_label: str = "") -> None:
         """Run the multi-select options picker."""
         from .tui import InlineMultiPicker
 
@@ -662,7 +658,7 @@ class LineEditor:
             max_height=12,
             rows_above=rows_above,
             caret_col=caret_col,
-            status_label=self._completion_label(completions, prefix),
+            status_label=status_label,
         )
         selected = picker.run()
 
@@ -698,7 +694,7 @@ class LineEditor:
             self._buf = self._buf[: self._cursor] + ins + self._buf[self._cursor :]
             self._cursor += len(ins)
 
-            value_comps, _ = self._get_completions(self._buf[: self._cursor])
+            value_comps, _, _ = self._get_completions(self._buf[: self._cursor])
             has_value_picker = any(
                 not c.multi_select and not c.is_arg_hint for c in value_comps
             )
@@ -845,7 +841,7 @@ class LineEditor:
         # Ask the completion engine what's available for this argument position.
         # Filter out multi_select entries (flag pickers) and is_arg_hint entries
         # (hint-only flags with no value completer) — only real value completions remain.
-        raw_completions, prefix = self._get_completions(self._buf[: self._cursor])
+        raw_completions, prefix, _ = self._get_completions(self._buf[: self._cursor])
         completions = [c for c in raw_completions if not c.multi_select and not c.is_arg_hint]
 
         end_char = self._prompt_len + _wcswidth(self._buf)
@@ -911,7 +907,7 @@ class LineEditor:
             caret_char_at_open = caret_char
 
             def refresh(typed: str) -> tuple[list[Completion], int]:
-                new_raw, new_prefix = self._get_completions(buf_at_open + typed)
+                new_raw, new_prefix, _ = self._get_completions(buf_at_open + typed)
                 new_completions = [c for c in new_raw if not c.multi_select]
                 new_caret_col = _pending_wrap_col(
                     caret_char_at_open + len(typed), self._cols  # typed is always ASCII
@@ -946,7 +942,7 @@ class LineEditor:
                 typed = picker._typed
                 self._buf = self._buf[: self._cursor] + typed + self._buf[self._cursor :]
                 self._cursor += len(typed)
-                completions, prefix = self._get_completions(self._buf[: self._cursor])
+                completions, prefix, _ = self._get_completions(self._buf[: self._cursor])
                 completions = [c for c in completions if not c.multi_select]
                 if not completions:
                     return True  # typed chars committed; no further completions

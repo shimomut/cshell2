@@ -219,7 +219,7 @@ class InlinePicker(Generic[T]):
 
         # Draw status bar at the bottom line, then return to caret via anchor.
         out.append(f"\033[{self._lines};1H")
-        out.append(_statusbar(self._status_label, "↑↓ Navigate   Enter Select   Esc Cancel", self._cols))
+        out.append(_statusbar(self._status_label, "", self._cols))
         out.append("\0338")
         if self._rows_above > 0:
             out.append(f"\033[{self._rows_above}A")
@@ -476,7 +476,7 @@ class InlineArgPrompt:
         # Draw status bar at the bottom line, then return to end-of-input via anchor.
         cursor_col = _wcswidth(self._label) + 2 + _wcswidth(self._buf)
         out.append(f"\033[{self._lines};1H")
-        out.append(_statusbar(self._status_label, "Enter Confirm   Esc Cancel", self._cols))
+        out.append(_statusbar(self._status_label, "", self._cols))
         out.append("\0338")  # restore to anchor
         if self._description:
             out.append("\033[B\r")  # down to label row, col 0
@@ -636,7 +636,7 @@ class InlineMultiPicker(Generic[T]):
 
         # Draw status bar at the bottom line, then return to caret via anchor.
         out.append(f"\033[{self._lines};1H")
-        out.append(_statusbar(self._status_label, "↑↓ Navigate   Space Toggle   Enter Confirm   Esc Cancel", self._cols))
+        out.append(_statusbar(self._status_label, "", self._cols))
         out.append("\0338")
         if self._rows_above > 0:
             out.append(f"\033[{self._rows_above}A")

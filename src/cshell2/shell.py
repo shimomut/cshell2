@@ -554,6 +554,26 @@ def _positional_index(args: list[str], options_completer) -> int:
     return pos
 
 
+def _positional_label(cmd, pos_idx: int, command_name: str) -> str:
+    """Return a status-bar label for the positional argument at *pos_idx*.
+
+    Uses the ``Arg`` descriptor's name and help text when available, falling
+    back to ``"{command_name}  arg N"`` for external commands or when the
+    param list doesn't cover this index.
+    """
+    if cmd is None or cmd.params is None:
+        return f"{command_name}  arg {pos_idx + 1}"
+    positionals = [a for a in cmd.params if a.names and not a.names[0].startswith("-")]
+    if pos_idx >= len(positionals):
+        return f"{command_name}  arg {pos_idx + 1}"
+    param = positionals[pos_idx]
+    name = param.names[0]
+    help_text = param.kwargs.get("help", "")
+    if help_text:
+        return f"{command_name}  {name}: {help_text}"
+    return f"{command_name}  {name}"
+
+
 class Shell:
     def __init__(self):
         # Enable VT output / disable newline translation (Windows) before any
@@ -581,13 +601,14 @@ class Shell:
             get_completions=self._get_completions,
             get_prompt=lambda: get_prompt_func()(self.context_manager),
             switch_fn=self._handle_switch,
+            get_arg_info=self._get_arg_info,
         )
 
         self._command_completer = CommandNameCompleter(self.registry)
         self._file_completer = FileCompleter()
         self._var_completer = VarCompleter()
 
-    def _get_completions(self, line_before_cursor: str) -> tuple[list[Completion], str]:
+    def _get_completions(self, line_before_cursor: str) -> tuple[list[Completion], str, str]:
         # Isolate the current pipeline stage so completions for `ls | grep -`
         # are computed against `grep`, not `ls`.
         stage_line = _split_on_operators(line_before_cursor, [";", "&&", "||", "|"])[-1][1]
@@ -614,7 +635,7 @@ class Shell:
                     line=line_before_cursor,
                     shell_context=self.context_manager.current(),
                 )
-                return self._var_completer.complete(ctx), prefix
+                return self._var_completer.complete(ctx), prefix, "variable"
 
             ctx = CompletionContext(
                 command=None,
@@ -624,7 +645,7 @@ class Shell:
                 line=line_before_cursor,
                 shell_context=self.context_manager.current(),
             )
-            return self._command_completer.complete(ctx), prefix
+            return self._command_completer.complete(ctx), prefix, "command"
 
         command_name = tokens[0]
         args = tokens[1:]
@@ -662,12 +683,12 @@ class Shell:
 
         has_completer = False
         completions: list[Completion] = []
+        label = command_name  # default: just show the command name
 
         if completers_dict is not None:
             options_completer = completers_dict.get(None)
-            positional_completer = completers_dict.get(
-                _positional_index(args, options_completer)
-            )
+            pos_idx = _positional_index(args, options_completer)
+            positional_completer = completers_dict.get(pos_idx)
 
             # When the last arg is a value-taking flag (e.g. "du -d <TAB>"),
             # suppress positional/file completion and return a hint instead.
@@ -678,9 +699,10 @@ class Shell:
                 hint_info = options_completer.get_preceding_flag_hint(ctx)
                 if hint_info:
                     flag, arg_hint, description, value_completer = hint_info
+                    flag_label = f"{flag}: {description}" if description else f"{flag} <{arg_hint}>"
                     if value_completer:
                         # Flag has a dedicated value completer (e.g. -C DIR → DirCompleter).
-                        return value_completer.complete(ctx), ctx.prefix
+                        return value_completer.complete(ctx), ctx.prefix, flag_label
                     # No value completer: suppress file fallback and show an inline hint.
                     return [Completion(
                         value=flag,
@@ -688,19 +710,21 @@ class Shell:
                         description=description,
                         arg_hint=arg_hint,
                         is_arg_hint=True,
-                    )], ctx.prefix
+                    )], ctx.prefix, flag_label
 
             # Options completer takes priority when typing a "-"-prefixed token.
             if options_completer and ctx.prefix.startswith("-"):
                 has_completer = True
                 if options_completer.should_activate(ctx):
                     completions = options_completer.complete(ctx)
+                    label = f"{command_name}  option"
 
             # Positional completer as fallback (or primary when no "-" prefix).
             if not completions and positional_completer:
                 has_completer = True
                 if positional_completer.should_activate(ctx):
                     completions = positional_completer.complete(ctx)
+                    label = _positional_label(cmd, pos_idx, command_name)
 
         # Cobra-protocol fallback: many modern Go CLIs (kubectl, helm, gh,
         # argocd, …) expose a hidden ``__complete`` subcommand.  Try it when
@@ -722,7 +746,98 @@ class Shell:
         if not completions and not has_completer:
             completions = self._file_completer.complete(ctx)
 
-        return completions, prefix
+        return completions, prefix, label
+
+    def _get_arg_info(self, buf: str, cursor: int) -> str | None:
+        """Return a status-bar description for the token the caret sits on.
+
+        Handles three cases:
+        - Flag token (``--flag``): returns ``"--flag: description"``
+        - Flag value (token immediately after a value-taking flag): returns
+          the flag's own description so the context stays visible
+        - Positional arg: returns the param name (and help text when available)
+        """
+        # Extract the word surrounding cursor (scan left and right past non-space).
+        start, end = cursor, cursor
+        while start > 0 and buf[start - 1] not in (" ", "\t"):
+            start -= 1
+        while end < len(buf) and buf[end] not in (" ", "\t"):
+            end += 1
+        token = buf[start:end]
+
+        if not token:
+            return None
+
+        # Parse everything before the token to get the command/args context.
+        pre = buf[:start].rstrip()
+        stage_pre = _split_on_operators(pre, [";", "&&", "||", "|"])[-1][1]
+        tokens_before, _ = split_for_completion(stage_pre + " ")
+
+        if not tokens_before:
+            # Caret is on the command name itself — show its help text.
+            cmd = self.registry.get(token)
+            if cmd is not None and cmd.description:
+                return cmd.description
+            return None
+
+        command_name = tokens_before[0]
+        preceding_args = tokens_before[1:]
+
+        cmd = self.registry.get(command_name)
+        ext = self.registry.get_external_completers(command_name)
+
+        # Resolve to the right node and options_completer.
+        if cmd is not None and cmd.children:
+            node, remaining_args = cmd.resolve(preceding_args)
+            options_completer = node.merged_options_completer()
+        elif cmd is not None:
+            node = cmd
+            remaining_args = preceding_args
+            options_completer = cmd.completers.get(None)
+        elif ext is not None:
+            node = None
+            remaining_args = preceding_args
+            options_completer = ext.get(None)
+        else:
+            return None
+
+        if token.startswith("-"):
+            # ── Flag token ────────────────────────────────────────────────────
+            if options_completer is None or not hasattr(options_completer, "options"):
+                return None
+            desc = options_completer.options.get(token, "")
+            if desc:
+                return f"{token}: {desc}"
+            arg_hint = getattr(options_completer, "args", {}).get(token, "")
+            if arg_hint:
+                return f"{token} <{arg_hint}>"
+            return None
+
+        # ── Non-flag token: positional arg or value for a preceding flag ───────
+
+        value_taking = set(getattr(options_completer, "args", {})) if options_completer else set()
+        if remaining_args and remaining_args[-1].startswith("-") and remaining_args[-1] in value_taking:
+            # Caret is on a flag value — show the flag's description.
+            flag = remaining_args[-1]
+            desc = getattr(options_completer, "options", {}).get(flag, "")
+            if desc:
+                return f"{flag}: {desc}"
+            arg_hint = getattr(options_completer, "args", {}).get(flag, "")
+            if arg_hint:
+                return f"{flag} <{arg_hint}>"
+            return None
+
+        # Caret is on a positional arg.
+        pos_idx = _positional_index(remaining_args, options_completer)
+
+        # For tree commands: if this slot is a sub-command name, show its description.
+        if node is not None and node.children and pos_idx == 0 and token in node.children:
+            child = node.children[token]
+            if child.description:
+                return f"{command_name}  {token}: {child.description}"
+            return f"{command_name}  {token}"
+
+        return _positional_label(node if node is not None else cmd, pos_idx, command_name)
 
     def _complete_tree_node(self, node, ctx, prefix):
         """Compute completions when the user is typing within a sub-command tree.
@@ -731,6 +846,7 @@ class Shell:
         *ctx.args* are the tokens remaining after stripping consumed
         sub-command names; *ctx.arg_index* reflects that.
         """
+        cmd_name = ctx.command or ""
         # Build a merged options completer (this node + ancestors).
         merged_options = node.merged_options_completer()
 
@@ -741,21 +857,22 @@ class Shell:
             hint_info = merged_options.get_preceding_flag_hint(ctx)
             if hint_info:
                 flag, arg_hint, description, value_completer = hint_info
+                flag_label = f"{flag}: {description}" if description else f"{flag} <{arg_hint}>"
                 if value_completer:
-                    return value_completer.complete(ctx), ctx.prefix
+                    return value_completer.complete(ctx), ctx.prefix, flag_label
                 return [Completion(
                     value=flag,
                     display=f"<{arg_hint}>",
                     description=description,
                     arg_hint=arg_hint,
                     is_arg_hint=True,
-                )], ctx.prefix
+                )], ctx.prefix, flag_label
 
         # Typing a flag → offer all flags from this node + ancestors.
         if ctx.prefix.startswith("-"):
             if merged_options and merged_options.should_activate(ctx):
-                return merged_options.complete(ctx), prefix
-            return [], prefix
+                return merged_options.complete(ctx), prefix, f"{cmd_name}  option"
+            return [], prefix, f"{cmd_name}  option"
 
         # Compute positional index relative to this node, ignoring flag tokens
         # and their values.
@@ -771,12 +888,12 @@ class Shell:
                 child = node.children[name]
                 if name.startswith(ctx.prefix):
                     results.append(Completion(value=name, description=child.description))
-            return results, prefix
+            return results, prefix, f"{cmd_name}  subcommand"
 
         # Leaf-or-deeper: use the resolved node's own positional completers.
         positional_completer = node.completers.get(pos_idx)
         if positional_completer is not None and positional_completer.should_activate(ctx):
-            return positional_completer.complete(ctx), prefix
+            return positional_completer.complete(ctx), prefix, _positional_label(node, pos_idx, cmd_name)
 
         # If the node has no positional completer registered for this slot,
         # fall back to file completion only when the node has no positional
@@ -784,8 +901,8 @@ class Shell:
         # matches the flat-command behaviour where a registered completer
         # returning [] suppresses file fallback.
         if not any(isinstance(k, int) for k in node.completers):
-            return self._file_completer.complete(ctx), prefix
-        return [], prefix
+            return self._file_completer.complete(ctx), prefix, cmd_name
+        return [], prefix, cmd_name
 
     def _register_builtins(self) -> None:
         from .completion import (
