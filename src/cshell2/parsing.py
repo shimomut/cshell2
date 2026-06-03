@@ -141,6 +141,11 @@ def tokenize(line: str) -> list[str]:
 
     Returns partial tokens if the line ends mid-word (no trailing space).
     An empty line returns [].
+
+    The backslash keeps its POSIX meaning (escape / line continuation) on every
+    platform — on Windows the shell uses ``/`` as the path separator (like Git
+    Bash / MSYS), which the file APIs accept natively, so paths never collide
+    with escaping.  See completion._to_slash and prompt path rendering.
     """
     try:
         return shlex.split(line)

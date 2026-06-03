@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import os
-import select
-import signal
 import sys
-import termios
-import tty
 import unicodedata
 from typing import Callable, Generic, TypeVar
+
+from . import terminal
 
 T = TypeVar("T")
 
@@ -123,13 +121,8 @@ class InlinePicker(Generic[T]):
         if not self._items:
             return None
 
-        fd = sys.stdin.fileno()
-        old_attrs = termios.tcgetattr(fd)
-        old_sigwinch = signal.getsignal(signal.SIGWINCH)
-
-        sig_r, sig_w = os.pipe()
-        os.set_blocking(sig_w, False)
-        old_wakeup_fd = signal.set_wakeup_fd(sig_w, warn_on_full_buffer=False)
+        self._fd = sys.stdin.fileno()
+        old_attrs = terminal.get_mode(self._fd)
 
         result: T | None = None
         if self._hide_cursor:
@@ -137,13 +130,13 @@ class InlinePicker(Generic[T]):
             sys.stdout.flush()
         try:
             self._update_size()
+            self._last_size = terminal.terminal_size()
             self._reserve()
-            tty.setraw(fd)
-            signal.signal(signal.SIGWINCH, self._on_resize)
+            terminal.set_raw(self._fd)
             self._render()
 
             while True:
-                action = self._dispatch(self._read_key(fd, sig_r))
+                action = self._dispatch(self._read_key())
                 if action == "accept":
                     result = self._items[self._selected] if self._items else None
                     break
@@ -165,11 +158,7 @@ class InlinePicker(Generic[T]):
                     if self._handle_char(action):
                         break
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
-            signal.signal(signal.SIGWINCH, old_sigwinch)
-            signal.set_wakeup_fd(old_wakeup_fd)
-            os.close(sig_r)
-            os.close(sig_w)
+            terminal.restore_mode(self._fd, old_attrs)
             self._cleanup()
             if self._hide_cursor:
                 sys.stdout.write("\x1b[?25h")
@@ -183,9 +172,6 @@ class InlinePicker(Generic[T]):
         sz = os.get_terminal_size()
         self._cols = sz.columns
         self._height = min(self._max_height, len(self._items), max(1, sz.lines - 3))
-
-    def _on_resize(self, _sig, _frame) -> None:
-        self._cancelled = True
 
     # ── drawing ─────────────────────────────────────────────────────────────
 
@@ -352,22 +338,17 @@ class InlinePicker(Generic[T]):
 
     # ── input ───────────────────────────────────────────────────────────────
 
-    def _read_key(self, fd: int, sig_r: int) -> bytes:
+    def _read_key(self) -> bytes:
         while True:
             if self._cancelled:
                 return b"\x1b"  # triggers "cancel" in _dispatch
-            r, _, _ = select.select([fd, sig_r], [], [], 1.0)
-            if sig_r in r:
-                os.read(sig_r, 256)  # drain wakeup bytes, loop to check _cancelled
-                continue
-            if not r:
-                continue
-            data = os.read(fd, 1)
-            if data == b"\x1b":
-                r2, _, _ = select.select([fd], [], [], 0.05)
-                if r2:
-                    data += os.read(fd, 8)
-            return data
+            if terminal.wait_readable(self._fd, 0.1):
+                return terminal.read_key(self._fd)
+            # No key within the poll window — check for a resize so the picker
+            # can cancel. Redrawing after a resize without an alt-screen is
+            # unreliable, so the user just presses TAB again.
+            if terminal.terminal_size() != self._last_size:
+                self._cancelled = True
 
     def _dispatch(self, key: bytes) -> str:
         if key in (b"\r", b"\n"):
@@ -417,23 +398,18 @@ class InlineArgPrompt:
             self._cols = 80
 
     def run(self) -> str | None:
-        fd = sys.stdin.fileno()
-        old_attrs = termios.tcgetattr(fd)
-        old_sigwinch = signal.getsignal(signal.SIGWINCH)
-
-        sig_r, sig_w = os.pipe()
-        os.set_blocking(sig_w, False)
-        old_wakeup_fd = signal.set_wakeup_fd(sig_w, warn_on_full_buffer=False)
+        self._fd = sys.stdin.fileno()
+        old_attrs = terminal.get_mode(self._fd)
+        self._last_size = terminal.terminal_size()
 
         result: str | None = None
         try:
             self._reserve()
-            tty.setraw(fd)
-            signal.signal(signal.SIGWINCH, self._on_resize)
+            terminal.set_raw(self._fd)
             self._render()
 
             while True:
-                key = self._read_key(fd, sig_r)
+                key = self._read_key()
                 if self._cancelled or key in (b"\x1b", b"\x03"):
                     break
                 if key in (b"\r", b"\n"):
@@ -447,17 +423,10 @@ class InlineArgPrompt:
                     self._buf += key.decode()
                     self._render()
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
-            signal.signal(signal.SIGWINCH, old_sigwinch)
-            signal.set_wakeup_fd(old_wakeup_fd)
-            os.close(sig_r)
-            os.close(sig_w)
+            terminal.restore_mode(self._fd, old_attrs)
             self._cleanup()
 
         return result
-
-    def _on_resize(self, _sig, _frame) -> None:
-        self._cancelled = True
 
     def _reserve(self) -> None:
         """Save anchor at col 0 of the current line (caller moved us here).
@@ -484,22 +453,14 @@ class InlineArgPrompt:
         sys.stdout.write("\0338\r\033[J")
         sys.stdout.flush()
 
-    def _read_key(self, fd: int, sig_r: int) -> bytes:
+    def _read_key(self) -> bytes:
         while True:
             if self._cancelled:
                 return b"\x1b"
-            r, _, _ = select.select([fd, sig_r], [], [], 1.0)
-            if sig_r in r:
-                os.read(sig_r, 256)
-                continue
-            if not r:
-                continue
-            data = os.read(fd, 1)
-            if data == b"\x1b":
-                r2, _, _ = select.select([fd], [], [], 0.05)
-                if r2:
-                    data += os.read(fd, 8)
-            return data
+            if terminal.wait_readable(self._fd, 0.1):
+                return terminal.read_key(self._fd)
+            if terminal.terminal_size() != self._last_size:
+                self._cancelled = True
 
 
 class InlineMultiPicker(Generic[T]):
@@ -542,24 +503,19 @@ class InlineMultiPicker(Generic[T]):
         if not self._items:
             return None
 
-        fd = sys.stdin.fileno()
-        old_attrs = termios.tcgetattr(fd)
-        old_sigwinch = signal.getsignal(signal.SIGWINCH)
-
-        sig_r, sig_w = os.pipe()
-        os.set_blocking(sig_w, False)
-        old_wakeup_fd = signal.set_wakeup_fd(sig_w, warn_on_full_buffer=False)
+        self._fd = sys.stdin.fileno()
+        old_attrs = terminal.get_mode(self._fd)
 
         result: list[T] | None = None
         try:
             self._update_size()
+            self._last_size = terminal.terminal_size()
             self._reserve()
-            tty.setraw(fd)
-            signal.signal(signal.SIGWINCH, self._on_resize)
+            terminal.set_raw(self._fd)
             self._render()
 
             while True:
-                action = self._dispatch(self._read_key(fd, sig_r))
+                action = self._dispatch(self._read_key())
                 if action == "accept":
                     if self._checked:
                         result = [self._items[i] for i in sorted(self._checked)]
@@ -585,11 +541,7 @@ class InlineMultiPicker(Generic[T]):
                     self._jump_to(action[5:])
                     self._render()
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
-            signal.signal(signal.SIGWINCH, old_sigwinch)
-            signal.set_wakeup_fd(old_wakeup_fd)
-            os.close(sig_r)
-            os.close(sig_w)
+            terminal.restore_mode(self._fd, old_attrs)
             self._cleanup()
 
         return result
@@ -600,9 +552,6 @@ class InlineMultiPicker(Generic[T]):
         sz = os.get_terminal_size()
         self._cols = sz.columns
         self._height = min(self._max_height, len(self._items), max(1, sz.lines - 3))
-
-    def _on_resize(self, _sig, _frame) -> None:
-        self._cancelled = True
 
     # ── drawing ─────────────────────────────────────────────────────────────
 
@@ -697,22 +646,14 @@ class InlineMultiPicker(Generic[T]):
 
     # ── input ───────────────────────────────────────────────────────────────
 
-    def _read_key(self, fd: int, sig_r: int) -> bytes:
+    def _read_key(self) -> bytes:
         while True:
             if self._cancelled:
                 return b"\x1b"
-            r, _, _ = select.select([fd, sig_r], [], [], 1.0)
-            if sig_r in r:
-                os.read(sig_r, 256)
-                continue
-            if not r:
-                continue
-            data = os.read(fd, 1)
-            if data == b"\x1b":
-                r2, _, _ = select.select([fd], [], [], 0.05)
-                if r2:
-                    data += os.read(fd, 8)
-            return data
+            if terminal.wait_readable(self._fd, 0.1):
+                return terminal.read_key(self._fd)
+            if terminal.terminal_size() != self._last_size:
+                self._cancelled = True
 
     def _dispatch(self, key: bytes) -> str:
         if key in (b"\r", b"\n"):

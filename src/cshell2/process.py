@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import collections
-import fcntl
 import os
-import pty
-import select
 import struct
 import sys
-import termios
 import threading
+
+# PTY-backed process multiplexing is POSIX-only.  On Windows these modules do
+# not exist; ProcessSlot is simply never instantiated there (the shell runs
+# external commands on the real console instead), but OutputBuffer and the
+# module itself must still import cleanly.
+if os.name != "nt":
+    import fcntl
+    import pty
+    import select
+    import termios
 
 
 class OutputBuffer:

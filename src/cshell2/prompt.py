@@ -52,13 +52,18 @@ def default_prompt(context_manager: "ContextManager") -> str:
         if len(rel_parts) <= 2:
             short_path = "~/" + rel
         else:
-            short_path = os.sep.join(rel_parts[-2:])
+            short_path = "/".join(rel_parts[-2:])
     else:
         abs_parts = cwd.lstrip(os.sep).split(os.sep)
         if len(abs_parts) <= 2:
-            short_path = "/" + os.sep.join(abs_parts)
+            # POSIX absolute paths need their leading separator restored;
+            # Windows paths carry their drive letter (C:\...) already.
+            prefix = "" if os.name == "nt" else "/"
+            short_path = prefix + "/".join(abs_parts)
         else:
-            short_path = os.sep.join(abs_parts[-2:])
+            short_path = "/".join(abs_parts[-2:])
+    # The shell uses '/' as the canonical separator on every platform.
+    short_path = short_path.replace(os.sep, "/") if os.altsep else short_path
 
     timestamp = datetime.now().strftime("%H:%M:%S")
     parts.append(f"{BLUE_BOLD}{short_path}{RESET}")

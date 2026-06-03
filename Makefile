@@ -1,24 +1,41 @@
 VENV := .venv
-PYTHON := $(VENV)/bin/python
-PIP := $(VENV)/bin/pip
 
-.PHONY: install test clean run
+ifeq ($(OS),Windows_NT)
+    # Windows: venv scripts live in Scripts/, executables end in .exe
+    PYTHON_BOOTSTRAP := c:/Python314/python.exe
+    VENV_BIN := $(VENV)/Scripts
+    PYTHON := $(VENV_BIN)/python.exe
+    PIP := $(VENV_BIN)/pip.exe
+    PYTEST := $(VENV_BIN)/pytest.exe
+    VENV_STAMP := $(VENV_BIN)/activate
+else
+    # Unix: venv binaries live in bin/
+    PYTHON_BOOTSTRAP := python3.14
+    VENV_BIN := $(VENV)/bin
+    PYTHON := $(VENV_BIN)/python
+    PIP := $(VENV_BIN)/pip
+    PYTEST := $(VENV_BIN)/pytest
+    VENV_STAMP := $(VENV_BIN)/activate
+endif
 
-$(VENV)/bin/activate:
-	python3.14 -m venv $(VENV)
-	$(PIP) install --upgrade pip
-	$(PIP) install -e .
-	$(PIP) install pytest
+.PHONY: install test clean run install-launcher
 
-install: $(VENV)/bin/activate
+$(VENV_STAMP):
+	"$(PYTHON_BOOTSTRAP)" -m venv $(VENV)
+	"$(PYTHON)" -m pip install --upgrade pip
+	"$(PYTHON)" -m pip install -e .
+	"$(PYTHON)" -m pip install pytest
 
-test: $(VENV)/bin/activate
-	$(VENV)/bin/pytest tests/ -v
+install: $(VENV_STAMP)
 
-run: $(VENV)/bin/activate
-	$(PYTHON) -m cshell2
+test: $(VENV_STAMP)
+	"$(PYTHON)" -m pytest tests/ -v
+
+run: $(VENV_STAMP)
+	"$(PYTHON)" -m cshell2
+
+install-launcher: $(VENV_STAMP)
+	"$(PYTHON)" scripts/install_launcher.py
 
 clean:
-	rm -rf $(VENV)
-	rm -rf src/cshell2.egg-info
-	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	"$(PYTHON_BOOTSTRAP)" -c "import shutil, pathlib; shutil.rmtree('$(VENV)', ignore_errors=True); shutil.rmtree('src/cshell2.egg-info', ignore_errors=True); [shutil.rmtree(p, ignore_errors=True) for p in pathlib.Path('.').rglob('__pycache__')]"

@@ -3,22 +3,29 @@
 from __future__ import annotations
 
 import ctypes
-import fcntl
 import io
 import os
-import pty
 import re
 import select
 import signal
 import struct
 import subprocess
 import sys
-import termios
 import threading
 import traceback
-import tty
 from pathlib import Path
 
+# PTY multiplexing and raw-mode forwarding are POSIX-only.  On Windows these
+# modules are absent and the code paths that use them are never reached (the
+# shell runs external commands on the real console — see _execute_external).
+IS_WINDOWS = os.name == "nt"
+if not IS_WINDOWS:
+    import fcntl
+    import pty
+    import termios
+    import tty
+
+from . import terminal
 from .commands import arg, CommandRegistry, registry as command_registry
 from .completion import (
     CommandNameCompleter,
@@ -549,6 +556,9 @@ def _positional_index(args: list[str], options_completer) -> int:
 
 class Shell:
     def __init__(self):
+        # Enable VT output / disable newline translation (Windows) before any
+        # rendering or stdout wrapping happens.
+        terminal.init()
         self.registry = command_registry
         self.context_manager = ContextManager()
         self.context_manager.create("default")
@@ -1297,6 +1307,12 @@ class Shell:
                             stderr_override.close()
                         except Exception:
                             pass
+            elif IS_WINDOWS:
+                # Windows lacks the PTY-backed slot used for thread-based
+                # context switching, so run the Python command synchronously.
+                # passthrough_run/passthrough_input fall back to direct
+                # subprocess.run/input since no slot is registered.
+                self._run_python_command_sync(cmd, command_name, args)
             else:
                 # Interactive Python command — run in a thread so Ctrl+] works.
                 ctx = self.context_manager.current()
@@ -1361,7 +1377,47 @@ class Shell:
             self._execute_external(command_name, args)
             return 0
 
+    def _run_python_command_sync(self, cmd, command_name: str, args: list[str]) -> None:
+        """Invoke a Python command on the main thread (Windows path)."""
+        try:
+            cmd.invoke(args)
+        except SystemExit:
+            raise
+        except KeyboardInterrupt:
+            print(f"{command_name}: interrupted")
+        except TypeError as e:
+            print(f"{command_name}: {e}")
+        except Exception as e:
+            print(f"{command_name}: error: {e}")
+            traceback.print_exc()
+
+    def _execute_external_windows(self, command_name: str, args: list[str]) -> None:
+        """Run an external command on the real console (Windows path).
+
+        Without ConPTY-based multiplexing, the child simply inherits the
+        terminal's stdio. Commands that are cmd.exe builtins (dir, echo, cls,
+        …) rather than real executables are retried via ``cmd /c``.
+        """
+        argv = [command_name] + args
+        env = dict(os.environ)
+        cwd = os.getcwd()
+        try:
+            subprocess.run(argv, env=env, cwd=cwd)
+        except FileNotFoundError:
+            try:
+                subprocess.run(["cmd", "/c", *argv], env=env, cwd=cwd)
+            except FileNotFoundError:
+                print(f"cshell2: command not found: {command_name}")
+            except OSError as e:
+                print(f"cshell2: {e}")
+        except OSError as e:
+            print(f"cshell2: {e}")
+
     def _execute_external(self, command_name: str, args: list[str]) -> None:
+        if IS_WINDOWS:
+            self._execute_external_windows(command_name, args)
+            return
+
         ctx = self.context_manager.current()
 
         slot = ProcessSlot()
@@ -1786,6 +1842,11 @@ class Shell:
         return answer in ("y", "yes")
 
     def _install_sigwinch_handler(self) -> None:
+        # No SIGWINCH on Windows; live-process resize forwarding is part of the
+        # PTY multiplexing path, which is POSIX-only.
+        if not terminal.HAS_SIGWINCH:
+            return
+
         def on_resize(signum, frame):
             ctx = self.context_manager.current()
             if ctx and ctx.process_slot and ctx.process_slot.is_alive():
