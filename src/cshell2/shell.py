@@ -835,12 +835,16 @@ class Shell:
         # Caret is on a positional arg.
         pos_idx = _positional_index(remaining_args, options_completer)
 
-        # For tree commands: if this slot is a sub-command name, show its description.
-        if node is not None and node.children and pos_idx == 0 and token in node.children:
-            child = node.children[token]
-            if child.description:
-                return f"{command_name} {token}: {child.description}"
-            return f"{command_name} {token}"
+        # For tree commands: if this slot is a sub-command name, show its
+        # description (or fall back to "<cmd> subcommand" for a partial token
+        # that doesn't yet match a child — mirrors _complete_tree_node).
+        if node is not None and node.children and pos_idx == 0:
+            if token in node.children:
+                child = node.children[token]
+                if child.description:
+                    return f"{command_name} {token}: {child.description}"
+                return f"{command_name} {token}"
+            return f"{command_name} subcommand"
 
         return _positional_label(node if node is not None else cmd, pos_idx, command_name)
 
