@@ -212,11 +212,13 @@ class LineEditor:
                 if result is not None:
                     self._cursor = len(self._buf)
                     self._redraw()
+                    self._clear_status_bar()
                     sys.stdout.write("\r\n")
                     sys.stdout.flush()
                     return result
                 self._redraw()
         except (EOFError, KeyboardInterrupt):
+            self._clear_status_bar()
             sys.stdout.write("\r\n")
             sys.stdout.flush()
             raise
@@ -267,6 +269,23 @@ class LineEditor:
         sys.stdout.write("\r\033[J")
         sys.stdout.write(self._prompt_str + self._buf)
 
+        # Decide whether the status bar needs to render.
+        from .tui import _statusbar
+        statusbar_str: str | None = None
+        if self._hint:
+            statusbar_str = _statusbar(self._hint, "", self._cols)
+        elif self._get_arg_info is not None:
+            info = self._get_arg_info(self._buf, self._cursor)
+            if info:
+                statusbar_str = _statusbar(info, "", self._cols)
+
+        # When the status bar will be drawn, ensure the bottom row is free. If
+        # end-of-content sits on the terminal's last row, \n triggers a scroll
+        # (raw mode keeps the column); the matching \033[A returns to the same
+        # visual position. When not at the bottom, the pair is a visual no-op.
+        if statusbar_str is not None:
+            sys.stdout.write("\n\033[A")
+
         # Compute cursor position within the render for next resize.
         self._cursor_row = _pending_wrap_row(cursor_char, cols)
 
@@ -283,16 +302,6 @@ class LineEditor:
         cursor_col = _pending_wrap_col(cursor_char, cols)
         sys.stdout.write(f"\033[{cursor_col + 1}G")
 
-        # Render arg-hint or token description in the status bar; clear when gone.
-        from .tui import _statusbar
-        statusbar_str: str | None = None
-        if self._hint:
-            statusbar_str = _statusbar(self._hint, "", self._cols)
-        elif self._get_arg_info is not None:
-            info = self._get_arg_info(self._buf, self._cursor)
-            if info:
-                statusbar_str = _statusbar(info, "", self._cols)
-
         if statusbar_str is not None:
             sys.stdout.write("\0337")
             sys.stdout.write(f"\033[{self._lines};1H")
@@ -306,6 +315,20 @@ class LineEditor:
             self._status_bar_visible = False
 
         sys.stdout.flush()
+
+    def _clear_status_bar(self) -> None:
+        """Wipe the status bar from the bottom row before yielding the terminal.
+
+        Called when prompt() is about to return so that command output (or the
+        next prompt) doesn't have to fight with leftover status-bar pixels.
+        """
+        if not self._status_bar_visible:
+            return
+        sys.stdout.write("\0337")
+        sys.stdout.write(f"\033[{self._lines};1H\033[2K")
+        sys.stdout.write("\0338")
+        sys.stdout.flush()
+        self._status_bar_visible = False
 
     # ── input ────────────────────────────────────────────────────────────────
 
