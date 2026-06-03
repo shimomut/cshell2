@@ -58,6 +58,14 @@ def _wcs_ljust(s: str, width: int) -> str:
     return s + " " * max(0, width - _wcswidth(s))
 
 
+def _statusbar(hints: str, cols: int) -> str:
+    """Render a full-width status-bar string for the bottom line of the terminal."""
+    s = get_color_scheme()
+    text = f"  {hints}  "
+    padded = _wcs_ljust(_wcs_clip(text, cols), cols)
+    return f"{_bg(*s.statusbar_bg)}{_fg(*s.statusbar_fg)}{padded}\033[0m"
+
+
 def _common_prefix(strings: list[str]) -> str:
     if not strings:
         return ""
@@ -115,6 +123,7 @@ class InlinePicker(Generic[T]):
         self._selected = 0
         self._offset = 0
         self._cols = 80
+        self._lines = 24
         self._height = min(max_height, len(items))
         self._cancelled = False
 
@@ -172,7 +181,8 @@ class InlinePicker(Generic[T]):
     def _update_size(self) -> None:
         sz = os.get_terminal_size()
         self._cols = sz.columns
-        self._height = min(self._max_height, len(self._items), max(1, sz.lines - 3))
+        self._lines = sz.lines
+        self._height = min(self._max_height, len(self._items), max(1, sz.lines - 4))
 
     # ── drawing ─────────────────────────────────────────────────────────────
 
@@ -202,6 +212,14 @@ class InlinePicker(Generic[T]):
         if self._rows_above > 0:
             out.append(f"\033[{self._rows_above}A")
         caret_col_now = self._col + self._initial_offset + len(self._typed)
+        out.append(f"\033[{caret_col_now + 1}G")
+
+        # Draw status bar at the bottom line, then return to caret via anchor.
+        out.append(f"\033[{self._lines};1H")
+        out.append(_statusbar("↑↓ Navigate   Enter Select   Esc Cancel", self._cols))
+        out.append("\0338")
+        if self._rows_above > 0:
+            out.append(f"\033[{self._rows_above}A")
         out.append(f"\033[{caret_col_now + 1}G")
 
         sys.stdout.write("".join(out))
@@ -395,9 +413,12 @@ class InlineArgPrompt:
         self._buf = ""
         self._cancelled = False
         try:
-            self._cols = os.get_terminal_size().columns
+            sz = os.get_terminal_size()
+            self._cols = sz.columns
+            self._lines = sz.lines
         except OSError:
             self._cols = 80
+            self._lines = 24
 
     def run(self) -> str | None:
         self._fd = sys.stdin.fileno()
@@ -448,6 +469,14 @@ class InlineArgPrompt:
         # \r ensures col 0 — raw-mode \n is a bare line-feed and leaves the
         # cursor at the column where the description text ended.
         out.append(f"\r\033[2m{self._label}:\033[0m {self._buf}")
+        # Draw status bar at the bottom line, then return to end-of-input via anchor.
+        cursor_col = _wcswidth(self._label) + 2 + _wcswidth(self._buf)
+        out.append(f"\033[{self._lines};1H")
+        out.append(_statusbar("Enter Confirm   Esc Cancel", self._cols))
+        out.append("\0338")  # restore to anchor
+        if self._description:
+            out.append("\033[B\r")  # down to label row, col 0
+        out.append(f"\033[{cursor_col + 1}G")
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
@@ -496,6 +525,7 @@ class InlineMultiPicker(Generic[T]):
         self._offset = 0
         self._checked: set[int] = set()
         self._cols = 80
+        self._lines = 24
         self._height = min(max_height, len(items))
         self._cancelled = False
         self._label_col_w = max((_wcswidth(display_fn(item)) for item in items), default=4)
@@ -553,7 +583,8 @@ class InlineMultiPicker(Generic[T]):
     def _update_size(self) -> None:
         sz = os.get_terminal_size()
         self._cols = sz.columns
-        self._height = min(self._max_height, len(self._items), max(1, sz.lines - 3))
+        self._lines = sz.lines
+        self._height = min(self._max_height, len(self._items), max(1, sz.lines - 4))
 
     # ── drawing ─────────────────────────────────────────────────────────────
 
@@ -593,6 +624,14 @@ class InlineMultiPicker(Generic[T]):
         # CHA (\033[{N}G) sets the column atomically — `\r` + cursor-forward
         # flickers because the terminal briefly renders the caret at col 0.
         out.append("\0338\0337")
+        if self._rows_above > 0:
+            out.append(f"\033[{self._rows_above}A")
+        out.append(f"\033[{self._caret_col + 1}G")
+
+        # Draw status bar at the bottom line, then return to caret via anchor.
+        out.append(f"\033[{self._lines};1H")
+        out.append(_statusbar("↑↓ Navigate   Space Toggle   Enter Confirm   Esc Cancel", self._cols))
+        out.append("\0338")
         if self._rows_above > 0:
             out.append(f"\033[{self._rows_above}A")
         out.append(f"\033[{self._caret_col + 1}G")
