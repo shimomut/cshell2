@@ -554,6 +554,17 @@ def _positional_index(args: list[str], options_completer) -> int:
     return pos
 
 
+def _flag_label(flag: str, arg_hint: str, description: str) -> str:
+    """Consistent status-bar label for a flag, used across all call sites."""
+    if arg_hint and description:
+        return f"{flag} <{arg_hint}>: {description}"
+    if description:
+        return f"{flag}: {description}"
+    if arg_hint:
+        return f"{flag} <{arg_hint}>"
+    return flag
+
+
 def _positional_label(cmd, pos_idx: int, command_name: str) -> str:
     """Return a status-bar label for the positional argument at *pos_idx*.
 
@@ -699,7 +710,7 @@ class Shell:
                 hint_info = options_completer.get_preceding_flag_hint(ctx)
                 if hint_info:
                     flag, arg_hint, description, value_completer = hint_info
-                    flag_label = f"{flag}: {description}" if description else f"{flag} <{arg_hint}>"
+                    flag_label = _flag_label(flag, arg_hint, description)
                     if value_completer:
                         # Flag has a dedicated value completer (e.g. -C DIR → DirCompleter).
                         return value_completer.complete(ctx), ctx.prefix, flag_label
@@ -806,12 +817,9 @@ class Shell:
             if options_completer is None or not hasattr(options_completer, "options"):
                 return None
             desc = options_completer.options.get(token, "")
-            if desc:
-                return f"{token}: {desc}"
             arg_hint = getattr(options_completer, "args", {}).get(token, "")
-            if arg_hint:
-                return f"{token} <{arg_hint}>"
-            return None
+            result = _flag_label(token, arg_hint, desc)
+            return result if result != token else None
 
         # ── Non-flag token: positional arg or value for a preceding flag ───────
 
@@ -820,12 +828,9 @@ class Shell:
             # Caret is on a flag value — show the flag's description.
             flag = remaining_args[-1]
             desc = getattr(options_completer, "options", {}).get(flag, "")
-            if desc:
-                return f"{flag}: {desc}"
             arg_hint = getattr(options_completer, "args", {}).get(flag, "")
-            if arg_hint:
-                return f"{flag} <{arg_hint}>"
-            return None
+            result = _flag_label(flag, arg_hint, desc)
+            return result if result != flag else None
 
         # Caret is on a positional arg.
         pos_idx = _positional_index(remaining_args, options_completer)

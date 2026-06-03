@@ -287,12 +287,7 @@ class LineEditor:
         from .tui import _statusbar
         statusbar_str: str | None = None
         if self._hint:
-            text = self._hint.strip()
-            if "  —  " in text:
-                label_part, desc_part = text.split("  —  ", 1)
-            else:
-                label_part, desc_part = text, ""
-            statusbar_str = _statusbar(label_part, desc_part, self._cols)
+            statusbar_str = _statusbar(self._hint, "", self._cols)
         elif self._get_arg_info is not None:
             info = self._get_arg_info(self._buf, self._cursor)
             if info:
@@ -539,10 +534,10 @@ class LineEditor:
             # picker or modifying the buffer — cleared by the next _redraw().
             if len(completions) == 1 and completions[0].is_arg_hint:
                 hint = completions[0]
-                text = f"  {hint.value} <{hint.arg_hint}>"
                 if hint.description:
-                    text += f"  —  {hint.description}"
-                self._hint = text  # rendered by _redraw(); cleared on next keypress
+                    self._hint = f"{hint.value} <{hint.arg_hint}>: {hint.description}"
+                else:
+                    self._hint = f"{hint.value} <{hint.arg_hint}>"
                 return
 
             # Single value-taking option: auto-apply then re-run the loop.
@@ -708,10 +703,10 @@ class LineEditor:
                 # They type the value directly; any remaining flags wait for next TAB.
                 hint_comp = next((c for c in value_comps if c.is_arg_hint), None)
                 if hint_comp:
-                    text = f"  {hint_comp.value} <{hint_comp.arg_hint}>"
                     if hint_comp.description:
-                        text += f"  —  {hint_comp.description}"
-                    self._hint = text
+                        self._hint = f"{hint_comp.value} <{hint_comp.arg_hint}>: {hint_comp.description}"
+                    else:
+                        self._hint = f"{hint_comp.value} <{hint_comp.arg_hint}>"
                 break
 
     def _history_search(self, fd: int) -> None:
@@ -849,7 +844,9 @@ class LineEditor:
         end_col = _pending_wrap_col(end_char, self._cols)
         caret_row = self._cursor_row  # updated by _redraw()
 
-        if opt.description:
+        if opt.arg_hint and opt.description:
+            _flag_label = f"{opt.value} <{opt.arg_hint}>: {opt.description}"
+        elif opt.description:
             _flag_label = f"{opt.value}: {opt.description}"
         elif opt.arg_hint:
             _flag_label = f"{opt.value} <{opt.arg_hint}>"
