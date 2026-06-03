@@ -9,7 +9,8 @@ from cshell2.completion import ChoiceCompleter
 @command_registry.command(
     name="hello",
     help="Greet someone by name.",        # shell-facing description; no docstring needed
-    params=[arg("name", nargs="?", default="world", completer=ChoiceCompleter(["world", "there"]))],
+    params=[arg("name", nargs="?", default="world", help="name of the person to greet",
+                completer=ChoiceCompleter(["world", "there"]))],
 )
 def hello(name):
     print(f"Hello, {name}!")
@@ -45,9 +46,11 @@ deploy = command_registry.command(
     help="Deploy a service to an environment.",
     params=[
         # choices= drives argparse validation AND TAB completion simultaneously.
-        arg("environment", choices=["prod", "staging", "dev"]),
+        arg("environment", choices=["prod", "staging", "dev"],
+                           help="target environment"),
         arg("service",     nargs="?", default="all",
-                           choices=["api", "web", "worker"]),
+                           choices=["api", "web", "worker"],
+                           help="service to deploy, or 'all'"),
         # Value-taking flags: completer= drives TAB completion for the value.
         arg("-t", "--timeout", type=int, default=60, metavar="SECONDS",
                                help="deployment timeout in seconds",
@@ -82,9 +85,11 @@ def deploy_app(environment, service, dry_run, verbose, timeout, branch):
     "rollback",
     help="Roll back a deployment to the previous revision.",
     params=[
-        arg("environment", choices=["prod", "staging", "dev"]),
+        arg("environment", choices=["prod", "staging", "dev"],
+                           help="target environment"),
         arg("service",     nargs="?", default="all",
-                           choices=["api", "web", "worker"]),
+                           choices=["api", "web", "worker"],
+                           help="service to roll back, or 'all'"),
     ],
 )
 def deploy_rollback(environment, service, dry_run, verbose):
@@ -100,7 +105,8 @@ def deploy_rollback(environment, service, dry_run, verbose):
     "status",
     help="Show deployment status for an environment.",
     params=[
-        arg("environment", choices=["prod", "staging", "dev"]),
+        arg("environment", choices=["prod", "staging", "dev"],
+                           help="environment to inspect"),
     ],
 )
 def deploy_status(environment, verbose):

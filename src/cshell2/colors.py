@@ -27,6 +27,9 @@ class ColorScheme:
     picker_sel_fg: tuple[int, int, int] = (255, 255, 255)
     picker_scroll_thumb: tuple[int, int, int] = (128, 128, 128)
     picker_scroll_track: tuple[int, int, int] = (48, 48, 48)
+    # Status bar (bottom line shown while TUI is active)
+    statusbar_bg: tuple[int, int, int] = (30, 30, 30)
+    statusbar_fg: tuple[int, int, int] = (130, 130, 130)
 
 
 SCHEMES: dict[str, ColorScheme] = {
@@ -42,6 +45,8 @@ SCHEMES: dict[str, ColorScheme] = {
         picker_sel_fg=(255, 255, 255),
         picker_scroll_thumb=(160, 160, 160),
         picker_scroll_track=(200, 200, 200),
+        statusbar_bg=(195, 210, 225),
+        statusbar_fg=(60, 60, 80),
     ),
 }
 
