@@ -559,6 +559,7 @@ class Shell:
         # Enable VT output / disable newline translation (Windows) before any
         # rendering or stdout wrapping happens.
         terminal.init()
+        os.environ.setdefault("PWD", os.getcwd())
         self.registry = command_registry
         self.context_manager = ContextManager()
         self.context_manager.create("default")
@@ -800,6 +801,7 @@ class Shell:
             target = os.path.expanduser(path)
             try:
                 os.chdir(target)
+                os.environ["PWD"] = os.getcwd()
             except OSError as e:
                 print(f"cd: {e}")
 
