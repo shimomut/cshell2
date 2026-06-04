@@ -57,4 +57,4 @@ def register() -> None:
         1: FileCompleter(),
         2: FileCompleter(),
         3: FileCompleter(),
-    })
+    }, description="change file mode bits")

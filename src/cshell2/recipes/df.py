@@ -38,4 +38,4 @@ def register() -> None:
         None: OptionsCompleter(DF_OPTIONS, args=DF_ARGS),
         0: FileCompleter(),
         1: FileCompleter(),
-    })
+    }, description="report file system disk space usage")

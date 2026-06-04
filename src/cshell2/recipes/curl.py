@@ -150,4 +150,4 @@ def register() -> None:
         return
     command_registry.register_external_completers("curl", {
         None: OptionsCompleter(CURL_OPTIONS, args=CURL_ARGS),
-    })
+    }, description="transfer data from or to a URL")

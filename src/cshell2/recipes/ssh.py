@@ -99,4 +99,4 @@ def register() -> None:
     command_registry.register_external_completers("ssh", {
         None: OptionsCompleter(SSH_OPTIONS, args=SSH_ARGS),
         0: SSHHostCompleter(),
-    })
+    }, description="OpenSSH remote login client")

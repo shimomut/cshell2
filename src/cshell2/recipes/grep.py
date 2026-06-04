@@ -57,5 +57,13 @@ def register() -> None:
         1: FileCompleter(),
         2: FileCompleter(),
     }
+    descriptions = {
+        "grep":  "print lines matching a pattern",
+        "egrep": "print lines matching an extended regex pattern",
+        "fgrep": "print lines matching fixed strings",
+        "rgrep": "recursively print lines matching a pattern",
+    }
     for cmd in ("grep", "egrep", "fgrep", "rgrep"):
-        command_registry.register_external_completers(cmd, completers)
+        command_registry.register_external_completers(
+            cmd, completers, description=descriptions[cmd],
+        )

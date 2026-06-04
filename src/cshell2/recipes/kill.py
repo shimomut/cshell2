@@ -83,7 +83,7 @@ def register() -> None:
         None: OptionsCompleter(KILL_OPTIONS),
         0: ProcessCompleter(),
         1: ProcessCompleter(),
-    })
+    }, description="send a signal to a process")
     command_registry.register_external_completers("pkill", {
         0: ProcessNameCompleter(),
-    })
+    }, description="send a signal to processes by name")

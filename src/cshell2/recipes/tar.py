@@ -128,4 +128,4 @@ def register() -> None:
         2: FileCompleter(),
         3: FileCompleter(),
         4: FileCompleter(),
-    })
+    }, description="create, extract, or list tar archives")

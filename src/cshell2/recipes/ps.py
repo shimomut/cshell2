@@ -83,4 +83,4 @@ def register() -> None:
         return
     command_registry.register_external_completers("ps", {
         None: OptionsCompleter(_PS_OPTIONS, args=_PS_ARGS),
-    })
+    }, description="report a snapshot of current processes")

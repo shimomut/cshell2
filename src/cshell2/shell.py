@@ -789,6 +789,9 @@ class Shell:
             cmd = self.registry.get(token)
             if cmd is not None and cmd.description:
                 return f"{token}: {cmd.description}"
+            ext_desc = self.registry.get_external_description(token)
+            if ext_desc:
+                return f"{token}: {ext_desc}"
             return None
 
         command_name = tokens_before[0]

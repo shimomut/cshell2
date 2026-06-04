@@ -592,6 +592,7 @@ class CommandRegistry:
     def __init__(self):
         self._commands: dict[str, Command] = {}
         self._external_completers: dict[str, dict[int | None, Completer]] = {}
+        self._external_descriptions: dict[str, str] = {}
         self._builtin_names: set[str] = set()
         self._aliases: dict[str, str] = {}
         self._builtin_aliases: set[str] = set()
@@ -673,6 +674,7 @@ class CommandRegistry:
         self,
         command_name: str,
         completers: dict[int | None, Completer],
+        description: str = "",
     ) -> None:
         """Register completers for an external (system) command.
 
@@ -682,12 +684,22 @@ class CommandRegistry:
             registry.register_external_completers("ls", {
                 None: OptionsCompleter({"-l": "long format", ...}),
                 0: FileCompleter(),
-            })
+            }, description="list directory contents")
+
+        ``description`` is a one-line summary of the command, surfaced in the
+        status bar when the caret is on the command name (mirroring ``help=``
+        on Python commands).
         """
         self._external_completers[command_name] = completers
+        if description:
+            self._external_descriptions[command_name] = description
 
     def get_external_completers(self, command_name: str) -> dict[int | None, Completer] | None:
         return self._external_completers.get(command_name)
+
+    def get_external_description(self, command_name: str) -> str:
+        """Return the recipe-supplied one-line description for *command_name*."""
+        return self._external_descriptions.get(command_name, "")
 
     def get(self, name: str) -> Command | None:
         return self._commands.get(name)
@@ -709,6 +721,7 @@ class CommandRegistry:
             k: v for k, v in self._commands.items() if k in self._builtin_names
         }
         self._external_completers.clear()
+        self._external_descriptions.clear()
         self._aliases = {
             k: v for k, v in self._aliases.items() if k in self._builtin_aliases
         }

@@ -103,4 +103,4 @@ def register() -> None:
         options, args = _LINUX_OPTIONS, _LINUX_ARGS
     command_registry.register_external_completers("top", {
         None: OptionsCompleter(options, args=args),
-    })
+    }, description="display tasks and system resource usage")

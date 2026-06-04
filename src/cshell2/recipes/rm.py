@@ -57,4 +57,4 @@ def register() -> None:
         2: FileCompleter(),
         3: FileCompleter(),
         4: FileCompleter(),
-    })
+    }, description="remove files or directories")

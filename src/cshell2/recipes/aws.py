@@ -251,6 +251,7 @@ class _AwsCompletersDict(dict):
 def register() -> None:
     command_registry.register_external_completers(
         "aws", _AwsCompletersDict(AwsCompleter()),
+        description="AWS Command Line Interface",
     )
 
     var_registry.register(_AwsRegionVar())

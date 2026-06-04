@@ -215,4 +215,5 @@ def register() -> None:
             OptionsCompleter(WATCH_OPTIONS, args=WATCH_ARGS),
             _WatchDispatcher(),
         ),
+        description="execute a program periodically, showing output",
     )

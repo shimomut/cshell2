@@ -83,4 +83,4 @@ def register() -> None:
         2: FileCompleter(),
         3: FileCompleter(),
         4: FileCompleter(),
-    })
+    }, description="copy files and directories")

@@ -111,4 +111,4 @@ def register() -> None:
         1: completer,
         2: completer,
         3: completer,
-    })
+    }, description="secure copy files between hosts over SSH")

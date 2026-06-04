@@ -100,4 +100,4 @@ def register() -> None:
         1: FileCompleter(),
         2: FileCompleter(),
         3: FileCompleter(),
-    })
+    }, description="list, test, or extract files from a zip archive")

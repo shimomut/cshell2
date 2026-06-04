@@ -81,4 +81,4 @@ def register() -> None:
         None: OptionsCompleter(FIND_OPTIONS, args=FIND_ARGS),
         0: FileCompleter(),
         1: FileCompleter(),
-    })
+    }, description="search for files in a directory hierarchy")

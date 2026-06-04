@@ -305,13 +305,13 @@ Python commands declare positionals and flags via a single `params=[arg(...)]` l
 def ssh_instance(account, region, instance_id, verbose=False, port=22): ...
 ```
 
-External completers for system commands take the underlying `{None: ..., N: ...}` dict directly:
+External completers for system commands take the underlying `{None: ..., N: ...}` dict directly. An optional `description=` surfaces a one-line summary in the status bar when the caret is on the command name (mirroring `help=` on Python commands):
 
 ```python
 registry.register_external_completers("git", {
     None: OptionsCompleter({"-v": "verbose", "--no-pager": "no pager"}),
     0: ChoiceCompleter(["commit", "push", "pull", ...]),
-})
+}, description="distributed version control")
 ```
 
 #### OptionsCompleter — Multi-Select Flag Picker
@@ -548,7 +548,7 @@ def register():
         ),
         0: ChoiceCompleter(["deploy", "rollback", "status"]),
         1: CallbackCompleter(lambda: _list_targets()),
-    })
+    }, description="my-tool — deploy/rollback/status helper")
 
 def _list_targets():
     return ["web", "worker", "scheduler"]

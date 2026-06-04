@@ -86,4 +86,4 @@ def register() -> None:
         0: FileCompleter(),
         1: FileCompleter(),
         2: FileCompleter(),
-    })
+    }, description="estimate file space usage")

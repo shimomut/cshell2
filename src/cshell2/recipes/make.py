@@ -96,4 +96,4 @@ def register() -> None:
     command_registry.register_external_completers("make", {
         None: OptionsCompleter(MAKE_OPTIONS, args=MAKE_ARGS),
         **{i: target_completer for i in range(3)},
-    })
+    }, description="build targets from a Makefile")

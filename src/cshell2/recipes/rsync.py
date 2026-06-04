@@ -170,4 +170,4 @@ def register() -> None:
         2: completer,
         3: completer,
         4: completer,
-    })
+    }, description="fast, incremental file transfer (local or over SSH)")

@@ -57,4 +57,4 @@ def register() -> None:
         2: FileCompleter(),
         3: FileCompleter(),
         4: FileCompleter(),
-    })
+    }, description="package and compress files into a zip archive")

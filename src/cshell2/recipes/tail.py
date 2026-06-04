@@ -27,4 +27,4 @@ def register() -> None:
         0: FileCompleter(),
         1: FileCompleter(),
         2: FileCompleter(),
-    })
+    }, description="output the last part of files")
