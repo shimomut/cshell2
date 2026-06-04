@@ -37,7 +37,6 @@ Available recipes:
     tar       create/extract/list flags, archive-aware file completion
     terraform subcommand tree, workspace completion, .tfvars file hints
     top       sort-key choices and PID completion (BSD/macOS vs Linux/procps)
-    watch     watch's own flags, then delegates completion to the wrapped command
     zip       compression flags, file completion
     unzip     listing/extraction flags, archive-aware file completion
 
