@@ -1208,6 +1208,16 @@ class Shell:
             sys.modules["cshell2_user_config"] = module
             try:
                 spec.loader.exec_module(module)
+            except KeyboardInterrupt:
+                # VSCode and similar terminal integrations may inject a Ctrl+C
+                # right after opening a terminal (to clear any in-progress input
+                # before auto-activating a venv). If that lands during config
+                # load — typically inside a slow import like boto3 — exit
+                # cleanly so the user can re-run cshell2 once the terminal has
+                # finished its startup dance, instead of crashing with a
+                # traceback or starting up half-configured.
+                print("Config load interrupted by Ctrl+C; exiting.", file=sys.stderr)
+                sys.exit(130)
             except Exception as e:
                 print(f"Error loading config: {e}", file=sys.stderr)
 
