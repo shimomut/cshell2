@@ -129,19 +129,24 @@ class CommandNameCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         prefix = ctx.prefix
         results = []
+        seen: set[str] = set()
 
         for name in sorted(self._registry.list_commands()):
             if name.startswith(prefix):
                 results.append(Completion(value=name, description="command"))
+                seen.add(name)
 
         if hasattr(self._registry, "list_aliases"):
             for name, expansion in sorted(self._registry.list_aliases().items()):
-                if name.startswith(prefix):
+                if name.startswith(prefix) and name not in seen:
                     results.append(Completion(
                         value=name, description=f"alias → {expansion}"
                     ))
+                    seen.add(name)
 
         for cmd in self._find_system_commands(prefix):
+            if cmd in seen:
+                continue
             results.append(Completion(value=cmd, description="system"))
 
         return results
