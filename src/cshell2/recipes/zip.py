@@ -15,7 +15,8 @@ def register() -> None:
         "zip",
         help="package and compress files into a zip archive",
         params=[
-            arg("path", nargs="*", help="archive or input file", completer=FileCompleter()),
+            arg("archive", help="output zip archive to create", completer=FileCompleter()),
+            arg("input", nargs="*", help="files or directories to add", completer=FileCompleter()),
             arg("-r", action="store_true", help="recurse into directories"),
             arg("-q", action="store_true", help="quiet operation"),
             arg("-v", action="store_true", help="verbose / show version info"),

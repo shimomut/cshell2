@@ -18,6 +18,7 @@ def register() -> None:
             cmd,
             help=descriptions[cmd],
             params=[
+                arg("pattern", help="regex pattern to search for"),
                 arg("file", nargs="*", help="file to search", completer=FileCompleter()),
                 arg("-a", action="store_true", help="process binary file as if it were text"),
                 arg("-c", action="store_true", help="print only a count of matching lines"),

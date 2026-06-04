@@ -123,12 +123,14 @@ class _TarPositionalCompleter(Completer):
 def register() -> None:
     if shutil.which("tar") is None:
         return
+    positional = _TarPositionalCompleter()
     command_registry.command(
         "tar",
         help="create, extract, or list tar archives",
         params=[
-            arg("path", nargs="*", help="archive or member file",
-                completer=_TarPositionalCompleter()),
+            arg("archive", help="tar archive", completer=positional),
+            arg("file", nargs="*", help="file to add or extract",
+                completer=positional),
             arg("-c", action="store_true", help="create archive"),
             arg("-x", action="store_true", help="extract from archive"),
             arg("-t", action="store_true", help="list archive contents"),
