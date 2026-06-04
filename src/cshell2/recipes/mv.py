@@ -5,53 +5,48 @@ from __future__ import annotations
 import shutil
 import sys
 
-from ..commands import arg, flag_args, registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import FileCompleter
 
-# BSD mv (macOS).
-_MACOS_OPTIONS: dict[str, str] = {
-    "-f": "force overwrite without asking",
-    "-i": "interactive — prompt before overwriting",
-    "-n": "do not overwrite existing files",
-    "-h": "if the target is a symlink to a directory, don't follow it",
-    "-v": "verbose — print files as they are moved",
-}
 
-# GNU mv (Linux/coreutils).
-_LINUX_OPTIONS: dict[str, str] = {
-    "-b": "make a backup of each existing destination file",
-    "-f": "force overwrite without asking",
-    "-i": "interactive — prompt before overwriting",
-    "-n": "do not overwrite existing files",
-    "-T": "treat dst as a normal file (no /dst/src semantics)",
-    "-t": "move all sources into the given directory",
-    "-u": "move only when source is newer or destination is missing",
-    "-v": "verbose — print files as they are moved",
-    "--backup": "make a backup (with optional CONTROL)",
-    "--strip-trailing-slashes": "strip trailing / from each source",
-    "--update": "move only when source newer or destination missing",
-}
+def _macos_flags() -> list:
+    return [
+        arg("-f", action="store_true", help="force overwrite without asking"),
+        arg("-i", action="store_true", help="interactive — prompt before overwriting"),
+        arg("-n", action="store_true", help="do not overwrite existing files"),
+        arg("-h", action="store_true", help="if the target is a symlink to a directory, don't follow it"),
+        arg("-v", action="store_true", help="verbose — print files as they are moved"),
+    ]
 
-_LINUX_ARGS: dict[str, object] = {
-    "-t": ("DIR", FileCompleter()),
-    "--target-directory": ("DIR", FileCompleter()),
-    "--backup": "CONTROL",
-    "-S": "SUFFIX",
-}
+
+def _linux_flags() -> list:
+    return [
+        arg("-b", action="store_true", help="make a backup of each existing destination file"),
+        arg("-f", action="store_true", help="force overwrite without asking"),
+        arg("-i", action="store_true", help="interactive — prompt before overwriting"),
+        arg("-n", action="store_true", help="do not overwrite existing files"),
+        arg("-T", action="store_true", help="treat dst as a normal file (no /dst/src semantics)"),
+        arg("-t", metavar="DIR", help="move all sources into the given directory",
+            completer=FileCompleter()),
+        arg("-u", action="store_true", help="move only when source is newer or destination is missing"),
+        arg("-v", action="store_true", help="verbose — print files as they are moved"),
+        arg("-S", metavar="SUFFIX"),
+        arg("--backup", metavar="CONTROL", help="make a backup (with optional CONTROL)"),
+        arg("--strip-trailing-slashes", action="store_true", help="strip trailing / from each source"),
+        arg("--update", action="store_true", help="move only when source newer or destination missing"),
+        arg("--target-directory", metavar="DIR", completer=FileCompleter()),
+    ]
 
 
 def register() -> None:
     if shutil.which("mv") is None:
         return
-    if sys.platform == "darwin":
-        options, opt_args = _MACOS_OPTIONS, {}
-    else:
-        options, opt_args = _LINUX_OPTIONS, _LINUX_ARGS
+    flags = _macos_flags() if sys.platform == "darwin" else _linux_flags()
     command_registry.command(
         "mv",
         help="move (rename) files",
         params=[
             arg("path", nargs="*", help="source or destination path", completer=FileCompleter()),
-            *flag_args(options, values=opt_args),
+            *flags,
         ],
     )

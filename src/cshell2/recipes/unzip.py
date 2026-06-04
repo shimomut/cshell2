@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 
-from ..commands import arg, flag_args, registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import (
     Completer,
     Completion,
@@ -14,40 +14,6 @@ from ..completion import (
     FileCompleter,
     _to_slash,
 )
-
-UNZIP_OPTIONS: dict[str, str] = {
-    "-Z": "ZipInfo mode — archive listing",
-    "-p": "extract files to pipe (no messages)",
-    "-l": "list files (short format)",
-    "-f": "freshen existing files, create none",
-    "-t": "test compressed archive data",
-    "-u": "update files, create if necessary",
-    "-z": "display archive comment only",
-    "-v": "list verbosely / show version info",
-    "-T": "set timestamp on archive to latest",
-    "-x": "exclude files that follow",
-    "-d": "extract files into the given directory",
-    "-n": "never overwrite existing files",
-    "-q": "quiet mode (-qq for quieter)",
-    "-o": "overwrite files WITHOUT prompting",
-    "-a": "auto-convert text files",
-    "-aa": "treat ALL files as text",
-    "-j": "junk paths (do not make directories)",
-    "-C": "match filenames case-insensitively",
-    "-L": "make (some) names lowercase",
-    "-X": "restore UID/GID info",
-    "-V": "retain VMS version numbers",
-    "-K": "keep setuid/setgid/sticky permissions",
-    "-M": "pipe output through 'more' pager",
-    "-P": "use PASSWORD to decrypt entries",
-    "-h": "show help",
-    "-hh": "show extended help",
-}
-
-UNZIP_ARGS: dict[str, str] = {
-    "-d": ("DIR", DirCompleter()),
-    "-P": "PASSWORD",
-}
 
 
 class ZipArchiveCompleter(Completer):
@@ -99,6 +65,32 @@ def register() -> None:
         params=[
             arg("archive", help="zip archive", completer=ZipArchiveCompleter()),
             arg("file", nargs="*", help="member file to extract", completer=FileCompleter()),
-            *flag_args(UNZIP_OPTIONS, values=UNZIP_ARGS),
+            arg("-Z", action="store_true", help="ZipInfo mode — archive listing"),
+            arg("-p", action="store_true", help="extract files to pipe (no messages)"),
+            arg("-l", action="store_true", help="list files (short format)"),
+            arg("-f", action="store_true", help="freshen existing files, create none"),
+            arg("-t", action="store_true", help="test compressed archive data"),
+            arg("-u", action="store_true", help="update files, create if necessary"),
+            arg("-z", action="store_true", help="display archive comment only"),
+            arg("-v", action="store_true", help="list verbosely / show version info"),
+            arg("-T", action="store_true", help="set timestamp on archive to latest"),
+            arg("-x", action="store_true", help="exclude files that follow"),
+            arg("-d", metavar="DIR", help="extract files into the given directory",
+                completer=DirCompleter()),
+            arg("-n", action="store_true", help="never overwrite existing files"),
+            arg("-q", action="store_true", help="quiet mode (-qq for quieter)"),
+            arg("-o", action="store_true", help="overwrite files WITHOUT prompting"),
+            arg("-a", action="store_true", help="auto-convert text files"),
+            arg("-aa", action="store_true", help="treat ALL files as text"),
+            arg("-j", action="store_true", help="junk paths (do not make directories)"),
+            arg("-C", action="store_true", help="match filenames case-insensitively"),
+            arg("-L", action="store_true", help="make (some) names lowercase"),
+            arg("-X", action="store_true", help="restore UID/GID info"),
+            arg("-V", action="store_true", help="retain VMS version numbers"),
+            arg("-K", action="store_true", help="keep setuid/setgid/sticky permissions"),
+            arg("-M", action="store_true", help="pipe output through 'more' pager"),
+            arg("-P", metavar="PASSWORD", help="use PASSWORD to decrypt entries"),
+            arg("-h", action="store_true", help="show help"),
+            arg("-hh", action="store_true", help="show extended help"),
         ],
     )

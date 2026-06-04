@@ -95,7 +95,7 @@ class TestPositionalCompleter:
 
 class TestRegistration:
     def test_register_wires_smart_completer(self):
-        """The recipe registers a wildcard positional + flag_args-built options."""
+        """The recipe registers a wildcard positional + flag arg() declarations."""
         from cshell2.commands import registry as command_registry, WILDCARD, get_positional_completer
         from cshell2.recipes import tar as tar_recipe
 
@@ -111,7 +111,7 @@ class TestRegistration:
         assert c0 is c5
         assert isinstance(c0, _TarPositionalCompleter)
         assert isinstance(cmd.completers.get(WILDCARD), _TarPositionalCompleter)
-        # Flag completer is the standard OptionsCompleter built from flag_args.
+        # Flag completer is the standard OptionsCompleter built from arg() declarations.
         assert "-c" in cmd.completers.get(None).options
         assert "-f" in cmd.completers.get(None).args
 

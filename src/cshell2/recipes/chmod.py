@@ -4,18 +4,8 @@ from __future__ import annotations
 
 import shutil
 
-from ..commands import arg, flag_args, registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import ChoiceCompleter, FileCompleter
-
-CHMOD_OPTIONS: dict[str, str] = {
-    "-f": "do not display diagnostic messages on failure",
-    "-h": "change mode of symlink itself, not target",
-    "-H": "with -R, follow symlinks on the command line only",
-    "-L": "with -R, follow all symlinks",
-    "-P": "with -R, do not follow any symlinks (default)",
-    "-R": "recurse into directories",
-    "-v": "verbose — show files as their mode is changed",
-}
 
 COMMON_MODES: list[str] = [
     "644",
@@ -57,6 +47,12 @@ def register() -> None:
         params=[
             arg("mode", help="mode bits (e.g. 755 or u+x)", completer=ChoiceCompleter(COMMON_MODES)),
             arg("file", nargs="*", help="file or directory", completer=FileCompleter()),
-            *flag_args(CHMOD_OPTIONS),
+            arg("-f", action="store_true", help="do not display diagnostic messages on failure"),
+            arg("-h", action="store_true", help="change mode of symlink itself, not target"),
+            arg("-H", action="store_true", help="with -R, follow symlinks on the command line only"),
+            arg("-L", action="store_true", help="with -R, follow all symlinks"),
+            arg("-P", action="store_true", help="with -R, do not follow any symlinks (default)"),
+            arg("-R", action="store_true", help="recurse into directories"),
+            arg("-v", action="store_true", help="verbose — show files as their mode is changed"),
         ],
     )

@@ -322,7 +322,7 @@ registry.command(
 Two escape hatches on `registry.command()` cover the cases where flags or positional dispatch can't be expressed via `params` alone:
 
 * `delegate=Completer` — install a single completer at **every** slot (flags + every positional index).  Used when an external tool ships its own completion protocol that decides per-call what to return (e.g. `aws_completer`).
-* `options_completer=OptionsCompleter` — override the auto-built flag completer at the `None` slot.  Used when a custom subclass is needed (e.g. tar's bundle-letter handling).
+* `options_completer=OptionsCompleter` — override the auto-built flag completer at the `None` slot.  Reserved for cases that need a custom :class:`OptionsCompleter` subclass; no built-in recipe currently uses it.
 
 #### OptionsCompleter — Multi-Select Flag Picker
 

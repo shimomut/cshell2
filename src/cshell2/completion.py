@@ -198,10 +198,11 @@ class CallbackCompleter(Completer):
 class OptionsCompleter(Completer):
     """Completer for command-line flags with multi-select TUI support.
 
-    Auto-built from the ``-``-prefixed entries of a command's ``params``
-    list, so most recipes never construct one directly.  Pass an instance
-    via the ``options_completer=`` kwarg on :meth:`registry.command` when a
-    custom subclass is needed (e.g. tar's bundle-letter handling).
+    Auto-built from the flag (``-`` / ``+`` prefixed) entries of a command's
+    ``params`` list, so recipes never construct one directly.  An instance
+    can be passed via the ``options_completer=`` kwarg on
+    :meth:`registry.command` to override the auto-built completer when a
+    custom subclass is needed.
     """
 
     def __init__(

@@ -4,47 +4,8 @@ from __future__ import annotations
 
 import shutil
 
-from ..commands import arg, flag_args, registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import FileCompleter
-
-ZIP_OPTIONS: dict[str, str] = {
-    "-r": "recurse into directories",
-    "-q": "quiet operation",
-    "-v": "verbose / show version info",
-    "-u": "update — only changed or new files",
-    "-f": "freshen — only changed files",
-    "-d": "delete entries from zipfile",
-    "-m": "move into zipfile (delete OS files after)",
-    "-j": "junk paths (don't record directory names)",
-    "-0": "store only (no compression)",
-    "-1": "compress faster",
-    "-9": "compress better",
-    "-c": "add one-line comments",
-    "-z": "add zipfile comment",
-    "-T": "test zipfile integrity",
-    "-x": "exclude the following names",
-    "-i": "include only the following names",
-    "-D": "do not add directory entries",
-    "-X": "exclude extra file attributes",
-    "-y": "store symlinks as the link, not the referenced file",
-    "-e": "encrypt — prompt for password",
-    "-n": "don't compress files with these suffixes",
-    "-o": "make zipfile as old as latest entry",
-    "-@": "read names from stdin",
-    "-h": "show help",
-    "-h2": "show extended help",
-    "-L": "show software license",
-    "-A": "adjust self-extracting executable",
-    "-F": "fix zipfile",
-    "-FF": "try harder to fix zipfile",
-    "-J": "junk zipfile prefix (unzipsfx)",
-}
-
-ZIP_ARGS: dict[str, str] = {
-    "-n": "SUFFIX_LIST",
-    "-t": "MMDDYYYY",
-    "-b": "PATH",
-}
 
 
 def register() -> None:
@@ -55,6 +16,37 @@ def register() -> None:
         help="package and compress files into a zip archive",
         params=[
             arg("path", nargs="*", help="archive or input file", completer=FileCompleter()),
-            *flag_args(ZIP_OPTIONS, values=ZIP_ARGS),
+            arg("-r", action="store_true", help="recurse into directories"),
+            arg("-q", action="store_true", help="quiet operation"),
+            arg("-v", action="store_true", help="verbose / show version info"),
+            arg("-u", action="store_true", help="update — only changed or new files"),
+            arg("-f", action="store_true", help="freshen — only changed files"),
+            arg("-d", action="store_true", help="delete entries from zipfile"),
+            arg("-m", action="store_true", help="move into zipfile (delete OS files after)"),
+            arg("-j", action="store_true", help="junk paths (don't record directory names)"),
+            arg("-0", action="store_true", help="store only (no compression)"),
+            arg("-1", action="store_true", help="compress faster"),
+            arg("-9", action="store_true", help="compress better"),
+            arg("-c", action="store_true", help="add one-line comments"),
+            arg("-z", action="store_true", help="add zipfile comment"),
+            arg("-T", action="store_true", help="test zipfile integrity"),
+            arg("-x", action="store_true", help="exclude the following names"),
+            arg("-i", action="store_true", help="include only the following names"),
+            arg("-D", action="store_true", help="do not add directory entries"),
+            arg("-X", action="store_true", help="exclude extra file attributes"),
+            arg("-y", action="store_true", help="store symlinks as the link, not the referenced file"),
+            arg("-e", action="store_true", help="encrypt — prompt for password"),
+            arg("-n", metavar="SUFFIX_LIST", help="don't compress files with these suffixes"),
+            arg("-o", action="store_true", help="make zipfile as old as latest entry"),
+            arg("-@", action="store_true", help="read names from stdin"),
+            arg("-h", action="store_true", help="show help"),
+            arg("-h2", action="store_true", help="show extended help"),
+            arg("-L", action="store_true", help="show software license"),
+            arg("-A", action="store_true", help="adjust self-extracting executable"),
+            arg("-F", action="store_true", help="fix zipfile"),
+            arg("-FF", action="store_true", help="try harder to fix zipfile"),
+            arg("-J", action="store_true", help="junk zipfile prefix (unzipsfx)"),
+            arg("-t", metavar="MMDDYYYY"),
+            arg("-b", metavar="PATH"),
         ],
     )

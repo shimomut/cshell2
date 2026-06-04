@@ -4,26 +4,8 @@ from __future__ import annotations
 
 import subprocess
 
-from ..commands import arg, flag_args, registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import Completer, Completion, CompletionContext
-
-KILL_OPTIONS: dict[str, str] = {
-    "-1": "SIGHUP — reload config / hangup",
-    "-2": "SIGINT — interrupt (same as Ctrl+C)",
-    "-3": "SIGQUIT — quit and produce core dump",
-    "-9": "SIGKILL — force kill (cannot be caught or ignored)",
-    "-15": "SIGTERM — graceful termination (default)",
-    "-SIGHUP": "reload config / hangup",
-    "-SIGINT": "interrupt (same as Ctrl+C)",
-    "-SIGQUIT": "quit and produce core dump",
-    "-SIGKILL": "force kill (cannot be caught or ignored)",
-    "-SIGTERM": "graceful termination (default)",
-    "-SIGUSR1": "user-defined signal 1",
-    "-SIGUSR2": "user-defined signal 2",
-    "-SIGSTOP": "pause process (cannot be caught or ignored)",
-    "-SIGCONT": "resume paused process",
-    "-l": "list all available signal names",
-}
 
 
 class ProcessCompleter(Completer):
@@ -84,7 +66,21 @@ def register() -> None:
         help="send a signal to a process",
         params=[
             arg("pid", nargs="*", help="process ID", completer=ProcessCompleter()),
-            *flag_args(KILL_OPTIONS),
+            arg("-1", action="store_true", help="SIGHUP — reload config / hangup"),
+            arg("-2", action="store_true", help="SIGINT — interrupt (same as Ctrl+C)"),
+            arg("-3", action="store_true", help="SIGQUIT — quit and produce core dump"),
+            arg("-9", action="store_true", help="SIGKILL — force kill (cannot be caught or ignored)"),
+            arg("-15", action="store_true", help="SIGTERM — graceful termination (default)"),
+            arg("-SIGHUP", action="store_true", help="reload config / hangup"),
+            arg("-SIGINT", action="store_true", help="interrupt (same as Ctrl+C)"),
+            arg("-SIGQUIT", action="store_true", help="quit and produce core dump"),
+            arg("-SIGKILL", action="store_true", help="force kill (cannot be caught or ignored)"),
+            arg("-SIGTERM", action="store_true", help="graceful termination (default)"),
+            arg("-SIGUSR1", action="store_true", help="user-defined signal 1"),
+            arg("-SIGUSR2", action="store_true", help="user-defined signal 2"),
+            arg("-SIGSTOP", action="store_true", help="pause process (cannot be caught or ignored)"),
+            arg("-SIGCONT", action="store_true", help="resume paused process"),
+            arg("-l", action="store_true", help="list all available signal names"),
         ],
     )
     command_registry.command(

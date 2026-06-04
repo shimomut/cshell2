@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import shutil
 
-from ..commands import arg, flag_args, registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import (
     Completer,
     Completion,
@@ -17,43 +17,6 @@ from ..completion import (
     FileCompleter,
 )
 from .ssh import SSHHostCompleter
-
-SCP_OPTIONS: dict[str, str] = {
-    "-3": "transfer between two remote hosts via the local machine",
-    "-4": "force IPv4",
-    "-6": "force IPv6",
-    "-A": "forward authentication agent connection",
-    "-B": "batch mode — disables passphrase/password prompts",
-    "-C": "compress data",
-    "-c": "select cipher",
-    "-D": "use sftp protocol with specific port",
-    "-F": "alternative ssh_config file",
-    "-i": "identity (private key) file",
-    "-J": "ProxyJump host",
-    "-l": "limit bandwidth (Kbit/s)",
-    "-O": "use the legacy SCP protocol (vs SFTP)",
-    "-o": "ssh option (KEY=VALUE)",
-    "-P": "remote port to connect to",
-    "-p": "preserve modification times, access times, modes",
-    "-q": "quiet mode — disables progress meter",
-    "-R": "transfer between two remote hosts directly (RFC 8341)",
-    "-r": "recursively copy directories",
-    "-S": "program to use for the encrypted connection",
-    "-T": "disable strict filename checking",
-    "-v": "verbose",
-}
-
-SCP_ARGS: dict[str, object] = {
-    "-c": "CIPHER",
-    "-D": "PORT",
-    "-F": ("CONFIG", FileCompleter()),
-    "-i": ("KEY-FILE", FileCompleter()),
-    "-J": "[USER@]HOST[:PORT]",
-    "-l": "KBPS",
-    "-o": "OPTION",
-    "-P": "PORT",
-    "-S": "PROGRAM",
-}
 
 
 class _RemoteOrFileCompleter(Completer):
@@ -108,6 +71,27 @@ def register() -> None:
         help="secure copy files between hosts over SSH",
         params=[
             arg("path", nargs="*", help="source or destination", completer=_RemoteOrFileCompleter()),
-            *flag_args(SCP_OPTIONS, values=SCP_ARGS),
+            arg("-3", action="store_true", help="transfer between two remote hosts via the local machine"),
+            arg("-4", action="store_true", help="force IPv4"),
+            arg("-6", action="store_true", help="force IPv6"),
+            arg("-A", action="store_true", help="forward authentication agent connection"),
+            arg("-B", action="store_true", help="batch mode — disables passphrase/password prompts"),
+            arg("-C", action="store_true", help="compress data"),
+            arg("-c", metavar="CIPHER", help="select cipher"),
+            arg("-D", metavar="PORT", help="use sftp protocol with specific port"),
+            arg("-F", metavar="CONFIG", help="alternative ssh_config file", completer=FileCompleter()),
+            arg("-i", metavar="KEY-FILE", help="identity (private key) file", completer=FileCompleter()),
+            arg("-J", metavar="[USER@]HOST[:PORT]", help="ProxyJump host"),
+            arg("-l", metavar="KBPS", help="limit bandwidth (Kbit/s)"),
+            arg("-O", action="store_true", help="use the legacy SCP protocol (vs SFTP)"),
+            arg("-o", metavar="OPTION", help="ssh option (KEY=VALUE)"),
+            arg("-P", metavar="PORT", help="remote port to connect to"),
+            arg("-p", action="store_true", help="preserve modification times, access times, modes"),
+            arg("-q", action="store_true", help="quiet mode — disables progress meter"),
+            arg("-R", action="store_true", help="transfer between two remote hosts directly (RFC 8341)"),
+            arg("-r", action="store_true", help="recursively copy directories"),
+            arg("-S", metavar="PROGRAM", help="program to use for the encrypted connection"),
+            arg("-T", action="store_true", help="disable strict filename checking"),
+            arg("-v", action="store_true", help="verbose"),
         ],
     )

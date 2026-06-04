@@ -5,24 +5,13 @@ from __future__ import annotations
 import shutil
 import subprocess
 
-from ..commands import arg, flag_args, registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import (
     Completer,
     Completion,
     CompletionContext,
     FileCompleter,
 )
-
-CHOWN_OPTIONS: dict[str, str] = {
-    "-f": "do not display diagnostic messages on failure",
-    "-h": "change owner of symlink itself, not target",
-    "-H": "with -R, follow symlinks on the command line only",
-    "-L": "with -R, follow all symlinks",
-    "-P": "with -R, do not follow any symlinks (default)",
-    "-R": "recurse into directories",
-    "-v": "verbose — show files as ownership is changed",
-    "-x": "do not cross filesystem boundaries with -R",
-}
 
 
 class OwnerCompleter(Completer):
@@ -116,6 +105,13 @@ def register() -> None:
         params=[
             arg("owner", help="user or user:group", completer=OwnerCompleter()),
             arg("file", nargs="*", help="file or directory", completer=FileCompleter()),
-            *flag_args(CHOWN_OPTIONS),
+            arg("-f", action="store_true", help="do not display diagnostic messages on failure"),
+            arg("-h", action="store_true", help="change owner of symlink itself, not target"),
+            arg("-H", action="store_true", help="with -R, follow symlinks on the command line only"),
+            arg("-L", action="store_true", help="with -R, follow all symlinks"),
+            arg("-P", action="store_true", help="with -R, do not follow any symlinks (default)"),
+            arg("-R", action="store_true", help="recurse into directories"),
+            arg("-v", action="store_true", help="verbose — show files as ownership is changed"),
+            arg("-x", action="store_true", help="do not cross filesystem boundaries with -R"),
         ],
     )

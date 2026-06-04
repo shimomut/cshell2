@@ -5,56 +5,51 @@ from __future__ import annotations
 import shutil
 import sys
 
-from ..commands import arg, flag_args, registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import FileCompleter
 
-# BSD rm (macOS).
-_MACOS_OPTIONS: dict[str, str] = {
-    "-d": "remove directories as well as other types of files",
-    "-f": "force — ignore nonexistent files, never prompt",
-    "-i": "interactive — prompt before each removal",
-    "-I": "prompt once if removing 3+ files or recursively (with -R)",
-    "-P": "overwrite regular files before deletion",
-    "-R": "recursively remove directories and contents",
-    "-r": "recursively remove directories and contents (same as -R)",
-    "-v": "verbose — show files as they are removed",
-    "-W": "attempt to undelete files (HFS / FFS only)",
-    "-x": "stay on this filesystem when descending",
-}
 
-# GNU rm (Linux/coreutils).
-_LINUX_OPTIONS: dict[str, str] = {
-    "-d": "remove empty directories",
-    "-f": "force — ignore nonexistent files, never prompt",
-    "-i": "interactive — prompt before each removal",
-    "-I": "prompt once if removing 3+ files or recursively",
-    "-r": "recursively remove directories and contents",
-    "-R": "recursively remove directories and contents (same as -r)",
-    "-v": "verbose — show files as they are removed",
-    "--interactive": "prompt according to WHEN (never, once, always)",
-    "--no-preserve-root": "do not treat / specially",
-    "--preserve-root": "do not remove / (default)",
-    "--one-file-system": "stay on the source filesystem (with -r)",
-    "--": "end of options — treat following args as filenames",
-}
+def _macos_flags() -> list:
+    return [
+        arg("-d", action="store_true", help="remove directories as well as other types of files"),
+        arg("-f", action="store_true", help="force — ignore nonexistent files, never prompt"),
+        arg("-i", action="store_true", help="interactive — prompt before each removal"),
+        arg("-I", action="store_true", help="prompt once if removing 3+ files or recursively (with -R)"),
+        arg("-P", action="store_true", help="overwrite regular files before deletion"),
+        arg("-R", action="store_true", help="recursively remove directories and contents"),
+        arg("-r", action="store_true", help="recursively remove directories and contents (same as -R)"),
+        arg("-v", action="store_true", help="verbose — show files as they are removed"),
+        arg("-W", action="store_true", help="attempt to undelete files (HFS / FFS only)"),
+        arg("-x", action="store_true", help="stay on this filesystem when descending"),
+    ]
 
-_LINUX_ARGS: dict[str, str] = {
-    "--interactive": "WHEN",
-}
+
+def _linux_flags() -> list:
+    return [
+        arg("-d", action="store_true", help="remove empty directories"),
+        arg("-f", action="store_true", help="force — ignore nonexistent files, never prompt"),
+        arg("-i", action="store_true", help="interactive — prompt before each removal"),
+        arg("-I", action="store_true", help="prompt once if removing 3+ files or recursively"),
+        arg("-r", action="store_true", help="recursively remove directories and contents"),
+        arg("-R", action="store_true", help="recursively remove directories and contents (same as -r)"),
+        arg("-v", action="store_true", help="verbose — show files as they are removed"),
+        arg("--interactive", metavar="WHEN", help="prompt according to WHEN (never, once, always)"),
+        arg("--no-preserve-root", action="store_true", help="do not treat / specially"),
+        arg("--preserve-root", action="store_true", help="do not remove / (default)"),
+        arg("--one-file-system", action="store_true", help="stay on the source filesystem (with -r)"),
+        arg("--", action="store_true", help="end of options — treat following args as filenames"),
+    ]
 
 
 def register() -> None:
     if shutil.which("rm") is None:
         return
-    if sys.platform == "darwin":
-        options, opt_args = _MACOS_OPTIONS, {}
-    else:
-        options, opt_args = _LINUX_OPTIONS, _LINUX_ARGS
+    flags = _macos_flags() if sys.platform == "darwin" else _linux_flags()
     command_registry.command(
         "rm",
         help="remove files or directories",
         params=[
             arg("path", nargs="*", help="file or directory to remove", completer=FileCompleter()),
-            *flag_args(options, values=opt_args),
+            *flags,
         ],
     )

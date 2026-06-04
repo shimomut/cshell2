@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 
-from ..commands import arg, flag_args, registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import (
     Completer,
     Completion,
@@ -16,49 +16,13 @@ from ..completion import (
 )
 
 
-TAR_OPTIONS: dict[str, str] = {
-    "-c": "create archive",
-    "-x": "extract from archive",
-    "-t": "list archive contents",
-    "-r": "append files to existing archive",
-    "-u": "update — only newer files",
-    "-f": "archive file path",
-    "-v": "verbose",
-    "-z": "compress with gzip",
-    "-j": "compress with bzip2",
-    "-J": "compress with xz",
-    "--lzma": "compress with lzma",
-    "-Z": "compress with compress(1)",
-    "-C": "change to directory before processing",
-    "-p": "preserve permissions on extract",
-    "-k": "keep existing files (don't overwrite)",
-    "-m": "don't restore modification times",
-    "-O": "write to stdout, don't restore to disk",
-    "-w": "interactive — confirm each file",
-    "-h": "follow symlinks",
-    "-P": "preserve absolute paths (don't strip leading /)",
-    "-s": "modify file/archive names with substitution",
-    "--exclude": "skip files matching pattern",
-    "--include": "include only files matching pattern",
-    "--strip-components": "strip leading components from paths",
-    "--no-recursion": "don't recurse into directories",
-    "--format": "select archive format",
-    "--totals": "print total bytes after archive",
-    "--newer": "only files newer than DATE",
-    "--newer-mtime": "only files with mtime newer than DATE",
-}
-
-TAR_ARGS: dict[str, str | tuple[str, Completer]] = {
-    "-f": ("ARCHIVE", FileCompleter()),  # patched to TarArchiveCompleter in register()
-    "-C": ("DIR", DirCompleter()),
-    "-b": "BLOCKING",
-    "-s": "PATTERN",
-    "--exclude": "PATTERN",
-    "--include": "PATTERN",
-    "--strip-components": "N",
-    "--format": "FORMAT",
-    "--newer": "DATE",
-    "--newer-mtime": "DATE",
+# Flags that consume the next token — used by _TarPositionalCompleter to
+# correctly skip flag values when counting positionals.  Kept in sync with
+# the value-taking arg() declarations in register().
+_VALUE_TAKING_FLAGS = {
+    "-f", "-C", "-b", "-s",
+    "--exclude", "--include", "--strip-components",
+    "--format", "--newer", "--newer-mtime",
 }
 
 
@@ -144,13 +108,12 @@ class _TarPositionalCompleter(Completer):
             # subsequent positionals are members.
             return False
         # Count completed positionals, skipping flags and their values.
-        value_taking = set(TAR_ARGS)
         rank = 0
         i = 0
         while i < len(args):
             tok = args[i]
             if tok.startswith("-"):
-                i += 2 if tok in value_taking else 1
+                i += 2 if tok in _VALUE_TAKING_FLAGS else 1
             else:
                 rank += 1
                 i += 1
@@ -160,15 +123,43 @@ class _TarPositionalCompleter(Completer):
 def register() -> None:
     if shutil.which("tar") is None:
         return
-    # Patch -f to use the archive-aware completer.
-    tar_flag_values = dict(TAR_ARGS)
-    tar_flag_values["-f"] = ("ARCHIVE", TarArchiveCompleter())
     command_registry.command(
         "tar",
         help="create, extract, or list tar archives",
         params=[
             arg("path", nargs="*", help="archive or member file",
                 completer=_TarPositionalCompleter()),
-            *flag_args(TAR_OPTIONS, values=tar_flag_values),
+            arg("-c", action="store_true", help="create archive"),
+            arg("-x", action="store_true", help="extract from archive"),
+            arg("-t", action="store_true", help="list archive contents"),
+            arg("-r", action="store_true", help="append files to existing archive"),
+            arg("-u", action="store_true", help="update — only newer files"),
+            arg("-f", metavar="ARCHIVE", help="archive file path",
+                completer=TarArchiveCompleter()),
+            arg("-v", action="store_true", help="verbose"),
+            arg("-z", action="store_true", help="compress with gzip"),
+            arg("-j", action="store_true", help="compress with bzip2"),
+            arg("-J", action="store_true", help="compress with xz"),
+            arg("--lzma", action="store_true", help="compress with lzma"),
+            arg("-Z", action="store_true", help="compress with compress(1)"),
+            arg("-C", metavar="DIR", help="change to directory before processing",
+                completer=DirCompleter()),
+            arg("-p", action="store_true", help="preserve permissions on extract"),
+            arg("-k", action="store_true", help="keep existing files (don't overwrite)"),
+            arg("-m", action="store_true", help="don't restore modification times"),
+            arg("-O", action="store_true", help="write to stdout, don't restore to disk"),
+            arg("-w", action="store_true", help="interactive — confirm each file"),
+            arg("-h", action="store_true", help="follow symlinks"),
+            arg("-P", action="store_true", help="preserve absolute paths (don't strip leading /)"),
+            arg("-s", metavar="PATTERN", help="modify file/archive names with substitution"),
+            arg("-b", metavar="BLOCKING"),
+            arg("--exclude", metavar="PATTERN", help="skip files matching pattern"),
+            arg("--include", metavar="PATTERN", help="include only files matching pattern"),
+            arg("--strip-components", metavar="N", help="strip leading components from paths"),
+            arg("--no-recursion", action="store_true", help="don't recurse into directories"),
+            arg("--format", metavar="FORMAT", help="select archive format"),
+            arg("--totals", action="store_true", help="print total bytes after archive"),
+            arg("--newer", metavar="DATE", help="only files newer than DATE"),
+            arg("--newer-mtime", metavar="DATE", help="only files with mtime newer than DATE"),
         ],
     )

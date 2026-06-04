@@ -5,49 +5,14 @@ from __future__ import annotations
 import os
 import re
 
-from ..commands import arg, flag_args, registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import Completer, Completion, CompletionContext, DirCompleter, FileCompleter
-
-
-MAKE_OPTIONS: dict[str, str] = {
-    "-B": "unconditionally make all targets",
-    "-C": "change to directory before doing anything",
-    "-d": "print lots of debugging information",
-    "-e": "give environment variables precedence over Makefile variables",
-    "-f": "read FILE as the Makefile",
-    "-i": "ignore errors from recipes",
-    "-j": "number of parallel jobs (omit for unlimited)",
-    "-k": "keep going after errors as much as possible",
-    "-l": "don't start new jobs if load average is above N",
-    "-n": "print commands without executing them (dry run)",
-    "-o": "do not remake FILE even if it is older than its dependencies",
-    "-p": "print make's internal database",
-    "-q": "exit 0 if all targets are up to date, 1 otherwise",
-    "-r": "disable built-in implicit rules",
-    "-R": "disable built-in variable settings",
-    "-s": "silent mode — do not echo recipes",
-    "-S": "cancel the effect of -k",
-    "-t": "touch targets instead of running their recipes",
-    "-v": "print version information",
-    "-w": "print working directory before and after processing",
-    "-W": "pretend FILE was just modified",
-    "--warn-undefined-variables": "warn when an undefined variable is referenced",
-}
-
-MAKE_ARGS = {
-    "-C": ("DIR", DirCompleter()),
-    "-f": ("FILE", FileCompleter()),
-    "-j": "N",
-    "-l": "N",
-    "-o": ("FILE", FileCompleter()),
-    "-W": ("FILE", FileCompleter()),
-}
 
 
 def _find_dash_c_dir(args: list[str]) -> str | None:
     """Return the directory passed via -C in args, or None."""
-    for i, arg in enumerate(args):
-        if arg == "-C" and i + 1 < len(args):
+    for i, tok in enumerate(args):
+        if tok == "-C" and i + 1 < len(args):
             return args[i + 1]
     return None
 
@@ -95,6 +60,30 @@ def register() -> None:
         params=[
             arg("target", nargs="*", help="target to build",
                 completer=MakeTargetCompleter()),
-            *flag_args(MAKE_OPTIONS, values=MAKE_ARGS),
+            arg("-B", action="store_true", help="unconditionally make all targets"),
+            arg("-C", metavar="DIR", help="change to directory before doing anything",
+                completer=DirCompleter()),
+            arg("-d", action="store_true", help="print lots of debugging information"),
+            arg("-e", action="store_true", help="give environment variables precedence over Makefile variables"),
+            arg("-f", metavar="FILE", help="read FILE as the Makefile", completer=FileCompleter()),
+            arg("-i", action="store_true", help="ignore errors from recipes"),
+            arg("-j", metavar="N", help="number of parallel jobs (omit for unlimited)"),
+            arg("-k", action="store_true", help="keep going after errors as much as possible"),
+            arg("-l", metavar="N", help="don't start new jobs if load average is above N"),
+            arg("-n", action="store_true", help="print commands without executing them (dry run)"),
+            arg("-o", metavar="FILE", help="do not remake FILE even if it is older than its dependencies",
+                completer=FileCompleter()),
+            arg("-p", action="store_true", help="print make's internal database"),
+            arg("-q", action="store_true", help="exit 0 if all targets are up to date, 1 otherwise"),
+            arg("-r", action="store_true", help="disable built-in implicit rules"),
+            arg("-R", action="store_true", help="disable built-in variable settings"),
+            arg("-s", action="store_true", help="silent mode — do not echo recipes"),
+            arg("-S", action="store_true", help="cancel the effect of -k"),
+            arg("-t", action="store_true", help="touch targets instead of running their recipes"),
+            arg("-v", action="store_true", help="print version information"),
+            arg("-w", action="store_true", help="print working directory before and after processing"),
+            arg("-W", metavar="FILE", help="pretend FILE was just modified", completer=FileCompleter()),
+            arg("--warn-undefined-variables", action="store_true",
+                help="warn when an undefined variable is referenced"),
         ],
     )

@@ -5,35 +5,10 @@ from __future__ import annotations
 import shutil
 import sys
 
-from ..commands import flag_args, registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import ChoiceCompleter
 from .ps import PidCompleter
 
-# macOS top (from `top -h` on Darwin).
-_MACOS_OPTIONS: dict[str, str] = {
-    "-a": "set event counting mode to absolute",
-    "-c": "set event counting mode (a, d, e, n)",
-    "-d": "set event counting mode to delta",
-    "-e": "set event counting mode to events",
-    "-F": "calculate statistics for shared libraries (Frameworks)",
-    "-f": "do not calculate framework statistics",
-    "-h": "print usage and exit",
-    "-i": "interval between framework updates (default 10)",
-    "-l": "number of samples (0 = infinite, default 0 in screen mode)",
-    "-ncols": "number of columns to display",
-    "-o": "primary sort key",
-    "-O": "secondary sort key",
-    "-R": "do not traverse and report memory object map (default)",
-    "-r": "traverse and report memory object map",
-    "-S": "display swap and purgeable values in legend",
-    "-s": "delay between samples in seconds",
-    "-n": "maximum number of processes to display",
-    "-stats": "comma-separated list of stats to display",
-    "-pid": "show only the given process ID",
-    "-user": "show only processes owned by the given user",
-    "-U": "show only processes owned by the given user (alias)",
-    "-u": "sort by CPU and show only running processes",
-}
 
 _MACOS_SORT_KEYS = [
     "pid", "command", "cpu", "cpu_me", "cpu_others", "csw", "time",
@@ -43,66 +18,67 @@ _MACOS_SORT_KEYS = [
     "pageins", "boosts", "instrs", "cycles",
 ]
 
-_MACOS_ARGS: dict[str, object] = {
-    "-c": ("MODE", ChoiceCompleter(["a", "d", "e", "n"])),
-    "-i": "INTERVAL",
-    "-l": "SAMPLES",
-    "-ncols": "COLUMNS",
-    "-o": ("KEY", ChoiceCompleter(_MACOS_SORT_KEYS)),
-    "-O": ("SKEY", ChoiceCompleter(_MACOS_SORT_KEYS)),
-    "-s": "SECONDS",
-    "-n": "NPROCS",
-    "-stats": "KEYS",
-    "-pid": ("PID", PidCompleter()),
-    "-user": "USER",
-    "-U": "USER",
-}
+
+def _macos_params() -> list:
+    return [
+        arg("-a", action="store_true", help="set event counting mode to absolute"),
+        arg("-c", metavar="MODE", help="set event counting mode (a, d, e, n)",
+            completer=ChoiceCompleter(["a", "d", "e", "n"])),
+        arg("-d", action="store_true", help="set event counting mode to delta"),
+        arg("-e", action="store_true", help="set event counting mode to events"),
+        arg("-F", action="store_true", help="calculate statistics for shared libraries (Frameworks)"),
+        arg("-f", action="store_true", help="do not calculate framework statistics"),
+        arg("-h", action="store_true", help="print usage and exit"),
+        arg("-i", metavar="INTERVAL", help="interval between framework updates (default 10)"),
+        arg("-l", metavar="SAMPLES", help="number of samples (0 = infinite, default 0 in screen mode)"),
+        arg("-ncols", metavar="COLUMNS", help="number of columns to display"),
+        arg("-o", metavar="KEY", help="primary sort key",
+            completer=ChoiceCompleter(_MACOS_SORT_KEYS)),
+        arg("-O", metavar="SKEY", help="secondary sort key",
+            completer=ChoiceCompleter(_MACOS_SORT_KEYS)),
+        arg("-R", action="store_true", help="do not traverse and report memory object map (default)"),
+        arg("-r", action="store_true", help="traverse and report memory object map"),
+        arg("-S", action="store_true", help="display swap and purgeable values in legend"),
+        arg("-s", metavar="SECONDS", help="delay between samples in seconds"),
+        arg("-n", metavar="NPROCS", help="maximum number of processes to display"),
+        arg("-stats", metavar="KEYS", help="comma-separated list of stats to display"),
+        arg("-pid", metavar="PID", help="show only the given process ID", completer=PidCompleter()),
+        arg("-user", metavar="USER", help="show only processes owned by the given user"),
+        arg("-U", metavar="USER", help="show only processes owned by the given user (alias)"),
+        arg("-u", action="store_true", help="sort by CPU and show only running processes"),
+    ]
 
 
-# Linux/procps top.
-_LINUX_OPTIONS: dict[str, str] = {
-    "-b": "batch mode — all output to stdout, no curses",
-    "-c": "toggle command-line / program-name display",
-    "-d": "delay between updates in seconds.tenths",
-    "-E": "force summary memory scale (k, m, g, t, p, e)",
-    "-e": "force task memory scale (k, m, g, t, p)",
-    "-H": "show individual threads",
-    "-h": "show help and exit",
-    "-i": "toggle idle-process filter",
-    "-n": "maximum number of iterations",
-    "-O": "list available output fields and exit",
-    "-o": "sort by the given field",
-    "-p": "monitor only the given PIDs (comma-separated)",
-    "-S": "toggle cumulative-time mode",
-    "-s": "secure mode",
-    "-U": "monitor processes owned by the given user (effective UID)",
-    "-u": "monitor processes owned by the given user (real UID)",
-    "-V": "show version and exit",
-    "-w": "wide output (optional column count)",
-}
-
-_LINUX_ARGS: dict[str, object] = {
-    "-d": "SECS.TENTHS",
-    "-E": "SCALE",
-    "-e": "SCALE",
-    "-n": "ITERATIONS",
-    "-o": "FIELD",
-    "-p": ("PID[,PID]", PidCompleter()),
-    "-U": "USER",
-    "-u": "USER",
-    "-w": "COLUMNS",
-}
+def _linux_params() -> list:
+    return [
+        arg("-b", action="store_true", help="batch mode — all output to stdout, no curses"),
+        arg("-c", action="store_true", help="toggle command-line / program-name display"),
+        arg("-d", metavar="SECS.TENTHS", help="delay between updates in seconds.tenths"),
+        arg("-E", metavar="SCALE", help="force summary memory scale (k, m, g, t, p, e)"),
+        arg("-e", metavar="SCALE", help="force task memory scale (k, m, g, t, p)"),
+        arg("-H", action="store_true", help="show individual threads"),
+        arg("-h", action="store_true", help="show help and exit"),
+        arg("-i", action="store_true", help="toggle idle-process filter"),
+        arg("-n", metavar="ITERATIONS", help="maximum number of iterations"),
+        arg("-O", action="store_true", help="list available output fields and exit"),
+        arg("-o", metavar="FIELD", help="sort by the given field"),
+        arg("-p", metavar="PID[,PID]", help="monitor only the given PIDs (comma-separated)",
+            completer=PidCompleter()),
+        arg("-S", action="store_true", help="toggle cumulative-time mode"),
+        arg("-s", action="store_true", help="secure mode"),
+        arg("-U", metavar="USER", help="monitor processes owned by the given user (effective UID)"),
+        arg("-u", metavar="USER", help="monitor processes owned by the given user (real UID)"),
+        arg("-V", action="store_true", help="show version and exit"),
+        arg("-w", metavar="COLUMNS", help="wide output (optional column count)"),
+    ]
 
 
 def register() -> None:
     if shutil.which("top") is None:
         return
-    if sys.platform == "darwin":
-        options, opt_args = _MACOS_OPTIONS, _MACOS_ARGS
-    else:
-        options, opt_args = _LINUX_OPTIONS, _LINUX_ARGS
+    params = _macos_params() if sys.platform == "darwin" else _linux_params()
     command_registry.command(
         "top",
         help="display tasks and system resource usage",
-        params=flag_args(options, values=opt_args),
+        params=params,
     )
