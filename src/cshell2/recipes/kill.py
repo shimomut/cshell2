@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import Completer, Completion, CompletionContext, OptionsCompleter
 
 KILL_OPTIONS: dict[str, str] = {
@@ -79,11 +79,18 @@ class ProcessNameCompleter(Completer):
 
 
 def register() -> None:
-    command_registry.register_external_completers("kill", {
-        None: OptionsCompleter(KILL_OPTIONS),
-        0: ProcessCompleter(),
-        1: ProcessCompleter(),
-    }, description="send a signal to a process")
-    command_registry.register_external_completers("pkill", {
-        0: ProcessNameCompleter(),
-    }, description="send a signal to processes by name")
+    command_registry.command(
+        "kill",
+        help="send a signal to a process",
+        params=[
+            arg("pid", nargs="*", help="process ID", completer=ProcessCompleter()),
+        ],
+        options_completer=OptionsCompleter(KILL_OPTIONS),
+    )
+    command_registry.command(
+        "pkill",
+        help="send a signal to processes by name",
+        params=[
+            arg("name", nargs="*", help="process name pattern", completer=ProcessNameCompleter()),
+        ],
+    )

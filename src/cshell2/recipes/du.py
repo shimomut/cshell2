@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import FileCompleter, OptionsCompleter
 
 # macOS du  (BSD du — from `man du` on Darwin)
@@ -77,13 +77,15 @@ _LINUX_ARGS: dict[str, str] = {
 
 def register() -> None:
     if sys.platform == "darwin":
-        options, args = _MACOS_OPTIONS, _MACOS_ARGS
+        options, opt_args = _MACOS_OPTIONS, _MACOS_ARGS
     else:
-        options, args = _LINUX_OPTIONS, _LINUX_ARGS
+        options, opt_args = _LINUX_OPTIONS, _LINUX_ARGS
 
-    command_registry.register_external_completers("du", {
-        None: OptionsCompleter(options, args=args),
-        0: FileCompleter(),
-        1: FileCompleter(),
-        2: FileCompleter(),
-    }, description="estimate file space usage")
+    command_registry.command(
+        "du",
+        help="estimate file space usage",
+        params=[
+            arg("path", nargs="*", help="file or directory", completer=FileCompleter()),
+        ],
+        options_completer=OptionsCompleter(options, args=opt_args),
+    )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import (
     Completer,
     Completion,
@@ -224,35 +224,18 @@ class _TarOptionsCompleter(OptionsCompleter):
         return used
 
 
-class _TarCompletersDict(dict):
-    """Completers map that routes every integer key to the smart positional.
-
-    The shell's dispatch chain calls ``completers.get(None)`` for flag
-    completion and ``completers.get(<positional_index>)`` for value
-    completion.  We serve the same :class:`_TarPositionalCompleter` for every
-    positional slot — it inspects ``ctx.args`` itself to decide between
-    archive-aware and member-file completion.
-    """
-
-    def __init__(self, options_completer: OptionsCompleter, positional: Completer) -> None:
-        super().__init__({None: options_completer})
-        self._positional = positional
-
-    def get(self, key, default=None):
-        if isinstance(key, int):
-            return self._positional
-        return super().get(key, default)
-
-
 def register() -> None:
     if shutil.which("tar") is None:
         return
     # Patch -f to use the archive-aware completer.
-    args = dict(TAR_ARGS)
-    args["-f"] = ("ARCHIVE", TarArchiveCompleter())
-    options = _TarOptionsCompleter(TAR_OPTIONS, args=args)
-    positional = _TarPositionalCompleter()
-    command_registry.register_external_completers(
-        "tar", _TarCompletersDict(options, positional),
-        description="create, extract, or list tar archives",
+    flag_args = dict(TAR_ARGS)
+    flag_args["-f"] = ("ARCHIVE", TarArchiveCompleter())
+    command_registry.command(
+        "tar",
+        help="create, extract, or list tar archives",
+        params=[
+            arg("path", nargs="*", help="archive or member file",
+                completer=_TarPositionalCompleter()),
+        ],
+        options_completer=_TarOptionsCompleter(TAR_OPTIONS, args=flag_args),
     )

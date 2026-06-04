@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 import sys
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import FileCompleter, OptionsCompleter
 
 # BSD rm (macOS).
@@ -47,14 +47,14 @@ def register() -> None:
     if shutil.which("rm") is None:
         return
     if sys.platform == "darwin":
-        options, args = _MACOS_OPTIONS, {}
+        options, opt_args = _MACOS_OPTIONS, {}
     else:
-        options, args = _LINUX_OPTIONS, _LINUX_ARGS
-    command_registry.register_external_completers("rm", {
-        None: OptionsCompleter(options, args=args),
-        0: FileCompleter(),
-        1: FileCompleter(),
-        2: FileCompleter(),
-        3: FileCompleter(),
-        4: FileCompleter(),
-    }, description="remove files or directories")
+        options, opt_args = _LINUX_OPTIONS, _LINUX_ARGS
+    command_registry.command(
+        "rm",
+        help="remove files or directories",
+        params=[
+            arg("path", nargs="*", help="file or directory to remove", completer=FileCompleter()),
+        ],
+        options_completer=OptionsCompleter(options, args=opt_args),
+    )

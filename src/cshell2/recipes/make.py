@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import Completer, Completion, CompletionContext, DirCompleter, FileCompleter, OptionsCompleter
 
 
@@ -89,11 +89,12 @@ class MakeTargetCompleter(Completer):
 
 
 def register() -> None:
-    # _positional_index() in shell.py strips flags and their values before
-    # looking up the positional completer, so positions 0–2 here refer to
-    # the 1st, 2nd, and 3rd *actual* targets — flags never inflate the index.
-    target_completer = MakeTargetCompleter()
-    command_registry.register_external_completers("make", {
-        None: OptionsCompleter(MAKE_OPTIONS, args=MAKE_ARGS),
-        **{i: target_completer for i in range(3)},
-    }, description="build targets from a Makefile")
+    command_registry.command(
+        "make",
+        help="build targets from a Makefile",
+        params=[
+            arg("target", nargs="*", help="target to build",
+                completer=MakeTargetCompleter()),
+        ],
+        options_completer=OptionsCompleter(MAKE_OPTIONS, args=MAKE_ARGS),
+    )

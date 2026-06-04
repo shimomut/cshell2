@@ -98,9 +98,11 @@ def register() -> None:
     if shutil.which("top") is None:
         return
     if sys.platform == "darwin":
-        options, args = _MACOS_OPTIONS, _MACOS_ARGS
+        options, opt_args = _MACOS_OPTIONS, _MACOS_ARGS
     else:
-        options, args = _LINUX_OPTIONS, _LINUX_ARGS
-    command_registry.register_external_completers("top", {
-        None: OptionsCompleter(options, args=args),
-    }, description="display tasks and system resource usage")
+        options, opt_args = _LINUX_OPTIONS, _LINUX_ARGS
+    command_registry.command(
+        "top",
+        help="display tasks and system resource usage",
+        options_completer=OptionsCompleter(options, args=opt_args),
+    )

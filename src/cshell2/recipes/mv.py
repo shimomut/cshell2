@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 import sys
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import FileCompleter, OptionsCompleter
 
 # BSD mv (macOS).
@@ -44,14 +44,14 @@ def register() -> None:
     if shutil.which("mv") is None:
         return
     if sys.platform == "darwin":
-        options, args = _MACOS_OPTIONS, {}
+        options, opt_args = _MACOS_OPTIONS, {}
     else:
-        options, args = _LINUX_OPTIONS, _LINUX_ARGS
-    command_registry.register_external_completers("mv", {
-        None: OptionsCompleter(options, args=args),
-        0: FileCompleter(),
-        1: FileCompleter(),
-        2: FileCompleter(),
-        3: FileCompleter(),
-        4: FileCompleter(),
-    }, description="move (rename) files")
+        options, opt_args = _LINUX_OPTIONS, _LINUX_ARGS
+    command_registry.command(
+        "mv",
+        help="move (rename) files",
+        params=[
+            arg("path", nargs="*", help="source or destination path", completer=FileCompleter()),
+        ],
+        options_completer=OptionsCompleter(options, args=opt_args),
+    )

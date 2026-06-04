@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import FileCompleter, OptionsCompleter
 
 GREP_OPTIONS: dict[str, str] = {
@@ -51,12 +51,6 @@ GREP_ARGS: dict[str, str] = {
 
 
 def register() -> None:
-    completers = {
-        None: OptionsCompleter(GREP_OPTIONS, args=GREP_ARGS),
-        0: FileCompleter(),
-        1: FileCompleter(),
-        2: FileCompleter(),
-    }
     descriptions = {
         "grep":  "print lines matching a pattern",
         "egrep": "print lines matching an extended regex pattern",
@@ -64,6 +58,11 @@ def register() -> None:
         "rgrep": "recursively print lines matching a pattern",
     }
     for cmd in ("grep", "egrep", "fgrep", "rgrep"):
-        command_registry.register_external_completers(
-            cmd, completers, description=descriptions[cmd],
+        command_registry.command(
+            cmd,
+            help=descriptions[cmd],
+            params=[
+                arg("file", nargs="*", help="file to search", completer=FileCompleter()),
+            ],
+            options_completer=OptionsCompleter(GREP_OPTIONS, args=GREP_ARGS),
         )

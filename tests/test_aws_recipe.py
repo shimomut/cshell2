@@ -15,7 +15,6 @@ from cshell2.recipes.aws import (
     AwsProfileCompleter,
     AwsRegionCompleter,
     AWS_REGIONS,
-    _AwsCompletersDict,
     _AwsRegionVar,
 )
 from cshell2.variables import registry as var_registry
@@ -140,47 +139,32 @@ def test_completer_cache_invalidates_on_line_change():
 
 
 # ---------------------------------------------------------------------------
-# _AwsCompletersDict — wildcard-positional routing
-# ---------------------------------------------------------------------------
-
-def test_completers_dict_routes_all_keys_to_one_completer():
-    cc = AwsCompleter()
-    d = _AwsCompletersDict(cc)
-    # The shell looks up None (flags) and integer keys (positional indices).
-    assert d.get(None) is cc
-    assert d.get(0) is cc
-    assert d.get(1) is cc
-    assert d.get(99) is cc
-    # Unknown key types fall through to the default.
-    assert d.get("not-an-index") is None
-    assert d.get("not-an-index", "default") == "default"
-
-
-# ---------------------------------------------------------------------------
-# Recipe registration
+# Recipe registration — delegate completer routes flags + every positional
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
 def _clean_aws_registration(monkeypatch):
     """Snapshot/restore the registry state mutated by aws_recipe.register()."""
-    saved_external = command_registry._external_completers.copy()
-    saved_vars = list(var_registry._vars) if hasattr(var_registry, "_vars") else None
+    had_aws = "aws" in command_registry._commands
+    saved_aws = command_registry._commands.get("aws")
     yield
-    command_registry._external_completers.clear()
-    command_registry._external_completers.update(saved_external)
-    # Variable registry has no direct reset; we just remove the names we know
-    # the recipe registers, if they're not already builtins.
+    if had_aws:
+        command_registry._commands["aws"] = saved_aws
+    else:
+        command_registry._commands.pop("aws", None)
     for name in ("aws_region", "aws_profile"):
         if name not in getattr(var_registry, "_builtin_names", set()):
             var_registry._vars.pop(name, None) if hasattr(var_registry, "_vars") else None
 
 
-def test_register_installs_external_completer(_clean_aws_registration):
+def test_register_installs_delegate_completer(_clean_aws_registration):
+    from cshell2.commands import WILDCARD
     aws_recipe.register()
-    completers = command_registry.get_external_completers("aws")
-    assert completers is not None
-    assert isinstance(completers, _AwsCompletersDict)
-    assert isinstance(completers.get(None), AwsCompleter)
+    cmd = command_registry.get("aws")
+    assert cmd is not None
+    # delegate=AwsCompleter() installs the same completer at None and WILDCARD.
+    assert isinstance(cmd.completers.get(None), AwsCompleter)
+    assert cmd.completers.get(None) is cmd.completers.get(WILDCARD)
 
 
 def test_register_preserves_aws_region_var(_clean_aws_registration):

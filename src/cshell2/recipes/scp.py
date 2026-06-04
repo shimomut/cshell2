@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import shutil
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import (
     Completer,
     Completion,
@@ -104,11 +104,11 @@ class _RemoteOrFileCompleter(Completer):
 def register() -> None:
     if shutil.which("scp") is None:
         return
-    completer = _RemoteOrFileCompleter()
-    command_registry.register_external_completers("scp", {
-        None: OptionsCompleter(SCP_OPTIONS, args=SCP_ARGS),
-        0: completer,
-        1: completer,
-        2: completer,
-        3: completer,
-    }, description="secure copy files between hosts over SSH")
+    command_registry.command(
+        "scp",
+        help="secure copy files between hosts over SSH",
+        params=[
+            arg("path", nargs="*", help="source or destination", completer=_RemoteOrFileCompleter()),
+        ],
+        options_completer=OptionsCompleter(SCP_OPTIONS, args=SCP_ARGS),
+    )

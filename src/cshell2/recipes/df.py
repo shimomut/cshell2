@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import FileCompleter, OptionsCompleter
 
 DF_OPTIONS: dict[str, str] = {
@@ -34,8 +34,11 @@ DF_ARGS: dict[str, str] = {
 
 
 def register() -> None:
-    command_registry.register_external_completers("df", {
-        None: OptionsCompleter(DF_OPTIONS, args=DF_ARGS),
-        0: FileCompleter(),
-        1: FileCompleter(),
-    }, description="report file system disk space usage")
+    command_registry.command(
+        "df",
+        help="report file system disk space usage",
+        params=[
+            arg("path", nargs="*", help="file or mount point", completer=FileCompleter()),
+        ],
+        options_completer=OptionsCompleter(DF_OPTIONS, args=DF_ARGS),
+    )

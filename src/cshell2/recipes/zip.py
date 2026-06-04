@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import FileCompleter, OptionsCompleter
 
 ZIP_OPTIONS: dict[str, str] = {
@@ -50,11 +50,11 @@ ZIP_ARGS: dict[str, str] = {
 def register() -> None:
     if shutil.which("zip") is None:
         return
-    command_registry.register_external_completers("zip", {
-        None: OptionsCompleter(ZIP_OPTIONS, args=ZIP_ARGS),
-        0: FileCompleter(),
-        1: FileCompleter(),
-        2: FileCompleter(),
-        3: FileCompleter(),
-        4: FileCompleter(),
-    }, description="package and compress files into a zip archive")
+    command_registry.command(
+        "zip",
+        help="package and compress files into a zip archive",
+        params=[
+            arg("path", nargs="*", help="archive or input file", completer=FileCompleter()),
+        ],
+        options_completer=OptionsCompleter(ZIP_OPTIONS, args=ZIP_ARGS),
+    )

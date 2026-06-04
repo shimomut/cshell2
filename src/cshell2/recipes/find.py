@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import FileCompleter, OptionsCompleter
 
 FIND_OPTIONS: dict[str, str] = {
@@ -77,8 +77,11 @@ FIND_ARGS: dict[str, str] = {
 
 
 def register() -> None:
-    command_registry.register_external_completers("find", {
-        None: OptionsCompleter(FIND_OPTIONS, args=FIND_ARGS),
-        0: FileCompleter(),
-        1: FileCompleter(),
-    }, description="search for files in a directory hierarchy")
+    command_registry.command(
+        "find",
+        help="search for files in a directory hierarchy",
+        params=[
+            arg("path", nargs="*", help="starting directory", completer=FileCompleter()),
+        ],
+        options_completer=OptionsCompleter(FIND_OPTIONS, args=FIND_ARGS),
+    )

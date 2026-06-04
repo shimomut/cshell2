@@ -148,6 +148,8 @@ CURL_ARGS: dict[str, object] = {
 def register() -> None:
     if shutil.which("curl") is None:
         return
-    command_registry.register_external_completers("curl", {
-        None: OptionsCompleter(CURL_OPTIONS, args=CURL_ARGS),
-    }, description="transfer data from or to a URL")
+    command_registry.command(
+        "curl",
+        help="transfer data from or to a URL",
+        options_completer=OptionsCompleter(CURL_OPTIONS, args=CURL_ARGS),
+    )

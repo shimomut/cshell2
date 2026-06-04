@@ -96,11 +96,10 @@ def hello(name):
 ```
 
 Methods:
-- `command(name, *, help=None, params=None)` — decorator to register a Python function. `params=[arg(...)]` declares positionals and flags; the registry derives both an argparse parser and the per-position completer dict from the same list.
+- `command(name, *, help=None, params=None, delegate=None, options_completer=None)` — register a Python function (with handler) or an external recipe (no handler attached). `params=[arg(...)]` declares positionals and flags; the registry derives both an argparse parser and the per-position completer dict from the same list. `delegate=Completer` installs a single completer at every slot (used when an external tool drives its own completion protocol). `options_completer=OptionsCompleter` overrides the auto-built flag completer when a custom subclass is needed.
 - `register(cmd: Command)` — register a pre-built `Command` object (mirrors `var_registry.register(var_object)`)
-- `register_external_completers(command_name, completers)` — attach a `{None: OptionsCompleter, N: positional}` dict to a system command (e.g. `git`, `make`) without wrapping it as a Python command
 - `mark_builtins()` — snapshot current commands as builtins (not removed on `reload`)
-- `clear_user_commands()` — remove non-builtin commands and all external completers
+- `clear_user_commands()` — remove non-builtin commands and aliases
 
 Dispatch order:
 1. Built-in commands (cd, exit, reload, var, unset, help, context)
@@ -305,14 +304,25 @@ Python commands declare positionals and flags via a single `params=[arg(...)]` l
 def ssh_instance(account, region, instance_id, verbose=False, port=22): ...
 ```
 
-External completers for system commands take the underlying `{None: ..., N: ...}` dict directly. An optional `description=` surfaces a one-line summary in the status bar when the caret is on the command name (mirroring `help=` on Python commands):
+External recipes use the same `registry.command()` API as Python commands — they just omit the handler.  `nargs="*"` / `"+"` on a positional makes that completer serve every trailing slot, replacing the old per-index dict spam:
 
 ```python
-registry.register_external_completers("git", {
-    None: OptionsCompleter({"-v": "verbose", "--no-pager": "no pager"}),
-    0: ChoiceCompleter(["commit", "push", "pull", ...]),
-}, description="distributed version control")
+registry.command(
+    "git",
+    help="distributed version control",
+    params=[
+        arg("subcommand", choices=["commit", "push", "pull", ...]),
+        arg("path", nargs="*", help="repository path", completer=FileCompleter()),
+        arg("-v", "--verbose", action="store_true", help="verbose"),
+        arg("--no-pager", action="store_true", help="no pager"),
+    ],
+)
 ```
+
+Two escape hatches on `registry.command()` cover the cases where flags or positional dispatch can't be expressed via `params` alone:
+
+* `delegate=Completer` — install a single completer at **every** slot (flags + every positional index).  Used when an external tool ships its own completion protocol that decides per-call what to return (e.g. `aws_completer`).
+* `options_completer=OptionsCompleter` — override the auto-built flag completer at the `None` slot.  Used when a custom subclass is needed (e.g. tar's bundle-letter handling).
 
 #### OptionsCompleter — Multi-Select Flag Picker
 
@@ -522,7 +532,7 @@ Available built-in recipes: `aws`, `df`, `du`, `find`, `git`, `grep`, `kill`, `l
 - **`CobraCompleter`** drives `<cmd> __complete` for cobra-based CLIs (`docker`, `kubectl`, `helm`, `gh`, `argocd`, …). See `doc/cobra-fallback.md`.
 - **`ArgcompleteCompleter`** drives the argcomplete protocol (env vars + fd 8) for Python CLIs marked with `# PYTHON_ARGCOMPLETE_OK` (`pipx`, `conda`, `pre-commit`, `tox`, `pdm`, `httpie`, …). See `doc/argcomplete-fallback.md`.
 
-Each recipe calls `registry.register_external_completers(name, {...})` with an `OptionsCompleter` under `None` and positional completers as needed.
+Each recipe calls `registry.command(name, help=..., params=[...])` (with no handler attached) to register completion + flag metadata for an external command.  The shell's dispatch path (`shell.py:_execute`) treats handler-less Commands as external recipes and falls through to the system-command path.
 
 #### User-Defined Recipes
 
@@ -538,17 +548,20 @@ A user recipe file must define a `register()` function with the same shape as bu
 
 ```python
 # ~/.cshell2/recipes/my_tool.py
-from cshell2.commands import registry
-from cshell2.completion import OptionsCompleter, ChoiceCompleter, CallbackCompleter
+from cshell2.commands import arg, registry
+from cshell2.completion import CallbackCompleter, ChoiceCompleter
 
 def register():
-    registry.register_external_completers("my-tool", {
-        None: OptionsCompleter(
-            {"-v": "verbose", "--dry-run": "don't apply changes"},
-        ),
-        0: ChoiceCompleter(["deploy", "rollback", "status"]),
-        1: CallbackCompleter(lambda: _list_targets()),
-    }, description="my-tool — deploy/rollback/status helper")
+    registry.command(
+        "my-tool",
+        help="my-tool — deploy/rollback/status helper",
+        params=[
+            arg("subcommand", choices=["deploy", "rollback", "status"]),
+            arg("target", help="deploy target", completer=CallbackCompleter(_list_targets)),
+            arg("-v", "--verbose", action="store_true", help="verbose"),
+            arg("--dry-run", action="store_true", help="don't apply changes"),
+        ],
+    )
 
 def _list_targets():
     return ["web", "worker", "scheduler"]

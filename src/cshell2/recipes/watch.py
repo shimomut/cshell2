@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import shutil
 
-from ..commands import registry as command_registry
+from ..commands import arg, get_positional_completer, registry as command_registry
 from ..completion import (
     CommandNameCompleter,
     Completer,
@@ -125,10 +125,9 @@ class _WatchDispatcher(Completer):
 
     def _dispatch_inner(self, command_name: str, ctx: CompletionContext) -> list[Completion]:
         cmd = command_registry.get(command_name)
-        ext = command_registry.get_external_completers(command_name)
-        completers_dict = cmd.completers if cmd else ext
+        completers_dict = cmd.completers if cmd else None
 
-        if completers_dict is not None:
+        if completers_dict:
             options_completer = completers_dict.get(None)
 
             # Flag value: typing "<cmd> -X <TAB>" shows the value hint or its
@@ -155,7 +154,7 @@ class _WatchDispatcher(Completer):
 
             # Positional fallback.
             pos_idx = _inner_positional_index(ctx.args, options_completer)
-            positional_completer = completers_dict.get(pos_idx)
+            positional_completer = get_positional_completer(completers_dict, pos_idx)
             if positional_completer and positional_completer.should_activate(ctx):
                 results = positional_completer.complete(ctx)
                 if results:
@@ -186,34 +185,15 @@ def _inner_positional_index(args: list[str], options_completer) -> int:
     return pos
 
 
-class _WatchCompletersDict(dict):
-    """Routes completer lookups: None → watch options, ints → dispatcher."""
-
-    def __init__(
-        self,
-        options_completer: OptionsCompleter,
-        dispatcher: _WatchDispatcher,
-    ) -> None:
-        super().__init__()
-        self._options = options_completer
-        self._dispatcher = dispatcher
-
-    def get(self, key, default=None):
-        if key is None:
-            return self._options
-        if isinstance(key, int):
-            return self._dispatcher
-        return default
-
-
 def register() -> None:
     if shutil.which("watch") is None:
         return
-    command_registry.register_external_completers(
+    command_registry.command(
         "watch",
-        _WatchCompletersDict(
-            OptionsCompleter(WATCH_OPTIONS, args=WATCH_ARGS),
-            _WatchDispatcher(),
-        ),
-        description="execute a program periodically, showing output",
+        help="execute a program periodically, showing output",
+        params=[
+            arg("command", nargs="*", help="command to run repeatedly",
+                completer=_WatchDispatcher()),
+        ],
+        options_completer=OptionsCompleter(WATCH_OPTIONS, args=WATCH_ARGS),
     )

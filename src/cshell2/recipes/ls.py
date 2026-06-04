@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import FileCompleter, OptionsCompleter
 
 LS_OPTIONS: dict[str, str] = {
@@ -38,9 +38,11 @@ LS_OPTIONS: dict[str, str] = {
 
 
 def register() -> None:
-    command_registry.register_external_completers("ls", {
-        None: OptionsCompleter(LS_OPTIONS),
-        0: FileCompleter(),
-        1: FileCompleter(),
-        2: FileCompleter(),
-    }, description="list directory contents")
+    command_registry.command(
+        "ls",
+        help="list directory contents",
+        params=[
+            arg("path", nargs="*", help="file or directory", completer=FileCompleter()),
+        ],
+        options_completer=OptionsCompleter(LS_OPTIONS),
+    )

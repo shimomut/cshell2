@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import ChoiceCompleter, FileCompleter, OptionsCompleter
 
 CHMOD_OPTIONS: dict[str, str] = {
@@ -51,10 +51,12 @@ COMMON_MODES: list[str] = [
 def register() -> None:
     if shutil.which("chmod") is None:
         return
-    command_registry.register_external_completers("chmod", {
-        None: OptionsCompleter(CHMOD_OPTIONS),
-        0: ChoiceCompleter(COMMON_MODES),
-        1: FileCompleter(),
-        2: FileCompleter(),
-        3: FileCompleter(),
-    }, description="change file mode bits")
+    command_registry.command(
+        "chmod",
+        help="change file mode bits",
+        params=[
+            arg("mode", help="mode bits (e.g. 755 or u+x)", completer=ChoiceCompleter(COMMON_MODES)),
+            arg("file", nargs="*", help="file or directory", completer=FileCompleter()),
+        ],
+        options_completer=OptionsCompleter(CHMOD_OPTIONS),
+    )

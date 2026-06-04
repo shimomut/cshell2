@@ -26,7 +26,7 @@ if not IS_WINDOWS:
     import tty
 
 from . import terminal
-from .commands import arg, CommandRegistry, registry as command_registry
+from .commands import arg, CommandRegistry, get_positional_completer, registry as command_registry
 from .completion import (
     CommandNameCompleter,
     CompletionContext,
@@ -565,24 +565,36 @@ def _flag_label(flag: str, arg_hint: str, description: str) -> str:
     return flag
 
 
-def _positional_label(cmd, pos_idx: int, command_name: str) -> str:
-    """Return a status-bar label for the positional argument at *pos_idx*.
-
-    Uses the ``Arg`` descriptor's name and help text when available, falling
-    back to ``"{command_name}  arg N"`` for external commands or when the
-    param list doesn't cover this index.
-    """
-    if cmd is None or cmd.params is None:
-        return f"arg {pos_idx + 1}"
-    positionals = [a for a in cmd.params if a.names and not a.names[0].startswith("-")]
-    if pos_idx >= len(positionals):
-        return f"arg {pos_idx + 1}"
-    param = positionals[pos_idx]
+def _label_from_arg(param) -> str:
+    """Format an Arg descriptor as a status-bar label."""
     name = param.names[0]
     help_text = param.kwargs.get("help", "")
     if help_text:
         return f"{name}: {help_text}"
     return name
+
+
+def _positional_label(cmd, pos_idx: int, command_name: str) -> str:
+    """Return a status-bar label for the positional argument at *pos_idx*.
+
+    Reads from the resolved Command's ``params`` list.  A positional declared
+    with ``nargs="*"``/``"+"`` covers every slot from its position onward
+    (mirroring the WILDCARD entry in the completers dict).  Falls back to
+    ``"arg N"`` when no descriptor covers this index.
+    """
+    if cmd is None or cmd.params is None:
+        return f"arg {pos_idx + 1}"
+    positionals = [a for a in cmd.params if a.names and not a.names[0].startswith("-")]
+    if not positionals:
+        return f"arg {pos_idx + 1}"
+    if pos_idx < len(positionals):
+        return _label_from_arg(positionals[pos_idx])
+    # Beyond the declared list: if the last positional is a wildcard, reuse
+    # its label for every subsequent slot.
+    last = positionals[-1]
+    if last.kwargs.get("nargs") in ("*", "+"):
+        return _label_from_arg(last)
+    return f"arg {pos_idx + 1}"
 
 
 class Shell:
@@ -672,7 +684,6 @@ class Shell:
         )
 
         cmd = self.registry.get(command_name)
-        ext = self.registry.get_external_completers(command_name)
 
         # Tree-shaped command: resolve to the current node, then offer
         # sub-command names / positionals / inherited flags.
@@ -690,16 +701,16 @@ class Shell:
             )
             return self._complete_tree_node(node, tree_ctx, prefix)
 
-        completers_dict = cmd.completers if cmd else ext
+        completers_dict = cmd.completers if cmd else None
 
         has_completer = False
         completions: list[Completion] = []
         label = command_name  # default: just show the command name
 
-        if completers_dict is not None:
+        if completers_dict:
             options_completer = completers_dict.get(None)
             pos_idx = _positional_index(args, options_completer)
-            positional_completer = completers_dict.get(pos_idx)
+            positional_completer = get_positional_completer(completers_dict, pos_idx)
 
             # When the last arg is a value-taking flag (e.g. "du -d <TAB>"),
             # suppress positional/file completion and return a hint instead.
@@ -789,31 +800,23 @@ class Shell:
             cmd = self.registry.get(token)
             if cmd is not None and cmd.description:
                 return f"{token}: {cmd.description}"
-            ext_desc = self.registry.get_external_description(token)
-            if ext_desc:
-                return f"{token}: {ext_desc}"
             return None
 
         command_name = tokens_before[0]
         preceding_args = tokens_before[1:]
 
         cmd = self.registry.get(command_name)
-        ext = self.registry.get_external_completers(command_name)
+        if cmd is None:
+            return None
 
         # Resolve to the right node and options_completer.
-        if cmd is not None and cmd.children:
+        if cmd.children:
             node, remaining_args = cmd.resolve(preceding_args)
             options_completer = node.merged_options_completer()
-        elif cmd is not None:
+        else:
             node = cmd
             remaining_args = preceding_args
             options_completer = cmd.completers.get(None)
-        elif ext is not None:
-            node = None
-            remaining_args = preceding_args
-            options_completer = ext.get(None)
-        else:
-            return None
 
         if token.startswith("-"):
             # ── Flag token ────────────────────────────────────────────────────
@@ -841,7 +844,7 @@ class Shell:
         # For tree commands: if this slot is a sub-command name, show its
         # description (or fall back to "<cmd> subcommand" for a partial token
         # that doesn't yet match a child — mirrors _complete_tree_node).
-        if node is not None and node.children and pos_idx == 0:
+        if node.children and pos_idx == 0:
             if token in node.children:
                 child = node.children[token]
                 if child.description:
@@ -849,7 +852,7 @@ class Shell:
                 return f"{command_name} {token}"
             return f"{command_name} subcommand"
 
-        return _positional_label(node if node is not None else cmd, pos_idx, command_name)
+        return _positional_label(node, pos_idx, command_name)
 
     def _complete_tree_node(self, node, ctx, prefix):
         """Compute completions when the user is typing within a sub-command tree.
@@ -903,7 +906,7 @@ class Shell:
             return results, prefix, f"{cmd_name} subcommand"
 
         # Leaf-or-deeper: use the resolved node's own positional completers.
-        positional_completer = node.completers.get(pos_idx)
+        positional_completer = get_positional_completer(node.completers, pos_idx)
         if positional_completer is not None and positional_completer.should_activate(ctx):
             return positional_completer.complete(ctx), prefix, _positional_label(node, pos_idx, cmd_name)
 
@@ -912,7 +915,7 @@ class Shell:
         # completers at all (i.e. it didn't declare any positionals).  This
         # matches the flat-command behaviour where a registered completer
         # returning [] suppresses file fallback.
-        if not any(isinstance(k, int) for k in node.completers):
+        if not any(k is not None for k in node.completers):
             return self._file_completer.complete(ctx), prefix, cmd_name
         return [], prefix, cmd_name
 

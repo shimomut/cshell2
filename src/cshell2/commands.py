@@ -109,8 +109,13 @@ def arg(*names: str, completer: Completer | None = None, **kwargs) -> Arg:
 # argparse actions that consume a following value token
 _VALUE_ACTIONS = {"store", "append", "extend"}
 
+# Sentinel key meaning "any positional index ≥ this slot".  Used for arg() with
+# nargs="*" or nargs="+" — that completer becomes the source of truth for every
+# positional slot from its declared position onward.
+WILDCARD = ...
 
-def _build_completers(params: list[Arg]) -> dict[int | None, Completer]:
+
+def _build_completers(params: list[Arg]) -> dict:
     """Derive a completers dict from a list of :class:`Arg` descriptors.
 
     Rules:
@@ -118,6 +123,12 @@ def _build_completers(params: list[Arg]) -> dict[int | None, Completer]:
     * **Positional arg** — if ``completer=`` is set, use it; otherwise if
       ``choices=`` is set derive a :class:`ChoiceCompleter` automatically.
       Keyed by zero-based positional index.
+
+    * **Wildcard positional** — when ``nargs="*"`` or ``nargs="+"`` is set,
+      the completer is stored under the :data:`WILDCARD` (``...``) key instead
+      of an integer.  It serves every positional slot from that point on, so
+      a single ``arg("targets", nargs="*", ...)`` replaces the old ``0: …,
+      1: …, 2: …`` boilerplate.
 
     * **Flag** — all flag names are collected into an
       :class:`OptionsCompleter` under the ``None`` key.  ``help=`` text
@@ -128,7 +139,7 @@ def _build_completers(params: list[Arg]) -> dict[int | None, Completer]:
     """
     all_options: dict[str, str] = {}
     args_hints: dict[str, str | tuple] = {}
-    pos_completers: dict[int, Completer] = {}
+    pos_completers: dict = {}
     pos_idx = 0
 
     for a in params:
@@ -140,7 +151,10 @@ def _build_completers(params: list[Arg]) -> dict[int | None, Completer]:
             if comp is None and "choices" in a.kwargs:
                 comp = ChoiceCompleter(list(a.kwargs["choices"]))
             if comp is not None:
-                pos_completers[pos_idx] = comp
+                if a.kwargs.get("nargs") in ("*", "+"):
+                    pos_completers[WILDCARD] = comp
+                else:
+                    pos_completers[pos_idx] = comp
             pos_idx += 1
 
         else:
@@ -160,11 +174,24 @@ def _build_completers(params: list[Arg]) -> dict[int | None, Completer]:
                 for name in a.names:
                     args_hints[name] = hint
 
-    result: dict[int | None, Completer] = {}
+    result: dict = {}
     if all_options:
         result[None] = OptionsCompleter(all_options, args=args_hints or None)
     result.update(pos_completers)
     return result
+
+
+def get_positional_completer(completers: dict, pos_idx: int) -> Completer | None:
+    """Look up a positional completer by index, falling back to the wildcard slot.
+
+    External recipes (and Python commands using ``nargs="*"``) commonly attach
+    a single completer at :data:`WILDCARD` to serve every positional slot.
+    Callers should use this helper rather than ``completers.get(pos_idx)``
+    directly so the wildcard fallback is honoured uniformly.
+    """
+    if pos_idx in completers:
+        return completers[pos_idx]
+    return completers.get(WILDCARD)
 
 
 def _build_usage(cmd_name: str, params: list[Arg]) -> str:
@@ -591,8 +618,6 @@ def _print_group_help(node: Command) -> None:
 class CommandRegistry:
     def __init__(self):
         self._commands: dict[str, Command] = {}
-        self._external_completers: dict[str, dict[int | None, Completer]] = {}
-        self._external_descriptions: dict[str, str] = {}
         self._builtin_names: set[str] = set()
         self._aliases: dict[str, str] = {}
         self._builtin_aliases: set[str] = set()
@@ -602,6 +627,8 @@ class CommandRegistry:
         name: str | None = None,
         params: list[Arg] | None = None,
         help: str | None = None,
+        delegate: Completer | None = None,
+        options_completer: "OptionsCompleter | None" = None,
     ):
         """Register a top-level command, group, or external recipe.
 
@@ -621,6 +648,16 @@ class CommandRegistry:
 
         Decorator forms return the function (back-compat with the prior
         decorator behaviour); bare form returns the :class:`Command` node.
+
+        ``delegate`` — install a single :class:`Completer` as the source of
+        truth for **every** completion slot (flags, all positional indices).
+        Used when an external tool ships its own completer protocol that
+        decides per-call what to return (e.g. ``aws_completer``).  Cannot be
+        combined with ``params``.
+
+        ``options_completer`` — override the auto-built flag completer at
+        the ``None`` slot.  Used when a custom subclass is needed (e.g. tar's
+        bundle-letter handling).
         """
         # Form: @registry.command  (no parens at all)
         if callable(name):
@@ -630,14 +667,20 @@ class CommandRegistry:
 
         # Form: registry.command("name", ...) — bare or @decorator-with-name
         if isinstance(name, str):
-            node = self._make_root(name, params=params, help=help, func=None)
+            node = self._make_root(
+                name, params=params, help=help, func=None,
+                delegate=delegate, options_completer=options_completer,
+            )
             node._pending_help = help
             return node
 
         # Form: @registry.command(params=[...])  (no positional name)
         def decorator(func: Callable) -> Callable:
             cmd_name = func.__name__
-            self._make_root(cmd_name, params=params, help=help, func=func)
+            self._make_root(
+                cmd_name, params=params, help=help, func=func,
+                delegate=delegate, options_completer=options_completer,
+            )
             return func
         return decorator
 
@@ -647,8 +690,16 @@ class CommandRegistry:
         params: list[Arg] | None,
         help: str | None,
         func: Callable | None,
+        delegate: Completer | None = None,
+        options_completer: "OptionsCompleter | None" = None,
     ) -> Command:
         completers = _build_completers(params) if params else {}
+        if delegate is not None:
+            # Same completer at None (flags) and WILDCARD (all positional slots).
+            completers[None] = delegate
+            completers[WILDCARD] = delegate
+        if options_completer is not None:
+            completers[None] = options_completer
         cmd = Command(
             name=name,
             func=func,
@@ -670,37 +721,6 @@ class CommandRegistry:
         """
         self._commands[cmd.name] = cmd
 
-    def register_external_completers(
-        self,
-        command_name: str,
-        completers: dict[int | None, Completer],
-        description: str = "",
-    ) -> None:
-        """Register completers for an external (system) command.
-
-        Use ``None`` as a key for an options completer that activates whenever
-        the user types a ``-``-prefixed token at any argument position:
-
-            registry.register_external_completers("ls", {
-                None: OptionsCompleter({"-l": "long format", ...}),
-                0: FileCompleter(),
-            }, description="list directory contents")
-
-        ``description`` is a one-line summary of the command, surfaced in the
-        status bar when the caret is on the command name (mirroring ``help=``
-        on Python commands).
-        """
-        self._external_completers[command_name] = completers
-        if description:
-            self._external_descriptions[command_name] = description
-
-    def get_external_completers(self, command_name: str) -> dict[int | None, Completer] | None:
-        return self._external_completers.get(command_name)
-
-    def get_external_description(self, command_name: str) -> str:
-        """Return the recipe-supplied one-line description for *command_name*."""
-        return self._external_descriptions.get(command_name, "")
-
     def get(self, name: str) -> Command | None:
         return self._commands.get(name)
 
@@ -716,12 +736,10 @@ class CommandRegistry:
         self._builtin_aliases = set(self._aliases.keys())
 
     def clear_user_commands(self) -> None:
-        """Remove all non-builtin commands, external completers, and aliases."""
+        """Remove all non-builtin commands and aliases."""
         self._commands = {
             k: v for k, v in self._commands.items() if k in self._builtin_names
         }
-        self._external_completers.clear()
-        self._external_descriptions.clear()
         self._aliases = {
             k: v for k, v in self._aliases.items() if k in self._builtin_aliases
         }

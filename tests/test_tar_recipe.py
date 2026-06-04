@@ -179,25 +179,27 @@ class TestTarOptionsCompleter:
 # ---------------------------------------------------------------------------
 
 class TestRegistration:
-    def test_register_smart_dict(self):
-        """The recipe registers a dict that routes every int to the smart completer."""
-        from cshell2.commands import registry as command_registry
+    def test_register_wires_smart_completers(self):
+        """The recipe registers a wildcard positional + bundle-aware options completer."""
+        from cshell2.commands import registry as command_registry, WILDCARD, get_positional_completer
         from cshell2.recipes import tar as tar_recipe
 
         if not _which("tar"):
             pytest.skip("tar not on PATH")
 
         tar_recipe.register()
-        completers = command_registry.get_external_completers("tar")
-        assert completers is not None
-        # The smart positional must be returned for any integer index.
-        c0 = completers.get(0)
-        c1 = completers.get(1)
-        c5 = completers.get(5)
-        assert c0 is c1 is c5
+        cmd = command_registry.get("tar")
+        assert cmd is not None
+        # The wildcard positional serves any integer slot — including indices
+        # past anything the recipe explicitly enumerates.
+        c0 = get_positional_completer(cmd.completers, 0)
+        c5 = get_positional_completer(cmd.completers, 5)
+        assert c0 is c5
         assert isinstance(c0, _TarPositionalCompleter)
+        # The wildcard completer is stored under the WILDCARD sentinel key.
+        assert isinstance(cmd.completers.get(WILDCARD), _TarPositionalCompleter)
         # And the options completer is the bundle-aware subclass.
-        assert isinstance(completers.get(None), _TarOptionsCompleter)
+        assert isinstance(cmd.completers.get(None), _TarOptionsCompleter)
 
 
 def _which(cmd: str) -> bool:

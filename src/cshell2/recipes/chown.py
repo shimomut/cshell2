@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import (
     Completer,
     Completion,
@@ -111,10 +111,12 @@ class OwnerCompleter(Completer):
 def register() -> None:
     if shutil.which("chown") is None:
         return
-    command_registry.register_external_completers("chown", {
-        None: OptionsCompleter(CHOWN_OPTIONS),
-        0: OwnerCompleter(),
-        1: FileCompleter(),
-        2: FileCompleter(),
-        3: FileCompleter(),
-    }, description="change file owner and group")
+    command_registry.command(
+        "chown",
+        help="change file owner and group",
+        params=[
+            arg("owner", help="user or user:group", completer=OwnerCompleter()),
+            arg("file", nargs="*", help="file or directory", completer=FileCompleter()),
+        ],
+        options_completer=OptionsCompleter(CHOWN_OPTIONS),
+    )

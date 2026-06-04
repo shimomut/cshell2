@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import Completer, Completion, CompletionContext, OptionsCompleter
 
 SSH_OPTIONS: dict[str, str] = {
@@ -96,7 +96,11 @@ class SSHHostCompleter(Completer):
 
 
 def register() -> None:
-    command_registry.register_external_completers("ssh", {
-        None: OptionsCompleter(SSH_OPTIONS, args=SSH_ARGS),
-        0: SSHHostCompleter(),
-    }, description="OpenSSH remote login client")
+    command_registry.command(
+        "ssh",
+        help="OpenSSH remote login client",
+        params=[
+            arg("host", help="hostname or user@host", completer=SSHHostCompleter()),
+        ],
+        options_completer=OptionsCompleter(SSH_OPTIONS, args=SSH_ARGS),
+    )

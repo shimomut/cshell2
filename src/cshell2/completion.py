@@ -198,13 +198,10 @@ class CallbackCompleter(Completer):
 class OptionsCompleter(Completer):
     """Completer for command-line flags with multi-select TUI support.
 
-    Register under the ``None`` key in a completers dict to activate at any
-    argument position when the user types a ``-``-prefixed token:
-
-        registry.register_external_completers("ls", {
-            None: OptionsCompleter({"-l": "long format", "-a": "show hidden"}),
-            0: FileCompleter(),
-        })
+    Auto-built from the ``-``-prefixed entries of a command's ``params``
+    list, so most recipes never construct one directly.  Pass an instance
+    via the ``options_completer=`` kwarg on :meth:`registry.command` when a
+    custom subclass is needed (e.g. tar's bundle-letter handling).
     """
 
     def __init__(

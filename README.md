@@ -196,17 +196,20 @@ A recipe file must define a `register()` function:
 
 ```python
 # ~/.cshell2/recipes/my_tool.py
-from cshell2.commands import registry
-from cshell2.completion import OptionsCompleter, ChoiceCompleter, CallbackCompleter
+from cshell2.commands import arg, registry
+from cshell2.completion import CallbackCompleter, ChoiceCompleter
 
 def register():
-    registry.register_external_completers("my-tool", {
-        None: OptionsCompleter(
-            {"-v": "verbose", "--dry-run": "don't apply changes"},
-        ),
-        0: ChoiceCompleter(["deploy", "rollback", "status"]),
-        1: CallbackCompleter(lambda: _list_targets()),
-    })
+    registry.command(
+        "my-tool",
+        help="my-tool — deploy/rollback/status helper",
+        params=[
+            arg("subcommand", choices=["deploy", "rollback", "status"]),
+            arg("target", help="deploy target", completer=CallbackCompleter(_list_targets)),
+            arg("-v", "--verbose", action="store_true", help="verbose"),
+            arg("--dry-run", action="store_true", help="don't apply changes"),
+        ],
+    )
 
 def _list_targets():
     # Return dynamic values (cached, fetched from an API, etc.)
@@ -242,17 +245,21 @@ Subclass `Completer` and implement `complete()`. The `CompletionContext` gives y
 - `prefix` — partial text typed so far
 - `shell_context` — the active context (access variables with `.get_variable()`)
 
-To add completion to a system command without wrapping it:
+To add completion to a system command without wrapping it, register a handler-less command — execution falls through to the real binary:
 
 ```python
-from cshell2.commands import registry
-from cshell2.completion import OptionsCompleter, FileCompleter
+from cshell2.commands import arg, registry
+from cshell2.completion import FileCompleter
 
-registry.register_external_completers("mytools", {
-    None: OptionsCompleter({"-v": "verbose", "--output": "output file"},
-                           args={"--output": "FILE"}),
-    0: FileCompleter(),
-})
+registry.command(
+    "mytools",
+    help="my custom tool",
+    params=[
+        arg("file", nargs="*", completer=FileCompleter()),
+        arg("-v", "--verbose", action="store_true", help="verbose"),
+        arg("--output", metavar="FILE", help="output file"),
+    ],
+)
 ```
 
 ### Key Bindings

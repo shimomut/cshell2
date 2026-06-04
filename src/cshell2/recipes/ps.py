@@ -81,6 +81,8 @@ _PS_ARGS: dict[str, object] = {
 def register() -> None:
     if shutil.which("ps") is None:
         return
-    command_registry.register_external_completers("ps", {
-        None: OptionsCompleter(_PS_OPTIONS, args=_PS_ARGS),
-    }, description="report a snapshot of current processes")
+    command_registry.command(
+        "ps",
+        help="report a snapshot of current processes",
+        options_completer=OptionsCompleter(_PS_OPTIONS, args=_PS_ARGS),
+    )

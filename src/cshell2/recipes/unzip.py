@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import (
     Completer,
     Completion,
@@ -94,10 +94,12 @@ class ZipArchiveCompleter(Completer):
 def register() -> None:
     if shutil.which("unzip") is None:
         return
-    command_registry.register_external_completers("unzip", {
-        None: OptionsCompleter(UNZIP_OPTIONS, args=UNZIP_ARGS),
-        0: ZipArchiveCompleter(),
-        1: FileCompleter(),
-        2: FileCompleter(),
-        3: FileCompleter(),
-    }, description="list, test, or extract files from a zip archive")
+    command_registry.command(
+        "unzip",
+        help="list, test, or extract files from a zip archive",
+        params=[
+            arg("archive", help="zip archive", completer=ZipArchiveCompleter()),
+            arg("file", nargs="*", help="member file to extract", completer=FileCompleter()),
+        ],
+        options_completer=OptionsCompleter(UNZIP_OPTIONS, args=UNZIP_ARGS),
+    )

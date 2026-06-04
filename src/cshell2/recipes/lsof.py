@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import FileCompleter, OptionsCompleter
 from .ps import PidCompleter
 
@@ -64,9 +64,11 @@ _LSOF_ARGS: dict[str, object] = {
 def register() -> None:
     if shutil.which("lsof") is None:
         return
-    command_registry.register_external_completers("lsof", {
-        None: OptionsCompleter(_LSOF_OPTIONS, args=_LSOF_ARGS),
-        0: FileCompleter(),
-        1: FileCompleter(),
-        2: FileCompleter(),
-    }, description="list open files")
+    command_registry.command(
+        "lsof",
+        help="list open files",
+        params=[
+            arg("path", nargs="*", help="file or directory", completer=FileCompleter()),
+        ],
+        options_completer=OptionsCompleter(_LSOF_OPTIONS, args=_LSOF_ARGS),
+    )

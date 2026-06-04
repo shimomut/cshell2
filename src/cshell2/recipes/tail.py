@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..commands import registry as command_registry
+from ..commands import arg, registry as command_registry
 from ..completion import FileCompleter, OptionsCompleter
 
 TAIL_OPTIONS: dict[str, str] = {
@@ -22,9 +22,11 @@ TAIL_ARGS: dict[str, str] = {
 
 
 def register() -> None:
-    command_registry.register_external_completers("tail", {
-        None: OptionsCompleter(TAIL_OPTIONS, args=TAIL_ARGS),
-        0: FileCompleter(),
-        1: FileCompleter(),
-        2: FileCompleter(),
-    }, description="output the last part of files")
+    command_registry.command(
+        "tail",
+        help="output the last part of files",
+        params=[
+            arg("file", nargs="*", help="file to tail", completer=FileCompleter()),
+        ],
+        options_completer=OptionsCompleter(TAIL_OPTIONS, args=TAIL_ARGS),
+    )

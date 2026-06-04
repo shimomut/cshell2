@@ -226,32 +226,13 @@ class _AwsRegionVar(Var):
         return AwsRegionCompleter()
 
 
-class _AwsCompletersDict(dict):
-    """Completers map that routes every lookup to a single ``AwsCompleter``.
-
-    The shell's dispatch chain calls ``completers.get(None)`` for flag
-    completion and ``completers.get(<positional_index>)`` for value
-    completion.  ``aws_completer`` itself decides the correct response from
-    ``COMP_LINE``/``COMP_POINT``, so we serve the same completer for every
-    key — no need to enumerate positional indices.
-    """
-
-    def __init__(self, completer: Completer) -> None:
-        super().__init__()
-        self._completer = completer
-
-    def get(self, key, default=None):
-        if key is None or isinstance(key, int):
-            return self._completer
-        return default
-
-
 # ─── Recipe entry point ──────────────────────────────────────────────────────
 
 def register() -> None:
-    command_registry.register_external_completers(
-        "aws", _AwsCompletersDict(AwsCompleter()),
-        description="AWS Command Line Interface",
+    command_registry.command(
+        "aws",
+        help="AWS Command Line Interface",
+        delegate=AwsCompleter(),
     )
 
     var_registry.register(_AwsRegionVar())
