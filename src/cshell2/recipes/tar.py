@@ -5,49 +5,15 @@ from __future__ import annotations
 import os
 import shutil
 
-from ..commands import arg, registry as command_registry
+from ..commands import arg, flag_args, registry as command_registry
 from ..completion import (
     Completer,
     Completion,
     CompletionContext,
     DirCompleter,
     FileCompleter,
-    OptionsCompleter,
     _to_slash,
 )
-
-# Single-letter flags that legitimately appear in a BSD-style bundle like
-# ``cvzf``.  Action letters (c/x/t/r/u) are required for a bundle to qualify.
-# ``f`` consumes a following positional (the archive); the rest are pure
-# modifiers.  We deliberately exclude ``C`` and ``b`` because they consume
-# their own value tokens and are rarely bundled — recognising them here would
-# require modelling a slot-shift count, which is not worth the complexity.
-_BUNDLE_LETTERS = set("cxtruvzjJZpkmOwhPsf")
-_ACTION_LETTERS = set("cxtru")
-
-
-def _decode_bundle(token: str) -> set[str] | None:
-    """Return the set of letters in *token* if it is a tar bundle, else ``None``.
-
-    Recognised forms (case-sensitive on the action letter):
-
-        cvzf      → {'c','v','z','f'}     (BSD/SysV: no leading dash)
-        -cvzf     → {'c','v','z','f'}     (dashed short-flag cluster)
-
-    A bundle must contain at least one action letter and consist entirely of
-    letters in ``_BUNDLE_LETTERS``.  Long options (``--foo``) and paths are
-    rejected.
-    """
-    if not token or token.startswith("--"):
-        return None
-    body = token[1:] if token.startswith("-") else token
-    if not body:
-        return None
-    if not all(c in _BUNDLE_LETTERS for c in body):
-        return None
-    if not (set(body) & _ACTION_LETTERS):
-        return None
-    return set(body)
 
 
 TAR_OPTIONS: dict[str, str] = {
@@ -83,7 +49,7 @@ TAR_OPTIONS: dict[str, str] = {
 }
 
 TAR_ARGS: dict[str, str | tuple[str, Completer]] = {
-    "-f": ("ARCHIVE", FileCompleter()),
+    "-f": ("ARCHIVE", FileCompleter()),  # patched to TarArchiveCompleter in register()
     "-C": ("DIR", DirCompleter()),
     "-b": "BLOCKING",
     "-s": "PATTERN",
@@ -150,17 +116,16 @@ class TarArchiveCompleter(Completer):
 
 
 class _TarPositionalCompleter(Completer):
-    """Smart positional completer for ``tar`` that understands flag bundles.
+    """Smart positional completer for ``tar``.
 
-    BSD-style ``tar cvzf a.tgz ./doc`` and the equivalent ``tar -cvzf a.tgz
-    ./doc`` both pack action and modifier letters into one token.  When that
-    bundle contains ``f``, the *next* positional slot is the archive name; the
-    remaining positionals are member files.  Without ``f``, no archive slot
-    exists and every positional is a member.
+    The first positional is the archive (use the archive-aware completer);
+    every subsequent positional is a member file (plain file completion).
 
-    A single instance is registered for every integer key in the completers
-    dict (via :class:`_TarCompletersDict`); it inspects ``ctx.args`` to pick
-    the right delegate per call.
+    When the archive was supplied via standalone ``-f ARCHIVE`` instead of
+    appearing as a positional, every positional is a member.  Note that
+    short-flag clusters like ``-cvzf`` don't consume the next token as the
+    archive — they're treated as a single boolean flag, so the archive
+    still lands at positional 0.
     """
 
     def __init__(self) -> None:
@@ -174,68 +139,36 @@ class _TarPositionalCompleter(Completer):
 
     @staticmethod
     def _is_archive_slot(args: list[str]) -> bool:
-        if not args:
-            return True  # bare `tar <TAB>` → archive (legacy behaviour)
-        bundle = _decode_bundle(args[0])
-        if bundle is not None:
-            if "f" not in bundle:
-                return False  # bundle without 'f' has no archive slot at all
-            archive_rank = 0 if args[0].startswith("-") else 1
-        else:
-            if "-f" in args:
-                return False  # archive was already given via `-f ARCHIVE`
-            archive_rank = 0
-        # Count positional args while skipping flags (boolean: 1 token,
-        # value-taking: 2 tokens).  Mirrors shell._positional_index so that
-        # mixed forms like `tar cvzf -C /tmp <TAB>` correctly land on the
-        # archive slot rather than counting `/tmp` as a positional.
+        if "-f" in args:
+            # Standalone -f consumed the next token as the archive — all
+            # subsequent positionals are members.
+            return False
+        # Count completed positionals, skipping flags and their values.
         value_taking = set(TAR_ARGS)
         rank = 0
         i = 0
         while i < len(args):
             tok = args[i]
-            if tok.startswith("--") or (tok.startswith("-") and len(tok) > 1):
-                if tok in value_taking:
-                    i += 2
-                else:
-                    i += 1
-                continue
-            rank += 1
-            i += 1
-        return rank == archive_rank
-
-
-class _TarOptionsCompleter(OptionsCompleter):
-    """Options completer that also marks letters from a bundle as used.
-
-    After ``tar cvzf a.tgz`` the user typing ``-<TAB>`` should not see ``-c``,
-    ``-v``, ``-z`` or ``-f`` listed again — they were already supplied via the
-    bundle.  The base class only inspects dashed flags, so we extend the used
-    set with every letter found in a leading bundle (BSD or dashed).
-    """
-
-    def _used_flags(self, ctx: CompletionContext) -> set[str]:
-        used = super()._used_flags(ctx)
-        if ctx.args:
-            bundle = _decode_bundle(ctx.args[0])
-            if bundle:
-                for letter in bundle:
-                    used.add(f"-{letter}")
-        return used
+            if tok.startswith("-"):
+                i += 2 if tok in value_taking else 1
+            else:
+                rank += 1
+                i += 1
+        return rank == 0
 
 
 def register() -> None:
     if shutil.which("tar") is None:
         return
     # Patch -f to use the archive-aware completer.
-    flag_args = dict(TAR_ARGS)
-    flag_args["-f"] = ("ARCHIVE", TarArchiveCompleter())
+    tar_flag_values = dict(TAR_ARGS)
+    tar_flag_values["-f"] = ("ARCHIVE", TarArchiveCompleter())
     command_registry.command(
         "tar",
         help="create, extract, or list tar archives",
         params=[
             arg("path", nargs="*", help="archive or member file",
                 completer=_TarPositionalCompleter()),
+            *flag_args(TAR_OPTIONS, values=tar_flag_values),
         ],
-        options_completer=_TarOptionsCompleter(TAR_OPTIONS, args=flag_args),
     )
