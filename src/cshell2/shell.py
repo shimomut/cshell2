@@ -788,15 +788,14 @@ class Shell:
             end += 1
         token = buf[start:end]
 
-        if not token:
-            return None
-
         # Parse everything before the token to get the command/args context.
         pre = buf[:start].rstrip()
         stage_pre = _split_on_operators(pre, [";", "&&", "||", "|"])[-1][1]
         tokens_before, _ = split_for_completion(stage_pre + " ")
 
         if not tokens_before:
+            if not token:
+                return None
             # Caret is on the command name itself — show its help text.
             cmd = self.registry.get(token)
             if cmd is not None and cmd.description:
