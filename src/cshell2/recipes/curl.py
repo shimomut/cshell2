@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import shutil
 
-from ..commands import registry as command_registry
-from ..completion import ChoiceCompleter, FileCompleter, OptionsCompleter
+from ..commands import flag_args, registry as command_registry
+from ..completion import ChoiceCompleter, FileCompleter
 
 CURL_OPTIONS: dict[str, str] = {
     "-A": "User-Agent string to send",
@@ -151,5 +151,5 @@ def register() -> None:
     command_registry.command(
         "curl",
         help="transfer data from or to a URL",
-        options_completer=OptionsCompleter(CURL_OPTIONS, args=CURL_ARGS),
+        params=flag_args(CURL_OPTIONS, values=CURL_ARGS),
     )

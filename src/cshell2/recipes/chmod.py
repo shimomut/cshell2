@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import shutil
 
-from ..commands import arg, registry as command_registry
-from ..completion import ChoiceCompleter, FileCompleter, OptionsCompleter
+from ..commands import arg, flag_args, registry as command_registry
+from ..completion import ChoiceCompleter, FileCompleter
 
 CHMOD_OPTIONS: dict[str, str] = {
     "-f": "do not display diagnostic messages on failure",
@@ -57,6 +57,6 @@ def register() -> None:
         params=[
             arg("mode", help="mode bits (e.g. 755 or u+x)", completer=ChoiceCompleter(COMMON_MODES)),
             arg("file", nargs="*", help="file or directory", completer=FileCompleter()),
+            *flag_args(CHMOD_OPTIONS),
         ],
-        options_completer=OptionsCompleter(CHMOD_OPTIONS),
     )

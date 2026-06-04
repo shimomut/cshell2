@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import sys
 
-from ..commands import arg, registry as command_registry
-from ..completion import FileCompleter, OptionsCompleter
+from ..commands import arg, flag_args, registry as command_registry
+from ..completion import FileCompleter
 
 # macOS du  (BSD du — from `man du` on Darwin)
 # usage: du [-Aclnx] [-H | -L | -P] [-g | -h | -k | -m]
@@ -86,6 +86,6 @@ def register() -> None:
         help="estimate file space usage",
         params=[
             arg("path", nargs="*", help="file or directory", completer=FileCompleter()),
+            *flag_args(options, values=opt_args),
         ],
-        options_completer=OptionsCompleter(options, args=opt_args),
     )

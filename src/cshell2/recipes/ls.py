@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from ..commands import arg, registry as command_registry
-from ..completion import FileCompleter, OptionsCompleter
+from ..commands import arg, flag_args, registry as command_registry
+from ..completion import FileCompleter
 
 LS_OPTIONS: dict[str, str] = {
     "-a": "include entries starting with .",
@@ -43,6 +43,6 @@ def register() -> None:
         help="list directory contents",
         params=[
             arg("path", nargs="*", help="file or directory", completer=FileCompleter()),
+            *flag_args(LS_OPTIONS),
         ],
-        options_completer=OptionsCompleter(LS_OPTIONS),
     )

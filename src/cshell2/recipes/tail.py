@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from ..commands import arg, registry as command_registry
-from ..completion import FileCompleter, OptionsCompleter
+from ..commands import arg, flag_args, registry as command_registry
+from ..completion import FileCompleter
 
 TAIL_OPTIONS: dict[str, str] = {
     "-c": "output the last N bytes",
@@ -27,6 +27,6 @@ def register() -> None:
         help="output the last part of files",
         params=[
             arg("file", nargs="*", help="file to tail", completer=FileCompleter()),
+            *flag_args(TAIL_OPTIONS, values=TAIL_ARGS),
         ],
-        options_completer=OptionsCompleter(TAIL_OPTIONS, args=TAIL_ARGS),
     )

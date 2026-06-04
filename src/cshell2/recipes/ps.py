@@ -5,12 +5,11 @@ from __future__ import annotations
 import shutil
 import subprocess
 
-from ..commands import registry as command_registry
+from ..commands import flag_args, registry as command_registry
 from ..completion import (
     Completer,
     Completion,
     CompletionContext,
-    OptionsCompleter,
 )
 
 
@@ -84,5 +83,5 @@ def register() -> None:
     command_registry.command(
         "ps",
         help="report a snapshot of current processes",
-        options_completer=OptionsCompleter(_PS_OPTIONS, args=_PS_ARGS),
+        params=flag_args(_PS_OPTIONS, values=_PS_ARGS),
     )

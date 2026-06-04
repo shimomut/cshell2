@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import shutil
 
-from ..commands import arg, registry as command_registry
+from ..commands import arg, flag_args, registry as command_registry
 from ..completion import (
     Completer,
     Completion,
     CompletionContext,
     FileCompleter,
-    OptionsCompleter,
 )
 from .ssh import SSHHostCompleter
 
@@ -109,6 +108,6 @@ def register() -> None:
         help="secure copy files between hosts over SSH",
         params=[
             arg("path", nargs="*", help="source or destination", completer=_RemoteOrFileCompleter()),
+            *flag_args(SCP_OPTIONS, values=SCP_ARGS),
         ],
-        options_completer=OptionsCompleter(SCP_OPTIONS, args=SCP_ARGS),
     )

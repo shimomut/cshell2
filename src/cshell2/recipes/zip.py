@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import shutil
 
-from ..commands import arg, registry as command_registry
-from ..completion import FileCompleter, OptionsCompleter
+from ..commands import arg, flag_args, registry as command_registry
+from ..completion import FileCompleter
 
 ZIP_OPTIONS: dict[str, str] = {
     "-r": "recurse into directories",
@@ -55,6 +55,6 @@ def register() -> None:
         help="package and compress files into a zip archive",
         params=[
             arg("path", nargs="*", help="archive or input file", completer=FileCompleter()),
+            *flag_args(ZIP_OPTIONS, values=ZIP_ARGS),
         ],
-        options_completer=OptionsCompleter(ZIP_OPTIONS, args=ZIP_ARGS),
     )

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import subprocess
 
-from ..commands import arg, registry as command_registry
-from ..completion import Completer, Completion, CompletionContext, OptionsCompleter
+from ..commands import arg, flag_args, registry as command_registry
+from ..completion import Completer, Completion, CompletionContext
 
 KILL_OPTIONS: dict[str, str] = {
     "-1": "SIGHUP — reload config / hangup",
@@ -84,8 +84,8 @@ def register() -> None:
         help="send a signal to a process",
         params=[
             arg("pid", nargs="*", help="process ID", completer=ProcessCompleter()),
+            *flag_args(KILL_OPTIONS),
         ],
-        options_completer=OptionsCompleter(KILL_OPTIONS),
     )
     command_registry.command(
         "pkill",

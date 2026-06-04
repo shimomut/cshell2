@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from ..commands import arg, registry as command_registry
-from ..completion import FileCompleter, OptionsCompleter
+from ..commands import arg, flag_args, registry as command_registry
+from ..completion import FileCompleter
 
 FIND_OPTIONS: dict[str, str] = {
     # Output / actions
@@ -82,6 +82,6 @@ def register() -> None:
         help="search for files in a directory hierarchy",
         params=[
             arg("path", nargs="*", help="starting directory", completer=FileCompleter()),
+            *flag_args(FIND_OPTIONS, values=FIND_ARGS),
         ],
-        options_completer=OptionsCompleter(FIND_OPTIONS, args=FIND_ARGS),
     )

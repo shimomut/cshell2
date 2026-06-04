@@ -546,7 +546,7 @@ def _positional_index(args: list[str], options_completer) -> int:
     )
     while i < len(args):
         token = args[i]
-        if token.startswith("-"):
+        if token.startswith(("-", "+")):
             i += 2 if token in value_taking else 1
         else:
             pos += 1
@@ -584,7 +584,8 @@ def _positional_label(cmd, pos_idx: int, command_name: str) -> str:
     """
     if cmd is None or cmd.params is None:
         return f"arg {pos_idx + 1}"
-    positionals = [a for a in cmd.params if a.names and not a.names[0].startswith("-")]
+    from .commands import _is_flag_name
+    positionals = [a for a in cmd.params if a.names and not _is_flag_name(a.names[0])]
     if not positionals:
         return f"arg {pos_idx + 1}"
     if pos_idx < len(positionals):
@@ -715,8 +716,8 @@ class Shell:
             # When the last arg is a value-taking flag (e.g. "du -d <TAB>"),
             # suppress positional/file completion and return a hint instead.
             # Skip when the user is already typing another flag (prefix starts
-            # with "-") — they should see the options picker, not the hint.
-            if (options_completer and ctx.args and not ctx.prefix.startswith("-")
+            # with "-" or "+") — they should see the options picker, not the hint.
+            if (options_completer and ctx.args and not ctx.prefix.startswith(("-", "+"))
                     and hasattr(options_completer, "get_preceding_flag_hint")):
                 hint_info = options_completer.get_preceding_flag_hint(ctx)
                 if hint_info:
@@ -734,8 +735,8 @@ class Shell:
                         is_arg_hint=True,
                     )], ctx.prefix, flag_label
 
-            # Options completer takes priority when typing a "-"-prefixed token.
-            if options_completer and ctx.prefix.startswith("-"):
+            # Options completer takes priority when typing a flag-prefixed token.
+            if options_completer and ctx.prefix.startswith(("-", "+")):
                 has_completer = True
                 if options_completer.should_activate(ctx):
                     completions = options_completer.complete(ctx)
@@ -818,7 +819,7 @@ class Shell:
             remaining_args = preceding_args
             options_completer = cmd.completers.get(None)
 
-        if token.startswith("-"):
+        if token.startswith(("-", "+")):
             # ── Flag token ────────────────────────────────────────────────────
             if options_completer is None or not hasattr(options_completer, "options"):
                 return None
@@ -830,7 +831,7 @@ class Shell:
         # ── Non-flag token: positional arg or value for a preceding flag ───────
 
         value_taking = set(getattr(options_completer, "args", {})) if options_completer else set()
-        if remaining_args and remaining_args[-1].startswith("-") and remaining_args[-1] in value_taking:
+        if remaining_args and remaining_args[-1].startswith(("-", "+")) and remaining_args[-1] in value_taking:
             # Caret is on a flag value — show the flag's description.
             flag = remaining_args[-1]
             desc = getattr(options_completer, "options", {}).get(flag, "")

@@ -5,8 +5,8 @@ from __future__ import annotations
 import shutil
 import sys
 
-from ..commands import arg, registry as command_registry
-from ..completion import FileCompleter, OptionsCompleter
+from ..commands import arg, flag_args, registry as command_registry
+from ..completion import FileCompleter
 
 # BSD rm (macOS).
 _MACOS_OPTIONS: dict[str, str] = {
@@ -55,6 +55,6 @@ def register() -> None:
         help="remove files or directories",
         params=[
             arg("path", nargs="*", help="file or directory to remove", completer=FileCompleter()),
+            *flag_args(options, values=opt_args),
         ],
-        options_completer=OptionsCompleter(options, args=opt_args),
     )

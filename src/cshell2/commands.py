@@ -109,6 +109,84 @@ def arg(*names: str, completer: Completer | None = None, **kwargs) -> Arg:
 # argparse actions that consume a following value token
 _VALUE_ACTIONS = {"store", "append", "extend"}
 
+# Tokens with these prefixes are treated as flags by the completion engine.
+# ``-`` covers short and long flags (-c, --verbose).  ``+`` is rare but used
+# by tools like ``lsof`` for SysV-style enable/disable pairs (-c / +c).
+_FLAG_PREFIXES = ("-", "+")
+
+
+def _is_flag_name(name: str) -> bool:
+    return name.startswith(_FLAG_PREFIXES)
+
+
+def flag_args(
+    options: dict[str, str],
+    *,
+    values: dict[str, str | tuple[str, "Completer"]] | None = None,
+) -> list[Arg]:
+    """Expand a dict-of-flags into a list of :class:`Arg` descriptors.
+
+    Used by external recipes that already keep their flag tables as dicts
+    (``LS_OPTIONS``, ``MAKE_OPTIONS``, …) — splice the result into ``params``::
+
+        registry.command(
+            "ls",
+            help="list directory contents",
+            params=[
+                arg("path", nargs="*", completer=FileCompleter()),
+                *flag_args(LS_OPTIONS),
+            ],
+        )
+
+    ``options`` maps a flag name to its help text; the resulting :class:`Arg`
+    is a boolean flag (``action="store_true"``) unless overridden in
+    ``values``.
+
+    ``values`` maps a value-taking flag to either ``"METAVAR"`` (no value
+    completer) or ``("METAVAR", completer)`` (with value completer).  A flag
+    in ``values`` but not in ``options`` is included with empty help text;
+    a flag in both gets the help text from ``options`` and the value spec
+    from ``values``.
+
+    The returned :class:`Arg`\\s never reach argparse because external recipes
+    are handler-less — only the completion engine consumes them.  This means
+    flag names that argparse would reject (``+c``, ``-1``, ``-h``) work fine.
+    """
+    values = values or {}
+    result: list[Arg] = []
+    seen: set[str] = set()
+
+    def add_value_flag(flag: str, desc: str, spec) -> None:
+        if isinstance(spec, tuple):
+            metavar, completer = spec
+        else:
+            metavar, completer = spec, None
+        result.append(Arg(
+            names=(flag,),
+            kwargs={"help": desc, "metavar": metavar},
+            completer=completer,
+        ))
+        seen.add(flag)
+
+    for flag, desc in options.items():
+        if flag in values:
+            add_value_flag(flag, desc, values[flag])
+        else:
+            result.append(Arg(
+                names=(flag,),
+                kwargs={"help": desc, "action": "store_true"},
+            ))
+            seen.add(flag)
+
+    # Value-taking flags that weren't documented in `options`.
+    for flag, spec in values.items():
+        if flag in seen:
+            continue
+        add_value_flag(flag, "", spec)
+
+    return result
+
+
 # Sentinel key meaning "any positional index ≥ this slot".  Used for arg() with
 # nargs="*" or nargs="+" — that completer becomes the source of truth for every
 # positional slot from its declared position onward.
@@ -143,7 +221,7 @@ def _build_completers(params: list[Arg]) -> dict:
     pos_idx = 0
 
     for a in params:
-        is_flag = a.names[0].startswith("-")
+        is_flag = _is_flag_name(a.names[0])
 
         if not is_flag:
             # ── positional arg ────────────────────────────────────────────
@@ -168,7 +246,7 @@ def _build_completers(params: list[Arg]) -> dict:
                 # Derive metavar from --long-name → LONG_NAME, or metavar=
                 long_names = [n for n in a.names if n.startswith("--")]
                 dest = (long_names[0].lstrip("-").replace("-", "_")
-                        if long_names else a.names[0].lstrip("-"))
+                        if long_names else a.names[0].lstrip("".join(_FLAG_PREFIXES)))
                 metavar = a.kwargs.get("metavar", dest.upper())
                 hint: str | tuple = (metavar, a.completer) if a.completer else metavar
                 for name in a.names:
@@ -206,7 +284,7 @@ def _build_usage(cmd_name: str, params: list[Arg]) -> str:
     """
     parts = [cmd_name]
     for a in params:
-        is_flag = a.names[0].startswith("-")
+        is_flag = _is_flag_name(a.names[0])
         if not is_flag:
             is_optional = a.kwargs.get("nargs") in ("?", "*")
             dest = a.names[0]
@@ -217,7 +295,7 @@ def _build_usage(cmd_name: str, params: list[Arg]) -> str:
             if action in _VALUE_ACTIONS:
                 long_names = [n for n in a.names if n.startswith("--")]
                 dest = (long_names[0].lstrip("-").replace("-", "_")
-                        if long_names else a.names[0].lstrip("-"))
+                        if long_names else a.names[0].lstrip("".join(_FLAG_PREFIXES)))
                 metavar = a.kwargs.get("metavar", dest.upper())
                 parts.append(f"[{short} {metavar}]")
             else:

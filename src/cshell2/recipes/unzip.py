@@ -5,14 +5,13 @@ from __future__ import annotations
 import os
 import shutil
 
-from ..commands import arg, registry as command_registry
+from ..commands import arg, flag_args, registry as command_registry
 from ..completion import (
     Completer,
     Completion,
     CompletionContext,
     DirCompleter,
     FileCompleter,
-    OptionsCompleter,
     _to_slash,
 )
 
@@ -100,6 +99,6 @@ def register() -> None:
         params=[
             arg("archive", help="zip archive", completer=ZipArchiveCompleter()),
             arg("file", nargs="*", help="member file to extract", completer=FileCompleter()),
+            *flag_args(UNZIP_OPTIONS, values=UNZIP_ARGS),
         ],
-        options_completer=OptionsCompleter(UNZIP_OPTIONS, args=UNZIP_ARGS),
     )

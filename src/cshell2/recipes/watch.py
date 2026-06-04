@@ -18,14 +18,13 @@ from __future__ import annotations
 
 import shutil
 
-from ..commands import arg, get_positional_completer, registry as command_registry
+from ..commands import arg, flag_args, get_positional_completer, registry as command_registry
 from ..completion import (
     CommandNameCompleter,
     Completer,
     Completion,
     CompletionContext,
     FileCompleter,
-    OptionsCompleter,
 )
 
 WATCH_OPTIONS: dict[str, str] = {
@@ -177,7 +176,7 @@ def _inner_positional_index(args: list[str], options_completer) -> int:
     )
     while i < len(args):
         token = args[i]
-        if token.startswith("-"):
+        if token.startswith(("-", "+")):
             i += 2 if token in value_taking else 1
         else:
             pos += 1
@@ -194,6 +193,6 @@ def register() -> None:
         params=[
             arg("command", nargs="*", help="command to run repeatedly",
                 completer=_WatchDispatcher()),
+            *flag_args(WATCH_OPTIONS, values=WATCH_ARGS),
         ],
-        options_completer=OptionsCompleter(WATCH_OPTIONS, args=WATCH_ARGS),
     )

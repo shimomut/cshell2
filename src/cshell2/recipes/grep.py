@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from ..commands import arg, registry as command_registry
-from ..completion import FileCompleter, OptionsCompleter
+from ..commands import arg, flag_args, registry as command_registry
+from ..completion import FileCompleter
 
 GREP_OPTIONS: dict[str, str] = {
     "-a": "process binary file as if it were text",
@@ -63,6 +63,6 @@ def register() -> None:
             help=descriptions[cmd],
             params=[
                 arg("file", nargs="*", help="file to search", completer=FileCompleter()),
+                *flag_args(GREP_OPTIONS, values=GREP_ARGS),
             ],
-            options_completer=OptionsCompleter(GREP_OPTIONS, args=GREP_ARGS),
         )

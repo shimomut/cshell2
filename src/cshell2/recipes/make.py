@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 import re
 
-from ..commands import arg, registry as command_registry
-from ..completion import Completer, Completion, CompletionContext, DirCompleter, FileCompleter, OptionsCompleter
+from ..commands import arg, flag_args, registry as command_registry
+from ..completion import Completer, Completion, CompletionContext, DirCompleter, FileCompleter
 
 
 MAKE_OPTIONS: dict[str, str] = {
@@ -95,6 +95,6 @@ def register() -> None:
         params=[
             arg("target", nargs="*", help="target to build",
                 completer=MakeTargetCompleter()),
+            *flag_args(MAKE_OPTIONS, values=MAKE_ARGS),
         ],
-        options_completer=OptionsCompleter(MAKE_OPTIONS, args=MAKE_ARGS),
     )

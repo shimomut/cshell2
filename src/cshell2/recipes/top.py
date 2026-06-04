@@ -5,8 +5,8 @@ from __future__ import annotations
 import shutil
 import sys
 
-from ..commands import registry as command_registry
-from ..completion import ChoiceCompleter, OptionsCompleter
+from ..commands import flag_args, registry as command_registry
+from ..completion import ChoiceCompleter
 from .ps import PidCompleter
 
 # macOS top (from `top -h` on Darwin).
@@ -104,5 +104,5 @@ def register() -> None:
     command_registry.command(
         "top",
         help="display tasks and system resource usage",
-        options_completer=OptionsCompleter(options, args=opt_args),
+        params=flag_args(options, values=opt_args),
     )

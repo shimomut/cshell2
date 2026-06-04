@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import shutil
 
-from ..commands import arg, registry as command_registry
-from ..completion import FileCompleter, OptionsCompleter
+from ..commands import arg, flag_args, registry as command_registry
+from ..completion import FileCompleter
 from .ps import PidCompleter
 
 _LSOF_OPTIONS: dict[str, str] = {
@@ -69,6 +69,6 @@ def register() -> None:
         help="list open files",
         params=[
             arg("path", nargs="*", help="file or directory", completer=FileCompleter()),
+            *flag_args(_LSOF_OPTIONS, values=_LSOF_ARGS),
         ],
-        options_completer=OptionsCompleter(_LSOF_OPTIONS, args=_LSOF_ARGS),
     )

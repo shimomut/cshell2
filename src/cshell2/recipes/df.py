@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from ..commands import arg, registry as command_registry
-from ..completion import FileCompleter, OptionsCompleter
+from ..commands import arg, flag_args, registry as command_registry
+from ..completion import FileCompleter
 
 DF_OPTIONS: dict[str, str] = {
     "-a": "include pseudo, duplicate, and inaccessible file systems",
@@ -39,6 +39,6 @@ def register() -> None:
         help="report file system disk space usage",
         params=[
             arg("path", nargs="*", help="file or mount point", completer=FileCompleter()),
+            *flag_args(DF_OPTIONS, values=DF_ARGS),
         ],
-        options_completer=OptionsCompleter(DF_OPTIONS, args=DF_ARGS),
     )

@@ -5,13 +5,12 @@ from __future__ import annotations
 import shutil
 import subprocess
 
-from ..commands import arg, registry as command_registry
+from ..commands import arg, flag_args, registry as command_registry
 from ..completion import (
     Completer,
     Completion,
     CompletionContext,
     FileCompleter,
-    OptionsCompleter,
 )
 
 CHOWN_OPTIONS: dict[str, str] = {
@@ -117,6 +116,6 @@ def register() -> None:
         params=[
             arg("owner", help="user or user:group", completer=OwnerCompleter()),
             arg("file", nargs="*", help="file or directory", completer=FileCompleter()),
+            *flag_args(CHOWN_OPTIONS),
         ],
-        options_completer=OptionsCompleter(CHOWN_OPTIONS),
     )

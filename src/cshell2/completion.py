@@ -223,7 +223,7 @@ class OptionsCompleter(Completer):
                 self.args[flag] = spec
 
     def should_activate(self, ctx: CompletionContext) -> bool:
-        return ctx.prefix.startswith("-")
+        return ctx.prefix.startswith(("-", "+"))
 
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         prefix = ctx.prefix
@@ -274,14 +274,15 @@ class OptionsCompleter(Completer):
         """Return the set of option flags already present in ctx.args."""
         used: set[str] = set()
         for arg in ctx.args:
-            if not arg.startswith("-"):
-                continue
             if arg.startswith("--"):
                 used.add(arg)
-            else:
+            elif arg.startswith("-"):
                 # Split short-flag clusters: -hs → {-h, -s}
                 for ch in arg[1:]:
                     used.add(f"-{ch}")
+            elif arg.startswith("+"):
+                # +-flags don't cluster — record verbatim.
+                used.add(arg)
         return used
 
 

@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import shutil
 
-from ..commands import arg, registry as command_registry
+from ..commands import arg, flag_args, registry as command_registry
 from ..completion import (
     Completer,
     Completion,
     CompletionContext,
     FileCompleter,
-    OptionsCompleter,
 )
 from .ssh import SSHHostCompleter
 
@@ -167,6 +166,6 @@ def register() -> None:
         help="fast, incremental file transfer (local or over SSH)",
         params=[
             arg("path", nargs="*", help="source or destination", completer=_RemoteOrFileCompleter()),
+            *flag_args(RSYNC_OPTIONS, values=RSYNC_ARGS),
         ],
-        options_completer=OptionsCompleter(RSYNC_OPTIONS, args=RSYNC_ARGS),
     )

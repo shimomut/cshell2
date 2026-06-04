@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 import re
 
-from ..commands import arg, registry as command_registry
-from ..completion import Completer, Completion, CompletionContext, OptionsCompleter
+from ..commands import arg, flag_args, registry as command_registry
+from ..completion import Completer, Completion, CompletionContext
 
 SSH_OPTIONS: dict[str, str] = {
     "-4": "force IPv4 addresses only",
@@ -101,6 +101,6 @@ def register() -> None:
         help="OpenSSH remote login client",
         params=[
             arg("host", help="hostname or user@host", completer=SSHHostCompleter()),
+            *flag_args(SSH_OPTIONS, values=SSH_ARGS),
         ],
-        options_completer=OptionsCompleter(SSH_OPTIONS, args=SSH_ARGS),
     )
