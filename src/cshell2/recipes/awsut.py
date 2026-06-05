@@ -33,7 +33,6 @@ import json
 import os
 import re
 import signal
-import subprocess
 import time
 import urllib.parse
 import webbrowser
