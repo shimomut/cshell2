@@ -370,6 +370,68 @@ No part of this requires the decorator to know about completion. The
 shell handles `@`-token completion uniformly; once past the
 decorator(s), it's plain pipeline completion.
 
+### Impact of in-process Python pipelines (commit `047086b`)
+
+cshell2 now runs Python `@registry.command` stages in worker threads
+that share the shell process, with thread-local
+`sys.stdin`/`sys.stdout`/`sys.stderr` rebound to the pipe ends. That
+landed before decorators were implemented, and it changes the design
+in three concrete ways — mostly in decorators' favor.
+
+**1. The `Pipeline` AST is already a runnable handle.** The former
+"factor pipeline-execution into a `Pipeline` object" implementation
+step is much smaller than the original draft suggested.
+`pipeline.Pipeline(stages=[...])` already exists as a dataclass
+consumed by `Shell._execute_pipeline`. The decorator API just needs a
+thin wrapper that calls `_execute_pipeline` (or a refactored helper
+extracted from it) on the AST it was handed. No new execution model —
+decorators reuse the path Python-stage pipelines already exercise.
+
+**2. `pipeline.run()` from a decorator body inherits the thread-local
+stdio routing.** A decorator runs as a Python command (essentially
+`@registry.command` under the hood), so when the user pipes its output
+— `@watch {ls} | grep foo` — `sys.stdout` inside the decorator body
+is *already* rebound to the pipe end. `pipeline.run()` then runs its
+own stages with their own thread-local rebinding, so the decorator's
+direct writes (e.g. `@time`'s timing line) and the wrapped pipeline's
+writes coexist without trampling. This makes question (5) under "UX
+questions to nail down" trivially answerable: decorator output goes
+through `sys.stdout` like everything else, which means it follows the
+pipe in a piped context and the terminal otherwise. No special-casing
+needed.
+
+**3. The Python-pipeline caveats become decorator-author caveats.**
+Anything documented in `doc/limitations.md` under "Python commands in
+pipelines — caveats of the in-process model" applies verbatim to
+decorator bodies, because they *are* Python commands:
+
+- **Nested `subprocess.run` writes to the real terminal**, not the
+  decorator's rebound stdout. If `@time` shells out for some reason,
+  it must pass `stdout=sys.stdout` (and `stderr=sys.stderr`) to land
+  on the right destination when the decorator is itself piped.
+- **Pure-CPU loops can't be `Ctrl+C`-interrupted** when the decorator
+  is part of a pipeline. `@watch`'s `time.sleep(interval)` is fine
+  (sleep is interruptible), but a decorator doing tight CPU work with
+  no I/O won't unwind on `KeyboardInterrupt` until it next blocks.
+- **`passthrough_run` / `passthrough_input` are off-limits** when the
+  decorator is in a pipeline — its stdio is wired to pipe fds, not
+  the terminal. They raise `RuntimeError`. This affects `@bg` and
+  `@as`, which want to launch interactive subprocesses; they need to
+  refuse or fall back to non-interactive execution when invoked from
+  a piped context.
+- **Stateful effects mutate the parent.** `@as NAME {...}` switching
+  contexts persists, even if invoked inside a pipeline. Same as the
+  built-in `cd | tee log` quirk; treat as the cost of in-process.
+
+**4. Ctrl+C handling is mostly solved.** The pipeline driver already
+catches `KeyboardInterrupt` and closes pipe ends to unblock I/O-bound
+stages (commit `877f946`). A decorator's loop body that does I/O
+(every iteration of `@watch`, every retry of `@retry`) gets the same
+treatment automatically. The decorator's own `while True:` body still
+needs to check for the broken-pipe signal between iterations — but
+that's a one-line `try`/`except BrokenPipeError` around
+`pipeline.run()`, not a new mechanism.
+
 ### Decorator API sketch
 
 The API reuses the existing `arg(...)` helper from `commands.py` — no
@@ -441,9 +503,15 @@ surface for "run this pipeline in a different process slot."
 4. **Stacking direction** — Python convention is outer-first (top
    decorator wraps last). Match that, or invert because shell users
    read left-to-right "what happens first"?
-5. **Where does decorator output go relative to pipeline output?** If
-   `@time` prints timing info, does it go to stderr by default? After
-   the pipeline? Interleaved?
+5. ~~**Where does decorator output go relative to pipeline output?**~~
+   **Resolved by in-process pipelines (commit `047086b`):** decorator
+   output goes through `sys.stdout` like any other Python command. In
+   a piped context (`@time {make} | tee log`) it follows the pipe; in
+   a bare context it goes to the terminal. Convention only:
+   diagnostic lines (`@time`'s timing summary, `@retry`'s "attempt
+   2/3 failed") should go to `sys.stderr` so they don't poison
+   pipelines, but that's a per-decorator style guideline, not a
+   framework rule.
 6. **Interaction with `;` and `&&` *outside* the braces.** `@watch ls;
    pwd` — the `;` is outside the wrapped pipeline (no braces, so the
    decorator owns just `ls`), and `pwd` runs once after the watcher
@@ -495,10 +563,13 @@ surface for "run this pipeline in a different process slot."
    `Decorator` ABC, `DecoratorRegistry`, module-level `registry`
    singleton, `@registry.decorator(...)` API. Reuses `arg(...)` from
    `commands.py` directly — no new helper.
-3. **Pipeline AST handle**: factor out the existing pipeline-execution
-   path in `shell.py` into a `Pipeline` object that decorators can
-   call `.run()` on. Today the parsed structure is consumed inline;
-   this would give it a proper boundary.
+3. **Pipeline AST handle**: `pipeline.Pipeline` already exists as a
+   dataclass (since the in-process pipelines work in commit
+   `047086b`). The remaining work is to expose a `.run(stdin=...,
+   stdout=..., stderr=...) -> int` method on it that delegates to a
+   helper extracted from `Shell._execute_pipeline`. The execution
+   model is unchanged; we're just giving it a public entry point so
+   decorators can call it.
 4. **Completion glue** in `completion.py`: detect the `@` prefix in
    `CompletionContext` and dispatch to a `DecoratorNameCompleter` for
    the name, then to the decorator's `OptionsCompleter` for its flags.
