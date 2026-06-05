@@ -119,6 +119,51 @@ def deploy_status(environment, verbose):
             print(f"    deployed: 2026-05-26 14:32 UTC")
 
 
+# ── Filter command (reads stdin, writes stdout) ───────────────────────────────
+#
+# Python @registry.command handlers are first-class pipeline stages: they can
+# sit anywhere in a pipe (`producer | py_cmd | consumer`).  Each stage runs
+# on its own worker thread with `sys.stdin` / `sys.stdout` rebound to the
+# pipe ends, so `print()` and iteration over `sys.stdin` "just work."
+#
+# Example: `cols` prints the requested whitespace-separated columns from
+# each line — like `awk '{print $2, $5}'` but expressed in Python.
+#
+#     ls -la | cols 9 5             # filename and size
+#     ps -A | cols 1 4              # PID and command
+#     printf 'a b c\nd e f\n' | cols 1 3 | grep d
+#
+# Caveats inherent to the in-process pipeline model — see
+# doc/limitations.md for the full list:
+#
+#   * If the consumer closes the pipe early (`cmd | head -1`), this stage
+#     gets a BrokenPipeError on its next print(); catching it is the
+#     well-behaved pattern for an unbounded producer.
+#   * Calling subprocess.run() from inside a piped Python command writes
+#     to the terminal, not the pipe, unless you pass stdout=sys.stdout.
+
+import sys
+
+@command_registry.command(
+    name="cols",
+    help="Print whitespace-separated columns by 1-based index from each stdin line.",
+    params=[
+        arg("indices", nargs="+", type=int, metavar="N",
+                       help="1-based column number(s) to print"),
+        arg("-d", "--delim", default=" ", metavar="STR",
+                             help="output delimiter (default: single space)"),
+    ],
+)
+def cols(indices, delim):
+    try:
+        for line in sys.stdin:
+            fields = line.split()
+            picked = [fields[i - 1] for i in indices if 0 < i <= len(fields)]
+            print(delim.join(picked))
+    except BrokenPipeError:
+        pass  # downstream closed early (e.g. `... | head -1`) — normal
+
+
 # ── Enable completion recipes for external commands ───────────────────────────
 
 from cshell2.recipes import enable
