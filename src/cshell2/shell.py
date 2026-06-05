@@ -279,7 +279,7 @@ class _PyStageHandle:
     two worker types can share one wait loop.
     """
 
-    __slots__ = ("cmd_name", "thread", "done", "exit_code", "_io_objs")
+    __slots__ = ("cmd_name", "thread", "done", "exit_code", "_io_objs", "interrupted")
 
     def __init__(self, cmd_name: str) -> None:
         self.cmd_name = cmd_name
@@ -290,6 +290,10 @@ class _PyStageHandle:
         # On interrupt() we close them so any blocked I/O raises and the
         # thread can unwind.
         self._io_objs: list = []
+        # Set by interrupt() so the worker can tell "the parent killed me"
+        # apart from a genuine error.  Any I/O exception that arrives after
+        # this flag is set is expected (closed wrappers) and is silenced.
+        self.interrupted: bool = False
 
     def wait(self) -> int:
         if self.thread is not None:
@@ -309,6 +313,7 @@ class _PyStageHandle:
         A pure-CPU loop inside a Python command is still uninterruptible
         — flagged in doc/limitations.md.
         """
+        self.interrupted = True
         for obj in self._io_objs:
             try:
                 obj.close()
@@ -1686,9 +1691,16 @@ class Shell:
                 except KeyboardInterrupt:
                     handle.exit_code = 130
                 except Exception as e:
-                    print(f"{cmd.name}: error: {e}", file=sys.stderr)
-                    traceback.print_exc()
-                    handle.exit_code = 1
+                    if handle.interrupted:
+                        # The parent closed our wrappers as part of Ctrl+C
+                        # handling.  Any I/O the worker did afterward will
+                        # raise (ValueError: closed file, or OSError) — that's
+                        # expected, not an error to report.
+                        handle.exit_code = 130
+                    else:
+                        print(f"{cmd.name}: error: {e}", file=sys.stderr)
+                        traceback.print_exc()
+                        handle.exit_code = 1
             finally:
                 sys.stdin.clear_override()
                 sys.stdout.clear_override()
