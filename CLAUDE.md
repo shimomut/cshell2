@@ -731,11 +731,13 @@ Two execution modes in `shell.py`:
 
 | Situation | Execution path |
 |-----------|---------------|
-| Standalone command (no pipe, no redirect) | PTY via `ProcessSlot` |
-| Command in a pipeline | `subprocess.Popen` with plain fds |
-| Command with redirect (no pipe) | `subprocess.run` with file fds |
+| Standalone external command (no pipe, no redirect) | PTY via `ProcessSlot` |
+| External command in a pipeline | `subprocess.Popen` with plain fds |
+| External command with redirect (no pipe) | `subprocess.run` with file fds |
+| Python `@registry.command` in a pipeline | worker thread per stage; thread-local `sys.stdin`/`sys.stdout`/`sys.stderr` rebound to pipe ends |
+| Python `@registry.command` with redirect (no pipe) | runs synchronously on main thread; `sys.std*` swapped around `cmd.invoke()` |
 
-Python registered commands (`@registry.command`) in a pipeline or with redirects have their `sys.stdout`/`sys.stdin`/`sys.stderr` temporarily replaced.
+The thread-local routing (`_ThreadLocalStdin` / `_ThreadLocalStdout` / `_ThreadLocalStderr` in `shell.py`) is what lets multiple Python pipeline stages run concurrently without trampling each other or the main thread's terminal. Caveats — most importantly that nested `subprocess` from inside a piped Python command bypasses the thread-local rebinding because it reads the real fd 1 — are documented in `doc/limitations.md` under "Python commands in pipelines — caveats of the in-process model."
 
 ## Key Design Decisions
 

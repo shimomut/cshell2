@@ -85,8 +85,113 @@ class _ThreadLocalStdout(io.TextIOBase):
     def errors(self) -> str:
         return getattr(self._real, "errors", "strict")
 
-    def set_override(self, proxy: "_StdoutProxy") -> None:
+    def set_override(self, proxy) -> None:
         self._local.override = proxy
+
+    def clear_override(self) -> None:
+        self._local.override = None
+
+
+class _ThreadLocalStdin(io.TextIOBase):
+    """A sys.stdin replacement that routes reads per thread.
+
+    The main thread (no override set) reads from *real*.  A pipeline
+    thread sets an override pointing at a TextIOWrapper around its pipe
+    fd so ``input()`` / ``sys.stdin.read()`` consume from the pipe
+    instead of the terminal.
+    """
+
+    def __init__(self, real: io.TextIOBase) -> None:
+        self._real = real
+        self._local = threading.local()
+
+    @property
+    def _target(self) -> io.TextIOBase:
+        return getattr(self._local, "override", None) or self._real
+
+    def read(self, size: int = -1) -> str:
+        return self._target.read(size)
+
+    def readline(self, size: int = -1) -> str:
+        return self._target.readline(size)
+
+    def readlines(self, hint: int = -1) -> list:
+        return self._target.readlines(hint)
+
+    def __iter__(self):
+        return iter(self._target)
+
+    def __next__(self):
+        return next(self._target)
+
+    def fileno(self) -> int:
+        return self._real.fileno()
+
+    @property
+    def buffer(self):
+        target = getattr(self._local, "override", None)
+        return getattr(target, "buffer", None) or self._real.buffer
+
+    @property
+    def encoding(self) -> str:
+        return getattr(self._real, "encoding", "utf-8")
+
+    @property
+    def errors(self) -> str:
+        return getattr(self._real, "errors", "strict")
+
+    def isatty(self) -> bool:
+        target = getattr(self._local, "override", None)
+        if target is not None:
+            return False
+        return self._real.isatty()
+
+    def set_override(self, stream) -> None:
+        self._local.override = stream
+
+    def clear_override(self) -> None:
+        self._local.override = None
+
+
+class _ThreadLocalStderr(io.TextIOBase):
+    """A sys.stderr replacement that routes writes per thread.
+
+    Mirrors :class:`_ThreadLocalStdout` for stderr so a pipeline thread
+    can redirect its diagnostic output independently of the main
+    thread.
+    """
+
+    def __init__(self, real: io.TextIOBase) -> None:
+        self._real = real
+        self._local = threading.local()
+
+    @property
+    def _target(self) -> io.TextIOBase:
+        return getattr(self._local, "override", None) or self._real
+
+    def write(self, s: str) -> int:
+        return self._target.write(s)
+
+    def flush(self) -> None:
+        self._target.flush()
+
+    def fileno(self) -> int:
+        return self._real.fileno()
+
+    @property
+    def buffer(self):
+        return self._real.buffer
+
+    @property
+    def encoding(self) -> str:
+        return getattr(self._real, "encoding", "utf-8")
+
+    @property
+    def errors(self) -> str:
+        return getattr(self._real, "errors", "strict")
+
+    def set_override(self, stream) -> None:
+        self._local.override = stream
 
     def clear_override(self) -> None:
         self._local.override = None
@@ -166,7 +271,57 @@ class _NullBuffer:
         return []
 
 
+class _PyStageHandle:
+    """Lightweight handle for a Python-command stage running in a thread.
+
+    Mirrors the attributes the pipeline driver in _execute_pipeline uses
+    on subprocess.Popen (`wait()`, `returncode`-style exit code) so the
+    two worker types can share one wait loop.
+    """
+
+    __slots__ = ("cmd_name", "thread", "done", "exit_code", "_io_objs")
+
+    def __init__(self, cmd_name: str) -> None:
+        self.cmd_name = cmd_name
+        self.thread: threading.Thread | None = None
+        self.done = threading.Event()
+        self.exit_code: int | None = None
+        # File objects whose underlying fds the worker thread reads/writes.
+        # On interrupt() we close them so any blocked I/O raises and the
+        # thread can unwind.
+        self._io_objs: list = []
+
+    def wait(self) -> int:
+        if self.thread is not None:
+            # Poll so KeyboardInterrupt in the main thread can break out.
+            while not self.done.wait(timeout=0.1):
+                pass
+        return self.exit_code or 0
+
+    def interrupt(self) -> None:
+        """Best-effort interruption of the worker thread.
+
+        Python threads can't be cancelled, so we close the file objects
+        the worker is reading from / writing to.  Any in-flight read or
+        write raises, the worker's exception handler converts it to a
+        normal exit, and the wait below returns promptly.
+
+        A pure-CPU loop inside a Python command is still uninterruptible
+        — flagged in doc/limitations.md.
+        """
+        for obj in self._io_objs:
+            try:
+                obj.close()
+            except Exception:
+                pass
+
+
 _current_slot = threading.local()
+
+# Set on threads spawned by _execute_pipeline for Python-command stages.
+# passthrough_run / passthrough_input check this and refuse, since stdin
+# and stdout are wired to pipe ends, not the terminal.
+_in_pipeline = threading.local()
 
 
 def passthrough_run(argv: list[str], **popen_kwargs) -> int:
@@ -189,6 +344,11 @@ def passthrough_run(argv: list[str], **popen_kwargs) -> int:
 
     Returns the subprocess's exit code.
     """
+    if getattr(_in_pipeline, "flag", False):
+        raise RuntimeError(
+            "passthrough_run cannot be used inside a piped Python command "
+            "(stdin/stdout are wired to pipes, not the terminal)"
+        )
     slot = getattr(_current_slot, "slot", None)
     if slot is None:
         return subprocess.run(argv, **popen_kwargs).returncode
@@ -208,6 +368,11 @@ def passthrough_input(prompt: str = "") -> str:
 
     Outside a Python command thread, falls back to plain ``input(prompt)``.
     """
+    if getattr(_in_pipeline, "flag", False):
+        raise RuntimeError(
+            "passthrough_input cannot be used inside a piped Python command "
+            "(stdin/stdout are wired to pipes, not the terminal)"
+        )
     slot = getattr(_current_slot, "slot", None)
     if slot is None:
         return input(prompt)
@@ -618,10 +783,15 @@ class Shell:
         self.registry.mark_builtins()
         var_registry.mark_builtins()
         self._load_user_config()
-        # Install thread-local stdout router so Python command threads can
-        # write to a buffering proxy without disturbing the main thread.
+        # Install thread-local stdio routers so Python command threads can
+        # rebind their own stdin/stdout/stderr (for buffering proxies or pipe
+        # ends) without disturbing the main thread.
         if not isinstance(sys.stdout, _ThreadLocalStdout):
             sys.stdout = _ThreadLocalStdout(sys.stdout)
+        if not isinstance(sys.stdin, _ThreadLocalStdin):
+            sys.stdin = _ThreadLocalStdin(sys.stdin)
+        if not isinstance(sys.stderr, _ThreadLocalStderr):
+            sys.stderr = _ThreadLocalStderr(sys.stderr)
 
         history_path = Path.home() / ".cshell2" / "history"
         history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1298,29 +1468,34 @@ class Shell:
         if len(stages) == 1:
             return self._execute_stage(stages[0], stdin_fd=None, stdout_fd=None)
 
-        # Multi-stage pipeline: connect with OS pipes.
-        # All stages except the last use plain subprocess (no PTY).
-        import subprocess
+        # Multi-stage pipeline: connect with OS pipes.  External stages run
+        # via subprocess.Popen; registered Python commands run in worker
+        # threads that rebind sys.stdin/stdout/stderr to the pipe ends via
+        # the thread-local routers installed in __init__.
 
         n = len(stages)
         pipe_fds: list[tuple[int, int]] = []
         for _ in range(n - 1):
             pipe_fds.append(os.pipe())
 
-        procs: list[subprocess.Popen] = []
+        # Workers list contains either subprocess.Popen instances or
+        # _PyStageHandle objects (see _start_python_stage_thread).
+        workers: list = []
         for idx, stage in enumerate(stages):
             tokens = self._tokenize_stage(stage)
             if not tokens:
                 continue
 
-            stdin_fd = pipe_fds[idx - 1][0] if idx > 0 else None
-            stdout_fd = pipe_fds[idx][1] if idx < n - 1 else None
+            cmd = self.registry.get(tokens[0])
+            if cmd is not None and not cmd.has_any_handler():
+                cmd = None
 
-            stdin_src = subprocess.PIPE if stdin_fd is not None else None
-            stdout_dst = subprocess.PIPE if stdout_fd is not None else None
+            stdin_fd_pipe = pipe_fds[idx - 1][0] if idx > 0 else None
+            stdout_fd_pipe = pipe_fds[idx][1] if idx < n - 1 else None
 
-            # Apply explicit redirects
-            stdin_file = stdout_file = stderr_dst = None
+            # Resolve explicit redirects (override the pipe ends).
+            stdin_file = stdout_file = None
+            stderr_dst: object | None = None
             for redir in stage.redirects:
                 if redir.kind == "<":
                     stdin_file = open(redir.target, "rb")
@@ -1335,46 +1510,212 @@ class Shell:
                 elif redir.kind == "2>&1":
                     stderr_dst = subprocess.STDOUT
 
-            stdin_arg = stdin_file if stdin_file else (pipe_fds[idx - 1][0] if idx > 0 else None)
-            stdout_arg = stdout_file if stdout_file else (pipe_fds[idx][1] if idx < n - 1 else None)
+            stdin_pipe_used = stdin_fd_pipe is not None and stdin_file is None
+            stdout_pipe_used = stdout_fd_pipe is not None and stdout_file is None
+            is_py_stage = cmd is not None
 
-            try:
-                p = subprocess.Popen(
-                    tokens,
-                    stdin=stdin_arg,
-                    stdout=stdout_arg,
-                    stderr=stderr_dst,
-                    env=dict(os.environ),
-                    cwd=os.getcwd(),
+            worker = None
+            if is_py_stage:
+                worker = self._start_python_stage_thread(
+                    cmd=cmd,
+                    args=tokens[1:],
+                    stdin_fd=stdin_fd_pipe if stdin_pipe_used else None,
+                    stdout_fd=stdout_fd_pipe if stdout_pipe_used else None,
+                    stdin_file=stdin_file,
+                    stdout_file=stdout_file,
+                    stderr_dst=stderr_dst,
                 )
-            except FileNotFoundError:
-                print(f"cshell2: command not found: {tokens[0]}")
-                p = None
-            except OSError as e:
-                print(f"cshell2: {e}")
-                p = None
+            else:
+                stdin_arg = stdin_file if stdin_file else stdin_fd_pipe
+                stdout_arg = stdout_file if stdout_file else stdout_fd_pipe
+                try:
+                    worker = subprocess.Popen(
+                        tokens,
+                        stdin=stdin_arg,
+                        stdout=stdout_arg,
+                        stderr=stderr_dst,
+                        env=dict(os.environ),
+                        cwd=os.getcwd(),
+                    )
+                except FileNotFoundError:
+                    print(f"cshell2: command not found: {tokens[0]}")
+                except OSError as e:
+                    print(f"cshell2: {e}")
 
-            # Close pipe ends in parent after handing them to child
-            if idx > 0:
-                os.close(pipe_fds[idx - 1][0])
-            if idx < n - 1:
-                os.close(pipe_fds[idx][1])
+            if worker is not None:
+                workers.append(worker)
 
-            if stdin_file:
-                stdin_file.close()
-            if stdout_file:
-                stdout_file.close()
-            if stderr_dst and stderr_dst not in (subprocess.STDOUT,):
-                stderr_dst.close()
+            # Drop the parent's reference to each pipe end the stage used.
+            # For Popen the OS-level dup has already happened, so closing here
+            # is correct.  For a Python-thread stage the worker thread owns
+            # the fd via the TextIOWrapper passed to it and will close it
+            # itself — so close here only if the stage *didn't* use that end
+            # (because of an explicit redirect, or because the stage failed
+            # to start at all).
+            close_stdin_pipe = (
+                idx > 0
+                and stdin_fd_pipe is not None
+                and (worker is None or not is_py_stage or not stdin_pipe_used)
+            )
+            close_stdout_pipe = (
+                idx < n - 1
+                and stdout_fd_pipe is not None
+                and (worker is None or not is_py_stage or not stdout_pipe_used)
+            )
+            if close_stdin_pipe:
+                os.close(stdin_fd_pipe)
+            if close_stdout_pipe:
+                os.close(stdout_fd_pipe)
 
-            if p:
-                procs.append(p)
+            # Close redirect file objects we opened.  Popen has already dup'd
+            # them; the Python-thread stage took ownership of them, so in
+            # both cases the parent's copy is no longer needed — except when
+            # the stage failed to start, in which case we must close them
+            # ourselves to release the fd.
+            if not is_py_stage or worker is None:
+                if stdin_file:
+                    stdin_file.close()
+                if stdout_file:
+                    stdout_file.close()
+                if (
+                    stderr_dst is not None
+                    and stderr_dst is not subprocess.STDOUT
+                    and hasattr(stderr_dst, "close")
+                ):
+                    try:
+                        stderr_dst.close()
+                    except Exception:
+                        pass
 
         exit_code = 0
-        for p in procs:
-            p.wait()
-            exit_code = p.returncode or 0
+        try:
+            for w in workers:
+                if isinstance(w, _PyStageHandle):
+                    w.wait()
+                    exit_code = w.exit_code or 0
+                else:
+                    w.wait()
+                    exit_code = w.returncode or 0
+        except KeyboardInterrupt:
+            for w in workers:
+                if isinstance(w, _PyStageHandle):
+                    w.interrupt()
+                else:
+                    try:
+                        w.terminate()
+                    except Exception:
+                        pass
+            for w in workers:
+                if isinstance(w, _PyStageHandle):
+                    w.wait()
+                else:
+                    try:
+                        w.wait()
+                    except Exception:
+                        pass
+            exit_code = 130
         return exit_code
+
+    def _start_python_stage_thread(
+        self,
+        *,
+        cmd,
+        args: list[str],
+        stdin_fd: int | None,
+        stdout_fd: int | None,
+        stdin_file,
+        stdout_file,
+        stderr_dst,
+    ) -> "_PyStageHandle":
+        """Run a registered Python command as one stage of a pipeline.
+
+        The thread takes ownership of *stdin_fd* / *stdout_fd* (raw OS pipe
+        ends) or, when an explicit redirect is in play, the corresponding
+        opened file object.  It binds them to thread-local
+        sys.stdin/sys.stdout/sys.stderr for the duration of cmd.invoke().
+        """
+        # Decide which underlying object the thread owns.  Exactly one of
+        # (stdin_fd, stdin_file) is set when this stage has any stdin source,
+        # and similarly for stdout.
+        in_obj = None
+        if stdin_file is not None:
+            in_obj = stdin_file
+        elif stdin_fd is not None:
+            in_obj = os.fdopen(stdin_fd, "rb", buffering=0, closefd=True)
+
+        out_obj = None
+        if stdout_file is not None:
+            out_obj = stdout_file
+        elif stdout_fd is not None:
+            out_obj = os.fdopen(stdout_fd, "wb", buffering=0, closefd=True)
+
+        err_obj = stderr_dst  # may be a file, "stdout" sentinel (subprocess.STDOUT), or None
+
+        handle = _PyStageHandle(cmd_name=cmd.name)
+        in_wrapper = io.TextIOWrapper(in_obj, encoding="utf-8", errors="replace") if in_obj is not None else None
+        out_wrapper = io.TextIOWrapper(out_obj, encoding="utf-8", errors="replace", write_through=True) if out_obj is not None else None
+        err_wrapper = None
+        if err_obj is not None and err_obj is not subprocess.STDOUT:
+            err_wrapper = io.TextIOWrapper(err_obj, encoding="utf-8", errors="replace", write_through=True)
+        # Hand wrappers to the handle so interrupt() can close them.
+        for w in (in_wrapper, out_wrapper, err_wrapper):
+            if w is not None:
+                handle._io_objs.append(w)
+
+        def _target():
+            _in_pipeline.flag = True
+            try:
+                if in_wrapper is not None:
+                    sys.stdin.set_override(in_wrapper)
+                if out_wrapper is not None:
+                    sys.stdout.set_override(out_wrapper)
+                if err_obj is subprocess.STDOUT:
+                    sys.stderr.set_override(out_wrapper if out_wrapper is not None else sys.stdout)
+                elif err_wrapper is not None:
+                    sys.stderr.set_override(err_wrapper)
+
+                try:
+                    cmd.invoke(args)
+                    handle.exit_code = 0
+                except SystemExit as e:
+                    # Don't propagate; an `exit | cat` should not kill the shell.
+                    code = e.code
+                    handle.exit_code = code if isinstance(code, int) else (1 if code else 0)
+                except BrokenPipeError:
+                    handle.exit_code = 0
+                except KeyboardInterrupt:
+                    handle.exit_code = 130
+                except Exception as e:
+                    print(f"{cmd.name}: error: {e}", file=sys.stderr)
+                    traceback.print_exc()
+                    handle.exit_code = 1
+            finally:
+                sys.stdin.clear_override()
+                sys.stdout.clear_override()
+                sys.stderr.clear_override()
+                # Flush wrappers so downstream readers see all output before
+                # the pipe closes.
+                for w in (out_wrapper, err_wrapper):
+                    if w is not None:
+                        try:
+                            w.flush()
+                        except Exception:
+                            pass
+                # Close the wrappers (which closes the underlying fds/files).
+                # Order matters: close output first so a reader pipe sees EOF.
+                for w in (out_wrapper, err_wrapper, in_wrapper):
+                    if w is not None:
+                        try:
+                            w.close()
+                        except Exception:
+                            pass
+                _in_pipeline.flag = False
+                handle.done.set()
+
+        t = threading.Thread(target=_target, name=f"pipe-{cmd.name}", daemon=True)
+        handle.thread = t
+        t.start()
+        return handle
 
     def _execute_stage(self, stage: Stage, stdin_fd, stdout_fd) -> int:
         """Execute a single stage (no pipe neighbours).
