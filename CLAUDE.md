@@ -2,6 +2,23 @@
 
 A lightweight but powerful terminal shell environment implemented in Python.
 
+## Before designing features or fixes — read these first
+
+When designing a non-trivial new feature or working out a bug fix, always
+consult these two documents *before* proposing a solution:
+
+- [doc/limitations.md](doc/limitations.md) — known limitations of existing
+  features. A "small" fix may already be a known gap with broader scope;
+  one careful change can often resolve several entries at once.
+- [doc/enhancements.md](doc/enhancements.md) — enhancement ideas and
+  in-flight design drafts. A new feature may overlap with a planned one,
+  or a bug fix may unlock part of an existing draft.
+
+Cross-checking both lets you spot opportunities to solve multiple problems
+together instead of stacking point fixes. When you ship something that
+touches an entry in either doc, update or remove that entry in the same
+change.
+
 ## Architecture Overview
 
 ```
