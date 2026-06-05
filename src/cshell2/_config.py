@@ -60,7 +60,7 @@ deploy = command_registry.command(
     ],
 )
 def deploy_app(environment, service, dry_run, verbose, timeout, branch):
-    import time
+    import sys, time
     # Inherited flags (dry_run, verbose) arrive as kwargs alongside this leaf's own.
     # While this runs, press Ctrl+] to switch context without killing the deploy.
     prefix = "[DRY RUN] " if dry_run else ""
@@ -74,9 +74,13 @@ def deploy_app(environment, service, dry_run, verbose, timeout, branch):
         if verbose:
             print(f"  -> {step} ...", flush=True)
         if not dry_run:
-            # Use short sleep intervals so Ctrl-C is handled promptly.
+            # Short sleeps with a flush touch sys.stdout each tick.  In a
+            # pipeline, Ctrl-C closes the stage's stdout; the next flush()
+            # then raises promptly instead of grinding through the rest of
+            # the sleeps.  Standalone, flush() is just a no-op cost.
             for _ in range(secs * 10):
                 time.sleep(0.1)
+                sys.stdout.flush()
         print(f"  ok {step}")
     print(f"{prefix}Done.")
 
