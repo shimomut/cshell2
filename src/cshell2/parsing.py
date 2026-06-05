@@ -5,6 +5,23 @@ import shlex
 import subprocess
 
 
+def _lookup_var(name: str) -> str | None:
+    """Resolve *name* by checking var_registry first, then os.environ.
+
+    Mirrors the set-side lookup order in ``shell._set_variable``: a registered
+    :class:`Var` wins over a same-named env key.  Returns None when neither
+    source has a value, which the caller renders as an empty string.
+
+    Imported lazily so ``parsing`` stays free of import-time cshell2 deps.
+    """
+    from .variables import registry as var_registry
+
+    var = var_registry.get(name)
+    if var is not None:
+        return var.get()
+    return os.environ.get(name)
+
+
 def _find_cmd_sub_end(line: str, start: int) -> int:
     """Given *line* and *start* pointing at the '(' in ``$(...)``, return the
     index of the matching closing ')'.  Returns -1 if unmatched.
@@ -114,7 +131,7 @@ def expand_vars(line: str) -> str:
                 end = line.find("}", next_i + 1)
                 if end != -1:
                     name = line[next_i + 1 : end]
-                    result.append(os.environ.get(name, ""))
+                    result.append(_lookup_var(name) or "")
                     i = end + 1
                 else:
                     result.append(ch)
@@ -125,7 +142,7 @@ def expand_vars(line: str) -> str:
                 while j < len(line) and (line[j].isalnum() or line[j] == "_"):
                     j += 1
                 if j > i + 1:
-                    result.append(os.environ.get(line[i + 1 : j], ""))
+                    result.append(_lookup_var(line[i + 1 : j]) or "")
                     i = j
                 else:
                     result.append(ch)

@@ -1,6 +1,9 @@
 import os
 
+import pytest
+
 from cshell2.parsing import expand_vars, tokenize, split_for_completion
+from cshell2.variables import EnvVar, Var, VarRegistry, registry as var_registry
 
 
 def test_expand_vars_basic():
@@ -64,3 +67,71 @@ def test_split_for_completion_empty():
     tokens, prefix = split_for_completion("")
     assert tokens == []
     assert prefix == ""
+
+
+@pytest.fixture
+def temp_var():
+    """Register a Var for the test, yield its name, clean up on exit."""
+    registered: list[str] = []
+
+    def _register(var: Var) -> str:
+        var_registry.register(var)
+        registered.append(var.name)
+        return var.name
+
+    yield _register
+
+    for name in registered:
+        var_registry._vars.pop(name, None)
+
+
+def test_expand_vars_var_registry_takes_precedence(temp_var):
+    class MultiKeyVar(Var):
+        @property
+        def name(self):
+            return "aws_region"
+
+        @property
+        def env_keys(self):
+            return ["AWS_REGION", "AWS_DEFAULT_REGION"]
+
+        def get(self):
+            return os.environ.get("AWS_REGION")
+
+        def set(self, value):
+            os.environ["AWS_REGION"] = value
+            os.environ["AWS_DEFAULT_REGION"] = value
+
+    temp_var(MultiKeyVar())
+    os.environ["AWS_REGION"] = "us-west-2"
+    os.environ["AWS_DEFAULT_REGION"] = "us-west-2"
+    try:
+        assert expand_vars("echo $aws_region") == "echo us-west-2"
+        assert expand_vars("echo ${aws_region}") == "echo us-west-2"
+    finally:
+        del os.environ["AWS_REGION"]
+        del os.environ["AWS_DEFAULT_REGION"]
+
+
+def test_expand_vars_env_var_subclass(temp_var):
+    temp_var(EnvVar("aws_profile", "AWS_PROFILE"))
+    os.environ["AWS_PROFILE"] = "dev"
+    try:
+        assert expand_vars("aws --profile $aws_profile") == "aws --profile dev"
+    finally:
+        del os.environ["AWS_PROFILE"]
+
+
+def test_expand_vars_var_unset_renders_empty(temp_var):
+    temp_var(EnvVar("aws_profile", "AWS_PROFILE"))
+    os.environ.pop("AWS_PROFILE", None)
+    assert expand_vars("echo [$aws_profile]") == "echo []"
+
+
+def test_expand_vars_falls_back_to_env_when_no_var(temp_var):
+    os.environ["CSHELL2_PLAIN"] = "plain"
+    try:
+        # No Var registered for this name — env lookup still works.
+        assert expand_vars("echo $CSHELL2_PLAIN") == "echo plain"
+    finally:
+        del os.environ["CSHELL2_PLAIN"]

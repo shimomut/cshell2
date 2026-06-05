@@ -152,7 +152,7 @@ Cobra-based tools (`docker`, `kubectl`, `helm`, `gh`, …) and argcomplete-based
 Splits raw input into tokens respecting quoting rules.
 
 - `split_for_completion(line)` returns `(tokens, prefix)` for the completion engine
-- `expand_vars(line)` expands `$VAR` and `${VAR}`, leaving single-quoted regions unexpanded
+- `expand_vars(line)` expands `$VAR` and `${VAR}`, leaving single-quoted regions unexpanded.  Lookup checks `var_registry` first (so `$aws_region` returns whatever the registered Var's `get()` reports), then falls back to `os.environ` — mirroring the set-side precedence in `shell._set_variable`.
 - `tokenize(line)` wraps `shlex.split` with graceful recovery for unclosed quotes
 
 ### pipeline.py — Shell Operator Parser

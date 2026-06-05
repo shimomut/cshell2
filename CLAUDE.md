@@ -176,6 +176,16 @@ var aws_region=us-east-1     → dispatch to AwsRegionVar.set("us-east-1")
 var AWS_SESSION_TOKEN=abc    → plain os.environ set (no Var registered — fallback)
 ```
 
+**`$NAME` / `${NAME}` expansion is symmetric with assignment.** `parsing.expand_vars` checks `var_registry` first, then `os.environ`, so a Python-backed variable can be read on the command line just like an env var:
+
+```
+var aws_region=us-west-2
+aws ec2 describe-instances --region $aws_region   → expands via AwsRegionVar.get()
+echo $AWS_REGION                                   → also us-west-2 (set() wrote both keys)
+```
+
+The same precedence applies to bare `NAME=VALUE` assignment (e.g. `aws_region=ap-south-1`). Net effect: Python-backed vars and OS env vars are interchangeable on both the read and write sides of the shell surface.
+
 #### `VarCompleter` — `=`-Aware Completion for `var`
 
 Registered as the positional completer on the `var` command. It splits the current token at `=` to handle both phases:
@@ -726,6 +736,6 @@ Python registered commands (`@registry.command`) in a pipeline or with redirects
 
 7. **System command fallback** — anything not registered as a Python command is passed to the system shell via PTY, so cshell2 is a drop-in replacement for daily use.
 
-8. **Python-backed variables mirror the command registry pattern** — `Var` subclasses handle `get`/`set` logic; a single logical name (e.g. `aws_region`) can drive multiple `os.environ` keys or arbitrary side effects. The `var` command dispatches through `VarRegistry` before falling back to plain env writes, so the shell surface (`var KEY=VALUE`) is unchanged. `VarCompleter` handles `=`-split completion locally without touching the global tokenizer.
+8. **Python-backed variables mirror the command registry pattern** — `Var` subclasses handle `get`/`set` logic; a single logical name (e.g. `aws_region`) can drive multiple `os.environ` keys or arbitrary side effects. The `var` command and bare `NAME=VALUE` assignment dispatch through `VarRegistry` before falling back to plain env writes, and `$NAME` / `${NAME}` expansion does the same lookup in reverse — so registered Vars are read- and write-symmetric with `os.environ` and a Python-backed variable behaves transparently like an OS variable on the command line. `VarCompleter` handles `=`-split completion locally without touching the global tokenizer.
 
 9. **One reader for real stdin** — when a Python command spawns an interactive subprocess, the child must not inherit fd 0 directly. The main forwarding thread is already reading stdin in raw mode; a second reader (the subprocess) splits keystrokes unpredictably between them. `passthrough_run` enforces the rule by allocating a slot-owned PTY for the child, so the chain stays `stdin → main → master → subprocess`. This is the same architecture `ProcessSlot` uses for external commands; `passthrough_run` extends it to subprocesses launched from inside a `PythonCommandSlot`.
