@@ -48,7 +48,7 @@ from ..completion import (
     CompletionContext,
     FileCompleter,
 )
-from ..shell import passthrough_run
+from ..shell import passthrough_input, passthrough_run
 
 
 # ─── User-customisable module-level config ──────────────────────────────────
@@ -457,32 +457,36 @@ def _resolve_hyperpod_node_id(sm, cluster, cluster_name, node_id_input: str) -> 
 def _print_hyperpod_log(logs_client, log_group, stream):
     start_time = int((time.time() - 24 * 60 * 60) * 1000)
     next_token = None
-    while True:
-        params = {
-            "logGroupName":  log_group,
-            "logStreamName": stream,
-            "startFromHead": True,
-            "limit":         1000,
-        }
-        if next_token:
-            params["nextToken"] = next_token
-        else:
-            params["startTime"] = start_time
-        try:
-            response = logs_client.get_log_events(**params)
-        except logs_client.exceptions.ResourceNotFoundException:
-            print(f"Log group or stream not found [ {log_group}, {stream} ]")
-            return
+    try:
+        while True:
+            params = {
+                "logGroupName":  log_group,
+                "logStreamName": stream,
+                "startFromHead": True,
+                "limit":         1000,
+            }
+            if next_token:
+                params["nextToken"] = next_token
+            else:
+                params["startTime"] = start_time
+            try:
+                response = logs_client.get_log_events(**params)
+            except logs_client.exceptions.ResourceNotFoundException:
+                print(f"Log group or stream not found [ {log_group}, {stream} ]")
+                return
 
-        for event in response["events"]:
-            if start_time > event["timestamp"]:
-                continue
-            print(event["message"].replace("\0", "\\0"))
+            for event in response["events"]:
+                if start_time > event["timestamp"]:
+                    continue
+                print(event["message"].replace("\0", "\\0"))
 
-        if response["nextForwardToken"] != next_token:
-            next_token = response["nextForwardToken"]
-        else:
-            break
+            if response["nextForwardToken"] != next_token:
+                next_token = response["nextForwardToken"]
+            else:
+                break
+    except BrokenPipeError:
+        # Downstream consumer closed early (e.g. `... | head`).  Normal.
+        pass
 
 
 # ─── HyperPod completers ────────────────────────────────────────────────────
@@ -874,6 +878,7 @@ def _register_logs(awsut) -> None:
         ],
     )
     def _logs_monitor(group_name, stream_name, freq, lookback):
+        import sys
         logs_client = _get_boto3_client("logs")
         start_time = int((time.time() - lookback * 60) * 1000)
 
@@ -902,12 +907,20 @@ def _register_logs(awsut) -> None:
                         continue
                     msg = event["message"].replace("\0", "\\0")
                     print(msg)
+                # Flush so a piped consumer (e.g. `... | grep ERROR`) sees
+                # output as it arrives instead of one block-buffered chunk.
+                sys.stdout.flush()
 
                 if response["nextForwardToken"] != next_token:
                     next_token = response["nextForwardToken"]
                 else:
-                    time.sleep(freq)
-        except KeyboardInterrupt:
+                    # Short sleeps with a flush each tick — in a pipeline,
+                    # Ctrl+C closes our stdout and the next flush() raises
+                    # promptly instead of blocking until the full freq sec.
+                    for _ in range(freq * 10):
+                        time.sleep(0.1)
+                        sys.stdout.flush()
+        except (KeyboardInterrupt, BrokenPipeError):
             pass
 
     @logs.command(
@@ -1266,7 +1279,7 @@ def _register_hyperpod(awsut) -> None:
     )
     def _delete(cluster_name, yes):
         if not yes:
-            answer = input(f"Are you sure deleting the cluster [{cluster_name}]? [y/N] : ")
+            answer = passthrough_input(f"Are you sure deleting the cluster [{cluster_name}]? [y/N] : ")
             if answer.lower() not in ("y", "yes"):
                 return
 
