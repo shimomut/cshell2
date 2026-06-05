@@ -19,11 +19,11 @@ syntax visually distinct from regular commands, so parsing priority is
 unambiguous and the construct doesn't collide with POSIX command names.
 
 ```
-@watch ls | grep py
-@watch -n 1 df -h
+@watch ls
+@watch -n 1 {df -h | grep abc}
 @time make build
 @retry -n 3 flaky-test
-@every -i 5s curl https://example.com/health
+@every -i 5s {curl https://example.com/health}
 ```
 
 ### Prior art: IPython magics
@@ -95,6 +95,45 @@ parsed before the normal pipeline grammar runs, no name collision.
 `watch` (no `@`) still passes through to the system binary unchanged;
 `@watch` is its own thing.
 
+### Scope ambiguity: why `@watch` alone isn't enough
+
+Even with the `@` sigil disambiguating *the parser*, there's a real
+human-side concern. POSIX `watch` and `@watch` would have *opposite*
+scopes for the same trailing text:
+
+```
+ watch -n 5 df -h | grep abc      # POSIX: pipes watch's output through grep
+@watch -n 5 df -h | grep abc      # cshell2: re-runs `df -h | grep abc` every 5s
+```
+
+The visual form is identical except for the leading `@`. Worse, this
+inverts the behavior in exactly the case where users are most likely to
+misread it: the famous POSIX gotcha (`watch` not piping the way you'd
+expect, requiring `watch -n 5 'df -h | grep abc'` to work) trains users
+that "the operators don't belong to `watch`." We'd be saying "good
+news, no quotes!" while reusing the trap.
+
+#### Resolution: braces required when the wrapped pipeline contains operators
+
+A `{...}` subexpression makes the decorator's scope literally visible.
+The simple case stays terse; multi-stage pipelines force the user to
+mark the scope.
+
+```
+@watch -n 5 df -h                   # OK — single command, scope is obvious
+@watch -n 5 {df -h}                 # OK — explicit scope, also fine
+@watch -n 5 {df -h | grep abc}      # OK — pipeline must be braced
+@watch -n 5 df -h | grep abc        # parse error: ambiguous scope; use { ... }
+```
+
+The rule: **any pipeline that contains `|`, `;`, `&&`, `||`, or a
+redirect (`>`, `<`, `2>`, …) and is wrapped by a decorator must be
+enclosed in `{...}`**. A decorator wrapping a single bare command works
+without braces.
+
+This is enforced at parse time, not silently coerced — the error
+message points at the operator and suggests the fix.
+
 ### Parsing model
 
 Decorators are extracted *before* the pipeline parser runs:
@@ -104,13 +143,17 @@ raw line
  └─ while the next token starts with '@':
      ├─ peel off '@name' and any decorator-owned flags up to the next non-flag token
      └─ push onto decorator stack
- └─ remainder → existing pipeline parser (unchanged)
+ └─ if the next token is '{', parse a braced subexpression as the wrapped pipeline
+ └─ else parse a single command (no operators allowed) as the wrapped pipeline
+ └─ remainder (after the decorator's pipeline ends) → existing pipeline parser,
+    with the decorator-call standing in as one stage
 ```
 
-This means **everything after the decorator(s) is a normal pipeline** —
-`;`, `&&`, `||`, `|`, `>`, `<`, `2>`, globbing, var expansion, backslash
-continuation all work exactly as they do at the top level. The decorator
-never sees raw text; it gets a parsed pipeline AST.
+Everything inside the braces (or, for the un-braced single-command
+form, the bare command) is a normal pipeline — `;`, `&&`, `||`, `|`,
+`>`, `<`, `2>`, globbing, var expansion, backslash continuation all
+work exactly as they do at the top level. The decorator never sees
+raw text; it gets a parsed pipeline AST.
 
 Multiple decorators stack from outside in (closest to the pipeline runs
 innermost), matching Python's decorator semantics:
@@ -120,6 +163,44 @@ innermost), matching Python's decorator semantics:
        │           └─ retry wraps `flaky-test`
        └─ time wraps `retry -n 3 flaky-test`
 ```
+
+#### Brace handling: `{` and `}` inside the wrapped pipeline
+
+The brace-balancer that finds the closing `}` of a decorator scope is
+just one more state on the same scan that already handles quotes and
+escapes for `|`, `;`, `&&`, etc. It applies three rules so that braces
+that are *part of the wrapped command* don't terminate the scope:
+
+1. **Quoted braces are literal.** Inside `"..."` and `'...'`, every
+   character (including `}`) is data. The brace counter doesn't move
+   while inside a quoted region — exactly like `"|"` doesn't
+   terminate a pipeline today.
+   ```
+   @watch {echo "}"}            # the "}" is literal; outer } closes scope
+   @watch {grep '{' file}       # the '{' is literal; outer } closes scope
+   @watch {grep "{}" file}      # both braces literal inside the string
+   ```
+
+2. **`${name}` parameter expansion is its own balanced span.** When
+   `$` appears immediately before `{`, the tokenizer recognizes
+   `${...}` as a single var-expansion token and tracks its own
+   matching `}` separately from the decorator scope. This is the same
+   rule `parsing.py` already applies for `${var}`; the brace counter
+   just learns to peek for the `$` prefix.
+   ```
+   @watch {echo ${abc}}         # inner } closes the var; outer } closes scope
+   @watch {echo "${abc}"}       # quoted ${...} also expands; same balance
+   @watch {echo '${abc}'}       # single-quoted: literal text, no expansion
+   ```
+
+3. **Backslash escapes either brace.** `\{` and `\}` are literal,
+   matching the existing escape rule for `\|`, `\;`.
+   ```
+   @watch {echo \}}             # literal }; the next } closes the scope
+   ```
+
+The brace counter and the existing quote/escape/var-expansion tracker
+share one scan — no new tokenizer pass.
 
 #### Argument syntax
 
@@ -142,24 +223,126 @@ the decorator's argparse.
 Examples:
 
 ```
-@watch                    # bare, defaults
-@watch -n 1 df -h         # one flag, then pipeline
-@watch -n 1 --no-clear ls # multiple flags
-@retry -n 3 flaky-test    # positional-style count via -n
-@every -i 5s curl …       # interval as a string the decorator parses
+@watch                        # bare, defaults
+@watch -n 1 df -h             # one flag, then single-command pipeline
+@watch -n 1 {df -h}           # one flag, braced pipeline (also fine)
+@watch -n 1 --no-clear ls     # multiple flags
+@retry -n 3 flaky-test        # positional-style count via -n
+@every -i 5s {curl https://…} # interval as a string the decorator parses
 ```
 
 **Where do the decorator's flags end and the pipeline begin?** First
 token that doesn't look like a flag (no leading `-`), isn't a value
-bound to a preceding flag, and isn't another `@name`. This is the same
-rule argparse already implements; we just stop consuming at the first
-positional and hand the rest off.
+bound to a preceding flag, and isn't another `@name`, or the opening
+`{`. This is the same rule argparse already implements; we just stop
+consuming at the first positional (or brace) and hand the rest off.
 
-Edge case: a wrapped command whose first token *does* start with `-`
-(rare — `-` is conventionally an argument, not a command). The decorator
-can opt out of greedy flag parsing with
-`params=[arg("--", action="positional_terminator")]`-style sentinels, or
-the user can write `@watch -- ls -la`. Same convention as POSIX `--`.
+Edge case: a wrapped command whose first token *does* start with `-`.
+The user can write `@watch -- ls -la` (POSIX-style `--` terminator) or
+just brace it: `@watch {ls -la}`. Same convention as POSIX.
+
+### Composing decorators inside larger pipelines (future extension)
+
+Once `{...}` is an explicit scope boundary, the decorator-call can sit
+inside a larger pipeline as a single stage — its stdout becomes the
+input to whatever follows the closing brace:
+
+```
+@abc -n 5 {df -h} | grep xyz
+└──────── stage 1 ────┘   └─ stage 2
+```
+
+Parser story:
+
+```
+@abc -n 5 {df -h} | grep xyz
+       │   │   │  │
+       │   │   │  └── outer pipeline parser resumes here
+       │   │   └── decorator's scope ends at matching brace
+       │   └── decorator's scope starts
+       └── decorator's flags (consumed by argparse)
+```
+
+Three things this unlocks naturally:
+
+1. **Decorator output as a stream stage** —
+   `@every -i 5s {curl …} | jq '.status'` continuously processes
+   results.
+2. **Redirects bind to whichever scope is braced** —
+   `@time {make && ./run} > build.log` times the whole chain and
+   redirects together; `@time {make} > build.log` times only `make`
+   but redirects only `make`'s output.
+3. **Decorators on top of decorators on subexpressions** —
+   `@retry -n 3 @time {flaky-test}` already works under the existing
+   stacking rule; nothing new.
+
+Two caveats worth flagging to decorator authors:
+
+- **TTY-aware decorator behavior.** `@watch`'s clear-screen escape
+  codes are wrong when its stdout is piped. Decorators that emit
+  terminal control (or produce non-pipeable output) need to check
+  `sys.stdout.isatty()` — same discipline as any well-behaved program.
+- **Infinite-output decorators in a pipeline.** `@watch {ls} | grep foo`
+  runs forever; the user has to `Ctrl+C` (or `Ctrl+]` to background)
+  just like `tail -f | grep`. Not a bug, but worth a sentence so it's
+  not surprising.
+
+### Why `{...}` (and the concerns)
+
+`{...}` is the most natural choice visually but carries baggage from
+other shells. The concerns, in order of weight:
+
+1. **Brace expansion.** Bash, zsh, and fish all use `{...}` for
+   list/sequence expansion: `echo {a,b,c}`, `mv img{,.bak}`,
+   `seq {1..10}`. cshell2 doesn't implement this today, but it's a
+   feature users routinely expect from a modern shell. Reserving
+   `{...}` as a general grouping construct would lock us out (or force
+   bash-style "depends on whitespace and position" disambiguation,
+   which is exactly the kind of subtlety that bites users).
+2. **Bash command groups (`{ cmd1; cmd2; }`).** Bash uses `{...}` for
+   "run these in the current shell." The rules are famously fiddly:
+   required space after `{`, required `;` (or newline) before `}`,
+   only at statement start. Users who know this will assume our
+   `{...}` follows the same rules.
+3. **`${var}` parameter expansion.** Already used by cshell2.
+   Different context (always after `$`), so no actual parser
+   collision, but it does mean `{` is overloaded across
+   "subexpression," "parameter expansion," and (potentially) "brace
+   expansion" in the future.
+
+Not really a concern: PowerShell's `{...}` is a first-class
+scriptblock object — different paradigm, but users coming from
+PowerShell will at least find the visual familiar.
+
+#### Alternatives surveyed
+
+| Syntax | Used by | Notes |
+|--------|---------|-------|
+| `{...}` | bash command groups, PowerShell scriptblocks, fish brace-expansion | Most "shell-natural" but conflicts with future brace expansion |
+| `(...)` | bash subshells | Strong "this is its own scope" connotation; collides only if cshell2 ever adds subshells |
+| `$(...)` | bash/zsh command substitution | Reads as "capture this," not "delimit this" — wrong semantics |
+| `<(...)` `>(...)` | bash process substitution | Visually busy and the meaning ("file path that streams") doesn't fit |
+| `[...]` | bash test, glob class | Heavily overloaded already |
+| `((...))` | bash arithmetic | Niche but taken |
+| `do ... end` | fish, ruby | Verbose; reads more like scripting than shell |
+| Backticks | bash command substitution (legacy) | Single-char, visually distinct, but historically tied to capture |
+
+#### Recommendation
+
+Use `{...}` with two explicit policies that keep it from spreading:
+
+1. **`{` is a subexpression delimiter only after `@decorator [flags]`** —
+   i.e., position-restricted, not a general grouping construct.
+   Outside that position it stays free for brace expansion if we add
+   it later.
+2. **No bash-style whitespace/`;` requirements inside the braces** —
+   `{df -h}` parses fine, no trailing `;` needed. We're reusing the
+   visual, not the rules.
+
+If preserving brace expansion as a future feature is high-priority and
+we'd rather not depend on position-restriction, the next-best choice
+is **`(...)`** — visually clean, reads as scope, only conflict is
+with subshells (which a Python shell may never need).
 
 ### Completion UX
 
@@ -177,6 +360,9 @@ almost no new code.
   argcomplete / cobra fallback chain takes over. `@watch git st<TAB>`
   works because we're literally asking the git recipe to complete its
   first arg.
+- `@watch {<TAB>` — same as above, but inside a braced scope.
+  Tokenizer reports the scope so completion knows the closing brace
+  is owed.
 - `@time @ret<TAB>` — second decorator name completes from the
   registry, same as the first.
 
@@ -204,7 +390,7 @@ from cshell2.decorators import registry as decorator_registry
 )
 def watch(pipeline, *, interval: float, no_clear: bool):
     while True:
-        if not no_clear:
+        if not no_clear and sys.stdout.isatty():
             sys.stdout.write("\x1b[2J\x1b[H")
         pipeline.run()              # runs the parsed pipeline; honours redirects, pipes, etc.
         time.sleep(interval)
@@ -245,37 +431,38 @@ surface for "run this pipeline in a different process slot."
 1. ~~**Args syntax** — Python kwargs vs. shell-style?~~ **Resolved:**
    shell-style flags via the existing `arg(...)` helper. Matches
    IPython precedent and reuses `OptionsCompleter` directly.
-2. **Stacking direction** — Python convention is outer-first (top
+2. ~~**Scope of the wrapped pipeline.**~~ **Resolved:** braces
+   required whenever the wrapped pipeline contains a shell operator;
+   bare single-command form allowed for the simple case.
+3. ~~**Bracket choice.**~~ **Resolved (provisionally):** `{...}`,
+   position-restricted to "after `@decorator [flags]`" so it doesn't
+   preempt future brace expansion. `(...)` is the fallback if that
+   constraint feels fragile in practice.
+4. **Stacking direction** — Python convention is outer-first (top
    decorator wraps last). Match that, or invert because shell users
    read left-to-right "what happens first"?
-3. **Where does decorator output go relative to pipeline output?** If
+5. **Where does decorator output go relative to pipeline output?** If
    `@time` prints timing info, does it go to stderr by default? After
    the pipeline? Interleaved?
-4. **Interaction with `;` and `&&`.** Does `@watch ls; pwd` watch
-   `ls; pwd` together, or just `ls` and then run `pwd` once? Probably
-   the former (decorator wraps the whole *statement*), but worth being
-   explicit. A decorator could also opt in to seeing only the first
-   pipeline.
-5. **Redirects and the decorator.** `@time make > build.log 2>&1` —
-   does `@time`'s output go into `build.log` too? Probably no:
-   redirects bind to the pipeline, not the decorator. Decorator output
+6. **Interaction with `;` and `&&` *outside* the braces.** `@watch ls;
+   pwd` — the `;` is outside the wrapped pipeline (no braces, so the
+   decorator owns just `ls`), and `pwd` runs once after the watcher
+   exits. Worth a parser test to make sure that reads naturally.
+7. **Redirects and the decorator.** `@time {make} > build.log` — does
+   `@time`'s output go into `build.log` too? Probably no: redirects
+   bind to the braced pipeline, not the decorator. Decorator output
    goes to the original stdio.
-6. **Ctrl+] context switching while a decorator is looping.** `@watch`
+8. **Ctrl+] context switching while a decorator is looping.** `@watch`
    running `ls` should be backgroundable like any other long-running
    command. Does the decorator body run on a `PythonCommandSlot`?
    (Probably yes — it's a Python command in everything but syntax.)
-7. **Where do decorator flags end and the pipeline begin?** First
-   non-flag token; `--` works as an explicit terminator (same as
-   POSIX). Mostly resolved by reusing argparse, but worth a parser
-   test for edge cases like `@watch ls -la` (does `-la` belong to
-   `watch` or `ls`? — answer: `ls`, since `watch` declares no `-l`).
-8. **History.** Does `@watch ls` get stored in history as written, or
+9. **History.** Does `@watch ls` get stored in history as written, or
    does each iteration land in history? (Almost certainly: stored once
    as written.)
-9. **Reload semantics.** Does `reload` re-register user decorators
-   alongside commands and vars? Same lifecycle as
-   `clear_user_commands()`.
-10. **Error messages.** `@watche ls` — typo. Do we suggest `@watch`?
+10. **Reload semantics.** Does `reload` re-register user decorators
+    alongside commands and vars? Same lifecycle as
+    `clear_user_commands()`.
+11. **Error messages.** `@watche ls` — typo. Do we suggest `@watch`?
     Plain command typos already get a "command not found" via the
     system shell; for decorators we own the lookup, so we can be
     friendlier.
@@ -287,16 +474,23 @@ surface for "run this pipeline in a different process slot."
 - **Not a replacement for shell functions or aliases.** Aliases are
   name-for-text substitution; decorators are runtime wrappers around a
   pipeline AST. They're complementary.
-- **Not POSIX-compatible.** The `@` prefix is intentionally
-  cshell2-specific; scripts using decorators won't run in `bash`/`zsh`.
-  That's fine — cshell2 is interactive-first.
+- **Not POSIX-compatible.** The `@` prefix and `{...}` scope marker
+  are intentionally cshell2-specific; scripts using decorators won't
+  run in `bash`/`zsh`. That's fine — cshell2 is interactive-first.
+- **`{...}` is not (yet) a general command-grouping construct.** It's
+  defined only in the position immediately following a decorator. We
+  may extend it later, but reserving it now would foreclose brace
+  expansion.
 
 ### Implementation sketch (to flesh out after design lock)
 
 1. **Tokenizer change** in `pipeline.py`: at line start, while the next
    token is `@<ident>`, peel off the decorator name plus any following
    flag tokens its argparse spec consumes; push onto a decorator
-   stack. Continue parsing the rest as a normal line.
+   stack. Then check for an opening `{` — if present, parse a
+   balanced-brace subexpression as the wrapped pipeline; otherwise
+   consume a single command (and reject any pipeline operator with a
+   clear error).
 2. **`decorators.py` module** mirroring `commands.py` / `variables.py`:
    `Decorator` ABC, `DecoratorRegistry`, module-level `registry`
    singleton, `@registry.decorator(...)` API. Reuses `arg(...)` from
@@ -308,13 +502,15 @@ surface for "run this pipeline in a different process slot."
 4. **Completion glue** in `completion.py`: detect the `@` prefix in
    `CompletionContext` and dispatch to a `DecoratorNameCompleter` for
    the name, then to the decorator's `OptionsCompleter` for its flags.
-   Once past the decorator's flags, strip the decorator portion from
-   `ctx.line`/`ctx.args` and delegate to the normal completion
-   pipeline.
+   Once past the decorator's flags (and inside an open `{` if
+   present), strip the decorator portion from `ctx.line`/`ctx.args`
+   and delegate to the normal completion pipeline.
 5. **Built-in decorators** in `cshell2/decorators/` (parallel to
    `recipes/`): `watch.py`, `time.py`, `retry.py`, etc.
    `mark_builtins()` analog to keep them across `reload`.
 6. **Tests**: `tests/test_decorators.py` for parsing edge cases
-   (stacked, with flags, with pipes, with redirects, with continuation
-   lines, with `--` terminator), plus completion tests for the
-   `@`-token codepath.
+   (stacked, with flags, with braced pipelines, with redirects inside
+   and outside braces, with continuation lines, with `--` terminator,
+   with `@deco {...} | next-stage`, plus brace-handling cases:
+   `{echo "}"}`, `{echo '{' }`, `{echo ${abc}}`, `{echo "${abc}"}`,
+   `{echo \}}`), plus completion tests for the `@`-token codepath.
