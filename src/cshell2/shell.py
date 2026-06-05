@@ -416,6 +416,11 @@ class PythonCommandSlot:
         self._input_request = threading.Event()
         self._input_released = threading.Event()
         self._input_resume = threading.Event()
+        # Set by the main forwarding loop's SIGINT handler when Ctrl+C is
+        # pressed during a passthrough_input() prompt.  _run_input polls
+        # for it and raises KeyboardInterrupt on the slot thread instead
+        # of leaving the user with an unresponsive prompt.
+        self._input_interrupted = threading.Event()
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -649,17 +654,57 @@ class PythonCommandSlot:
     # --- passthrough_input() implementation ---------------------------------
 
     def _run_input(self, prompt: str) -> str:
-        """Read a line via input() while the main loop yields stdin and cooked mode."""
+        """Read a line of input while the main loop yields stdin and cooked mode.
+
+        The naive ``input()`` call would leave Ctrl+C unresponsive: the main
+        forwarding loop has SIGINT ignored, and the slot thread's blocking
+        ``read()`` can't be interrupted from outside.  Instead we poll fd 0
+        through ``select`` so the slot can periodically check
+        ``_input_interrupted`` (set by the main loop's SIGINT handler) and
+        raise ``KeyboardInterrupt`` promptly.
+
+        Cooked terminal mode is still in effect, so the kernel handles line
+        editing (backspace, delete-word, etc.) and ``select`` reports the
+        fd readable only once the user hits Enter.  That gives us full line
+        editing without reimplementing it.
+        """
+        import select as _select
         # Drain pending output so the prompt isn't preceded by buffered text.
         self._proxy.deactivate()
         self._proxy.replay()
+        self._input_interrupted.clear()
         self._input_resume.clear()
         self._input_released.clear()
         self._input_request.set()
         # Wait for the main loop to release stdin and restore cooked mode.
         self._input_released.wait()
         try:
-            return input(prompt)
+            # Print the prompt directly to the real terminal.
+            real = getattr(sys.stdout, "_real", sys.stdout)
+            real.write(prompt)
+            real.flush()
+            fd = sys.stdin.fileno()
+            buf = b""
+            while True:
+                if self._input_interrupted.is_set():
+                    raise KeyboardInterrupt
+                rlist, _, _ = _select.select([fd], [], [], 0.1)
+                if fd not in rlist:
+                    continue
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError:
+                    raise EOFError
+                if not chunk:
+                    if buf:
+                        return buf.decode("utf-8", errors="replace")
+                    raise EOFError
+                buf += chunk
+                # In cooked mode, select fires only on full lines (terminal
+                # delivers everything up to and including the newline).
+                if b"\n" in buf:
+                    line, _, _rest = buf.partition(b"\n")
+                    return line.decode("utf-8", errors="replace")
         finally:
             self._input_request.clear()
             self._input_resume.set()
@@ -2037,6 +2082,19 @@ class Shell:
             except OSError:
                 pass
 
+        # SIGINT handler used only while the slot is in passthrough_input().
+        # The main loop is waiting on _input_resume; the slot is polling fd 0.
+        # Setting _input_interrupted causes the slot's poll loop to raise
+        # KeyboardInterrupt and unwind.  Cooked mode's ECHOCTL already
+        # prints "^C" on the user's terminal — we just need to bump down a
+        # line so the next prompt doesn't overwrite the input line.
+        def on_sigint_during_input(signum, frame):
+            try:
+                os.write(fd, b"\r\n")
+            except OSError:
+                pass
+            slot._input_interrupted.set()
+
         try:
             tty.setraw(fd)
             signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -2047,11 +2105,15 @@ class Shell:
             while slot.is_alive():
                 if slot._input_request.is_set():
                     # Hand stdin and cooked mode over to the slot thread for
-                    # the duration of its input() call.
+                    # the duration of its input() call.  Replace SIGINT
+                    # handling for the input window: the slot thread polls
+                    # _input_interrupted and raises KeyboardInterrupt.
                     termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+                    signal.signal(signal.SIGINT, on_sigint_during_input)
                     slot._input_released.set()
                     while slot.is_alive() and not slot._input_resume.is_set():
                         slot._input_resume.wait(timeout=0.1)
+                    signal.signal(signal.SIGINT, signal.SIG_IGN)
                     if not slot.is_alive():
                         break
                     tty.setraw(fd)
