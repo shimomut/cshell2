@@ -101,6 +101,11 @@ class _TarPositionalCompleter(Completer):
             return self._archive.complete(ctx)
         return self._files.complete(ctx)
 
+    def describe_slot(self, args: list[str], pos_idx: int) -> str | None:
+        if self._is_archive_slot(args):
+            return "archive: tar archive"
+        return "file: file to add or extract"
+
     @staticmethod
     def _is_archive_slot(args: list[str]) -> bool:
         if "-f" in args:
@@ -123,14 +128,12 @@ class _TarPositionalCompleter(Completer):
 def register() -> None:
     if shutil.which("tar") is None:
         return
-    positional = _TarPositionalCompleter()
     command_registry.command(
         "tar",
         help="create, extract, or list tar archives",
         params=[
-            arg("archive", help="tar archive", completer=positional),
-            arg("file", nargs="*", help="file to add or extract",
-                completer=positional),
+            arg("path", nargs="*", help="archive or member file",
+                completer=_TarPositionalCompleter()),
             arg("-c", action="store_true", help="create archive"),
             arg("-x", action="store_true", help="extract from archive"),
             arg("-t", action="store_true", help="list archive contents"),

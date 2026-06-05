@@ -55,6 +55,15 @@ class Completer(ABC):
     def should_activate(self, ctx: CompletionContext) -> bool:
         return True
 
+    def describe_slot(self, args: list[str], pos_idx: int) -> str | None:
+        """Return a status-bar label for the positional slot, or None to use the
+        static ``help=`` text from the ``arg()`` descriptor.
+
+        Override when the slot's role depends on preceding args (e.g. tar's
+        first positional is the archive unless ``-f ARCHIVE`` was given).
+        """
+        return None
+
 
 class DirCompleter(Completer):
     """Completes directory paths only (no files)."""

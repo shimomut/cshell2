@@ -90,6 +90,27 @@ class TestPositionalCompleter:
 
 
 # ---------------------------------------------------------------------------
+# _TarPositionalCompleter.describe_slot — drives the status-bar label
+# ---------------------------------------------------------------------------
+
+class TestDescribeSlot:
+    def setup_method(self):
+        self.p = _TarPositionalCompleter()
+
+    @pytest.mark.parametrize("args, expected", [
+        ([], "archive: tar archive"),
+        (["-cvzf"], "archive: tar archive"),
+        (["-cvzf", "out.tgz"], "file: file to add or extract"),
+        (["-f", "out.tar"], "file: file to add or extract"),
+        (["-f", "out.tar", "member"], "file: file to add or extract"),
+        (["./doc/"], "file: file to add or extract"),
+    ])
+    def test_describe_slot(self, args, expected):
+        # pos_idx is unused by _TarPositionalCompleter — it dispatches off args.
+        assert self.p.describe_slot(args, len(args)) == expected
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 

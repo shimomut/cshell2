@@ -574,16 +574,23 @@ def _label_from_arg(param) -> str:
     return name
 
 
-def _positional_label(cmd, pos_idx: int, command_name: str) -> str:
+def _positional_label(cmd, pos_idx: int, command_name: str, args: list[str]) -> str:
     """Return a status-bar label for the positional argument at *pos_idx*.
 
-    Reads from the resolved Command's ``params`` list.  A positional declared
-    with ``nargs="*"``/``"+"`` covers every slot from its position onward
-    (mirroring the WILDCARD entry in the completers dict).  Falls back to
-    ``"arg N"`` when no descriptor covers this index.
+    First consults the slot's completer via ``describe_slot(args, pos_idx)``
+    so completers whose role depends on preceding args (e.g. tar's first
+    positional, which flips between archive and member when ``-f`` is used)
+    can override the static label.  Falls back to the ``help=`` text on the
+    matching ``arg()`` descriptor — wildcard positionals reuse their label
+    for every slot from their declared position onward.
     """
     if cmd is None or cmd.params is None:
         return f"arg {pos_idx + 1}"
+    completer = get_positional_completer(cmd.completers, pos_idx)
+    if completer is not None:
+        dynamic = completer.describe_slot(args, pos_idx)
+        if dynamic is not None:
+            return dynamic
     from .commands import _is_flag_name
     positionals = [a for a in cmd.params if a.names and not _is_flag_name(a.names[0])]
     if not positionals:
@@ -747,7 +754,7 @@ class Shell:
                 has_completer = True
                 if positional_completer.should_activate(ctx):
                     completions = positional_completer.complete(ctx)
-                    label = _positional_label(cmd, pos_idx, command_name)
+                    label = _positional_label(cmd, pos_idx, command_name, args)
 
         # Cobra-protocol fallback: many modern Go CLIs (kubectl, helm, gh,
         # argocd, …) expose a hidden ``__complete`` subcommand.  Try it when
@@ -852,7 +859,7 @@ class Shell:
                 return f"{command_name} {token}"
             return f"{command_name} subcommand"
 
-        return _positional_label(node, pos_idx, command_name)
+        return _positional_label(node, pos_idx, command_name, remaining_args)
 
     def _complete_tree_node(self, node, ctx, prefix):
         """Compute completions when the user is typing within a sub-command tree.
@@ -908,7 +915,7 @@ class Shell:
         # Leaf-or-deeper: use the resolved node's own positional completers.
         positional_completer = get_positional_completer(node.completers, pos_idx)
         if positional_completer is not None and positional_completer.should_activate(ctx):
-            return positional_completer.complete(ctx), prefix, _positional_label(node, pos_idx, cmd_name)
+            return positional_completer.complete(ctx), prefix, _positional_label(node, pos_idx, cmd_name, ctx.args)
 
         # If the node has no positional completer registered for this slot,
         # fall back to file completion only when the node has no positional
