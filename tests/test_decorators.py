@@ -968,36 +968,53 @@ def test_bg_refuses_outer_pipeline_composition(capsys):
         _in_pipeline.flag = False
 
 
-def test_bg_external_body_output_is_buffered_until_activate(capfd):
-    """An ``@bg`` body running an external command must NOT write to the real
-    terminal — the bytes must be captured by the slot until the user switches
-    in.  Regression test for the original bug where ``@bg df`` showed output
-    immediately because ``_execute_external``'s PTY reader wrote to fd 1
-    directly, bypassing ``PipelineSlot``'s capture.
+def test_bg_external_body_uses_process_slot(capfd):
+    """A single-stage external command should be backed by ``ProcessSlot``
+    (real PTY) so interactive TUIs work and output is captured at the PTY
+    level rather than leaking to the real terminal.
+
+    Regression test for the original bug where ``@bg df`` showed output
+    immediately because the body went through ``PipelineSlot``'s pipe path,
+    which then called ``_execute_external``'s PTY-backed slot from a
+    background thread and grabbed real stdin/stdout.
     """
+    import time
+
+    from cshell2.process import ProcessSlot
+
     _enable_builtin("bg")
     sh = Shell()
     pipeline = Pipeline(stages=[Stage(text="echo bg-marker-xyz")])
     name = sh._run_in_background(pipeline)
     slot = sh.context_manager.contexts[name].process_slot
     try:
-        slot._thread.join(timeout=2.0)
-        assert not slot._thread.is_alive(), "@bg body should have completed"
-        # Nothing should have reached the real stdout fd.
+        assert isinstance(slot, ProcessSlot)
+        # Wait for the child to exit.
+        slot._exit_event.wait(timeout=2.0)
+        assert not slot.is_alive()
+        # The reader thread routes bytes to slot.missed (not real stdout)
+        # while the slot is inactive.
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            joined = b"".join(slot.buffer._buf)
+            if b"bg-marker-xyz" in joined:
+                break
+            time.sleep(0.02)
         captured = capfd.readouterr()
-        assert "bg-marker-xyz" not in captured.out
-        # The slot's buffer holds the output, ready to replay on switch-in.
-        chunks = slot._out_buffer._buf
-        joined = b"".join(chunks)
+        assert "bg-marker-xyz" not in captured.out, captured.out
         assert b"bg-marker-xyz" in joined
     finally:
-        if slot._thread.is_alive():
-            slot._thread.join(timeout=1.0)
+        if slot.is_alive():
+            slot.kill()
 
 
-def test_bg_python_body_output_is_buffered_until_activate(capfd):
-    """Python-command bodies (``print(...)``) must also be captured, not
-    leak to the real terminal."""
+def test_bg_python_body_uses_pipeline_slot(capfd):
+    """A Python-command body must run on ``PipelineSlot`` (no PTY); its
+    ``print(...)`` output goes through the slot's pipe and is buffered until
+    the user switches in.
+    """
+    from cshell2.shell import PipelineSlot
+
     _enable_builtin("bg")
     sh = Shell()
 
@@ -1009,6 +1026,7 @@ def test_bg_python_body_output_is_buffered_until_activate(capfd):
     name = sh._run_in_background(pipeline)
     slot = sh.context_manager.contexts[name].process_slot
     try:
+        assert isinstance(slot, PipelineSlot)
         slot._thread.join(timeout=2.0)
         assert not slot._thread.is_alive()
         captured = capfd.readouterr()

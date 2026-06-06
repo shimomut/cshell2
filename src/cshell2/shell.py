@@ -2062,8 +2062,11 @@ class Shell:
                 )
 
         display = " | ".join(s.text for s in pipeline.stages) or f"@bg {name}"
-        slot = PipelineSlot(pipeline, display)
-        slot.start()
+        slot = self._make_background_slot(pipeline, display)
+        if slot is None:
+            # Failed to start an external ProcessSlot (FileNotFoundError etc.);
+            # the helper already printed an error.  Don't create the context.
+            raise ValueError(f"@bg: failed to start '{display}'")
 
         if name in existing:
             target = existing[name]
@@ -2073,6 +2076,69 @@ class Shell:
             target = self.context_manager.create(name, variables=inherited)
             target.process_slot = slot
         return name
+
+    def _make_background_slot(self, pipeline: Pipeline, display: str):
+        """Return a started slot for *pipeline*, or ``None`` on startup error.
+
+        A single-stage external command (no decorator, no redirects, no
+        assignments, no registered Python handler) gets a real PTY-backed
+        :class:`ProcessSlot` so interactive TUIs (``vi``, ``htop``, …) work
+        when the user switches in.  Anything else — multi-stage pipelines,
+        Python commands, decorators in the body — runs on a
+        :class:`PipelineSlot` (OS pipe + ``subprocess.Popen``), since those
+        cases would either break under a single PTY or have no obvious
+        argv/env to launch.
+
+        On Windows ``ProcessSlot`` is unavailable, so everything goes
+        through ``PipelineSlot`` as before.
+        """
+        argv = self._pipeline_external_argv(pipeline) if not IS_WINDOWS else None
+        if argv is None:
+            slot = PipelineSlot(pipeline, display)
+            slot.start()
+            return slot
+
+        slot = ProcessSlot()
+        try:
+            slot.start(argv=argv, env=dict(os.environ), cwd=os.getcwd())
+        except FileNotFoundError:
+            print(f"cshell2: command not found: {argv[0]}")
+            return None
+        except OSError as e:
+            print(f"cshell2: {e}")
+            return None
+        return slot
+
+    def _pipeline_external_argv(self, pipeline: Pipeline) -> list[str] | None:
+        """Return argv if *pipeline* is a single-stage external command.
+
+        Returns ``None`` for any pipeline that needs the PipelineSlot path:
+        multi-stage, decorator-bodied, redirected, pure-assignment, empty,
+        or whose first token resolves to a registered Python handler.
+        Subclasses that override ``Pipeline.run`` (e.g. test helpers) also
+        take the PipelineSlot path so the override actually runs.
+        """
+        if type(pipeline).run is not Pipeline.run:
+            return None
+        if len(pipeline.stages) != 1:
+            return None
+        stage = pipeline.stages[0]
+        if stage.decorator is not None:
+            return None
+        if stage.redirects:
+            return None
+        tokens = self._tokenize_stage(stage)
+        if not tokens:
+            return None
+        if all(self._ASSIGNMENT_RE.match(t) for t in tokens):
+            return None
+        cmd = self.registry.get(tokens[0])
+        # Recipes are registered as commands but have no Python handler —
+        # they fall through to the system-command path, which is exactly
+        # what we want a ProcessSlot for.
+        if cmd is not None and cmd.has_any_handler():
+            return None
+        return tokens
 
     def _execute_pipeline(
         self,
