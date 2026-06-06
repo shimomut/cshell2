@@ -2191,14 +2191,27 @@ class Shell:
         def _target():
             _in_pipeline.flag = True
             try:
+                # ``sys.std*`` may not be the thread-local routers we
+                # installed (e.g. pytest replaces them with capture
+                # streams).  ``set_override`` is missing on the
+                # replacement, in which case routing is impossible — but
+                # the worker MUST still finish so ``done.set()`` runs.
                 if in_wrapper is not None:
-                    sys.stdin.set_override(in_wrapper)
+                    _set = getattr(sys.stdin, "set_override", None)
+                    if _set is not None:
+                        _set(in_wrapper)
                 if out_wrapper is not None:
-                    sys.stdout.set_override(out_wrapper)
+                    _set = getattr(sys.stdout, "set_override", None)
+                    if _set is not None:
+                        _set(out_wrapper)
                 if err_obj is subprocess.STDOUT:
-                    sys.stderr.set_override(out_wrapper if out_wrapper is not None else sys.stdout)
+                    _set = getattr(sys.stderr, "set_override", None)
+                    if _set is not None:
+                        _set(out_wrapper if out_wrapper is not None else sys.stdout)
                 elif err_wrapper is not None:
-                    sys.stderr.set_override(err_wrapper)
+                    _set = getattr(sys.stderr, "set_override", None)
+                    if _set is not None:
+                        _set(err_wrapper)
 
                 try:
                     cmd.invoke(args)
@@ -2223,9 +2236,18 @@ class Shell:
                         traceback.print_exc()
                         handle.exit_code = 1
             finally:
-                sys.stdin.clear_override()
-                sys.stdout.clear_override()
-                sys.stderr.clear_override()
+                # ``sys.std*`` may have been replaced (e.g. by pytest's
+                # capture machinery) between Shell construction and now,
+                # so the methods we installed at startup may no longer
+                # be there.  Tolerate that — ``done.set()`` MUST run or
+                # the main thread's ``handle.wait()`` deadlocks forever.
+                for stream in (sys.stdin, sys.stdout, sys.stderr):
+                    clear = getattr(stream, "clear_override", None)
+                    if clear is not None:
+                        try:
+                            clear()
+                        except Exception:
+                            pass
                 # Flush wrappers so downstream readers see all output before
                 # the pipe closes.
                 for w in (out_wrapper, err_wrapper):
@@ -2284,10 +2306,18 @@ class Shell:
         def _target():
             _in_pipeline.flag = True
             try:
+                # See ``_start_python_stage_thread`` for why these calls are
+                # guarded — pytest's stdio capture replaces the thread-local
+                # routers we installed at startup, and the worker must still
+                # reach ``done.set()`` even if routing isn't possible.
                 if in_wrapper is not None:
-                    sys.stdin.set_override(in_wrapper)
+                    _set = getattr(sys.stdin, "set_override", None)
+                    if _set is not None:
+                        _set(in_wrapper)
                 if out_wrapper is not None:
-                    sys.stdout.set_override(out_wrapper)
+                    _set = getattr(sys.stdout, "set_override", None)
+                    if _set is not None:
+                        _set(out_wrapper)
 
                 if deco is None:
                     print(
@@ -2320,9 +2350,13 @@ class Shell:
                         traceback.print_exc()
                         handle.exit_code = 1
             finally:
-                sys.stdin.clear_override()
-                sys.stdout.clear_override()
-                sys.stderr.clear_override()
+                for stream in (sys.stdin, sys.stdout, sys.stderr):
+                    clear = getattr(stream, "clear_override", None)
+                    if clear is not None:
+                        try:
+                            clear()
+                        except Exception:
+                            pass
                 if out_wrapper is not None:
                     try:
                         out_wrapper.flush()
