@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 
 from dataclasses import replace
@@ -47,16 +48,21 @@ _KEY_END = b"\x1b[F"
 
 
 def _pipeline_redirected_to(pipeline: Pipeline, path: str) -> Pipeline:
-    """Return a new Pipeline whose last stage's stdout is redirected to *path*.
+    """Return a new Pipeline whose last stage's stdout (and stderr) goes to *path*.
 
     The original AST is left intact so subsequent iterations re-run the
-    user's pipeline as written.
+    user's pipeline as written.  Stderr is folded into the same file
+    via ``2>&1`` so error messages end up in the watch frame instead of
+    bleeding through onto the alt-screen UI chrome.
     """
     new_stages = list(pipeline.stages)
     last = new_stages[-1]
     new_stages[-1] = replace(
         last,
-        redirects=list(last.redirects) + [Redirect(kind=">", target=path)],
+        redirects=list(last.redirects) + [
+            Redirect(kind=">", target=path),
+            Redirect(kind="2>&1", target="1"),
+        ],
     )
     return Pipeline(stages=new_stages)
 
@@ -113,6 +119,9 @@ def _format_header(command: str, interval: float, cols: int) -> str:
     return body + now
 
 
+_SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+
 def _format_footer(
     cols: int,
     *,
@@ -122,6 +131,8 @@ def _format_footer(
     scroll_x: int,
     max_line_len: int,
     paused: bool,
+    running: bool = False,
+    spinner_frame: int = 0,
 ) -> str:
     """Render the bottom status bar with scroll info and key hints."""
     # Position indicator — match common pagers: "12-30/200" plus a percent.
@@ -141,10 +152,13 @@ def _format_footer(
         else:
             pct = f"{int(round((last / total_lines) * 100))}%"
     hints = "↑↓ PgUp/PgDn g/G ←→  space pause  q quit"
+    status_bits = []
     if paused:
-        status = "[PAUSED]"
-    else:
-        status = ""
+        status_bits.append("[PAUSED]")
+    if running:
+        spin = _SPINNER[spinner_frame % len(_SPINNER)]
+        status_bits.append(f"{spin} running")
+    status = "  ".join(status_bits)
     h_off = f"  col {scroll_x + 1}/{max(1, max_line_len)}" if max_line_len > cols else ""
     left = f"{pos} {pct}{h_off}"
     if status:
@@ -313,34 +327,63 @@ def register() -> None:
         scroll_y = 0     # preserved across iterations — see the redraw loop
         scroll_x = 0
         body_lines: list[str] = []
-        last_run_at = 0.0
+        last_run_finished_at = 0.0
         paused = False
+        spinner_frame = 0
 
-        def _do_run() -> list[str]:
-            """Run the pipeline once, capturing stdout to a temp file."""
-            fd, path = tempfile.mkstemp(prefix="cshell2-watch-")
-            os.close(fd)
+        # Worker-thread coordination.  ``_do_run`` runs on a worker so the
+        # main thread can keep polling keys and redrawing while the
+        # pipeline is in flight.  ``result_lock`` guards ``_pending_lines``
+        # / ``_run_done``; ``run_done_event`` lets the main loop wake the
+        # instant the pipeline finishes (no polling delay).
+        result_lock = threading.Lock()
+        run_done_event = threading.Event()
+        _pending: dict[str, object] = {"lines": None, "error": None}
+
+        def _do_run() -> None:
+            """Run the pipeline; deposit lines (or error) under the lock."""
+            fd_, path = tempfile.mkstemp(prefix="cshell2-watch-")
+            os.close(fd_)
+            lines: list[str] = []
+            err: BaseException | None = None
             try:
-                redirected = _pipeline_redirected_to(pipeline, path)
-                redirected.run()
                 try:
-                    with open(path, "rb") as f:
-                        raw = f.read()
-                except OSError:
-                    raw = b""
+                    redirected = _pipeline_redirected_to(pipeline, path)
+                    redirected.run()
+                    try:
+                        with open(path, "rb") as f:
+                            raw = f.read()
+                    except OSError:
+                        raw = b""
+                    lines = _split_to_lines(raw.decode(errors="replace"))
+                except BaseException as e:
+                    err = e
             finally:
                 try:
                     os.unlink(path)
                 except OSError:
                     pass
-            return _split_to_lines(raw.decode(errors="replace"))
+            with result_lock:
+                _pending["lines"] = lines
+                _pending["error"] = err
+            run_done_event.set()
 
-        def _redraw() -> None:
+        def _start_run() -> threading.Thread:
+            """Spawn a worker for one iteration; return the Thread handle."""
+            run_done_event.clear()
+            with result_lock:
+                _pending["lines"] = None
+                _pending["error"] = None
+            t = threading.Thread(target=_do_run, name="watch-iter", daemon=True)
+            t.start()
+            return t
+
+        def _redraw(running: bool) -> None:
             cols, rows = terminal.terminal_size()
             body_rows = max(0, rows - 2)
             total = len(body_lines)
             max_line_len = max((len(l) for l in body_lines), default=0)
-            # Clamp scroll if the new output is shorter than where we were.
+            # Clamp scroll if the current content can't accommodate it.
             sy = min(scroll_y, max(0, total - body_rows))
             sx = min(scroll_x, max(0, max_line_len - max(1, cols - 1)))
             header = _format_header(cmd_text, interval, cols)
@@ -352,6 +395,8 @@ def register() -> None:
                 scroll_x=sx,
                 max_line_len=max_line_len,
                 paused=paused,
+                running=running,
+                spinner_frame=spinner_frame,
             )
             visible = _slice_for_render(
                 body_lines,
@@ -373,79 +418,115 @@ def register() -> None:
             sys.stdout.write("".join(parts))
             sys.stdout.flush()
 
+        def _consume_finished_run() -> bool:
+            """Pick up worker results.  Returns True if a BrokenPipeError
+            arrived (caller should exit)."""
+            nonlocal body_lines, last_run_finished_at, scroll_y, scroll_x
+            with result_lock:
+                lines = _pending["lines"]
+                err = _pending["error"]
+            if isinstance(err, BrokenPipeError):
+                return True
+            if lines is not None:
+                body_lines = lines  # type: ignore[assignment]
+            last_run_finished_at = time.monotonic()
+            cols, rows = terminal.terminal_size()
+            body_rows = max(0, rows - 2)
+            max_line_len = max((len(l) for l in body_lines), default=0)
+            scroll_y = min(scroll_y, max(0, len(body_lines) - body_rows))
+            scroll_x = min(scroll_x, max(0, max_line_len - max(1, cols - 1)))
+            return False
+
+        def _handle_keys(burst: bytes) -> bool:
+            """Apply a key burst.  Returns True if the user asked to quit."""
+            nonlocal scroll_y, scroll_x, paused
+            if any(q in burst for q in _QUIT_KEYS):
+                return True
+            if b" " in burst:
+                paused = not paused
+            cols, rows = terminal.terminal_size()
+            body_rows = max(0, rows - 2)
+            body_cols = max(0, cols - 1)
+            max_line_len = max((len(l) for l in body_lines), default=0)
+            for k in (
+                _KEY_UP, _KEY_DOWN, _KEY_PAGE_UP, _KEY_PAGE_DOWN,
+                _KEY_HOME, _KEY_END, _KEY_LEFT, _KEY_RIGHT,
+                b"g", b"G",
+            ):
+                if k in burst:
+                    scroll_y, scroll_x = _apply_scroll_key(
+                        k,
+                        scroll_y=scroll_y,
+                        scroll_x=scroll_x,
+                        body_rows=body_rows,
+                        total_lines=len(body_lines),
+                        max_line_len=max_line_len,
+                        body_cols=body_cols,
+                    )
+                    break
+            return False
+
         try:
-            # First iteration immediately, then on the interval cadence.
-            try:
-                body_lines = _do_run()
-            except BrokenPipeError:
-                return
-            last_run_at = time.monotonic()
-            _redraw()
+            # First iteration starts immediately on a worker.  The main
+            # loop below polls for keys and pumps the spinner while it
+            # runs.
+            worker = _start_run()
+            running = True
+            spinner_last_tick = time.monotonic()
+            _redraw(running=True)
 
             while True:
-                # Time until the next iteration; keys arriving in the
-                # meantime drive scroll / pause / quit and force a redraw.
-                if paused:
-                    timeout = 0.25
+                # While the worker is running, poll keys frequently and
+                # advance the spinner; otherwise wait for the interval to
+                # elapse before kicking off the next iteration.
+                if running:
+                    timeout = 0.1   # keep input/spinner responsive
                 else:
-                    elapsed = time.monotonic() - last_run_at
-                    timeout = max(0.0, interval - elapsed)
+                    if paused:
+                        timeout = 0.25
+                    else:
+                        elapsed = time.monotonic() - last_run_finished_at
+                        timeout = max(0.0, interval - elapsed)
 
+                # Read at most one key per pass, but cap timeout so we can
+                # also notice run-done / spinner-tick / next-interval.
                 if stdin_fd >= 0:
-                    key = _read_scroll_key(stdin_fd, min(timeout, 0.1) if timeout else 0.0)
+                    key = _read_scroll_key(stdin_fd, min(timeout, 0.1))
                 else:
                     time.sleep(timeout)
                     key = b""
 
                 if key:
-                    # Drain the rest of any pending burst so a held arrow
-                    # key doesn't queue many redraws.
                     extra = _drain_keys(stdin_fd) if stdin_fd >= 0 else b""
-                    full = key + extra
-                    if any(q in full for q in _QUIT_KEYS):
+                    if _handle_keys(key + extra):
                         return
-                    if b" " in full:
-                        paused = not paused
-                    cols, rows = terminal.terminal_size()
-                    body_rows = max(0, rows - 2)
-                    body_cols = max(0, cols - 1)
-                    max_line_len = max((len(l) for l in body_lines), default=0)
-                    # Apply the first navigation key we recognize; ignore
-                    # the rest in the same burst (already merged via drain).
-                    for k in (
-                        _KEY_UP, _KEY_DOWN, _KEY_PAGE_UP, _KEY_PAGE_DOWN,
-                        _KEY_HOME, _KEY_END, _KEY_LEFT, _KEY_RIGHT,
-                        b"g", b"G",
-                    ):
-                        if k in full:
-                            scroll_y, scroll_x = _apply_scroll_key(
-                                k,
-                                scroll_y=scroll_y,
-                                scroll_x=scroll_x,
-                                body_rows=body_rows,
-                                total_lines=len(body_lines),
-                                max_line_len=max_line_len,
-                                body_cols=body_cols,
-                            )
-                            break
-                    _redraw()
+                    _redraw(running=running)
                     continue
 
-                # Timeout fired — re-run the pipeline (unless paused).
-                if paused:
+                # Worker finished → swap in its output and redraw.
+                if running and run_done_event.is_set():
+                    if _consume_finished_run():
+                        return
+                    running = False
+                    _redraw(running=False)
                     continue
-                try:
-                    body_lines = _do_run()
-                except BrokenPipeError:
-                    return
-                last_run_at = time.monotonic()
-                # Re-clamp scroll against new content size, then redraw.
-                cols, rows = terminal.terminal_size()
-                body_rows = max(0, rows - 2)
-                max_line_len = max((len(l) for l in body_lines), default=0)
-                scroll_y = min(scroll_y, max(0, len(body_lines) - body_rows))
-                scroll_x = min(scroll_x, max(0, max_line_len - max(1, cols - 1)))
-                _redraw()
+
+                # Spinner tick — advance one frame ~10×/s while running.
+                if running and time.monotonic() - spinner_last_tick >= 0.1:
+                    spinner_frame = (spinner_frame + 1) % len(_SPINNER)
+                    spinner_last_tick = time.monotonic()
+                    _redraw(running=True)
+                    continue
+
+                # Idle — kick off the next iteration if it's time and
+                # we're not paused.
+                if not running and not paused:
+                    elapsed = time.monotonic() - last_run_finished_at
+                    if elapsed >= interval:
+                        worker = _start_run()
+                        running = True
+                        spinner_last_tick = time.monotonic()
+                        _redraw(running=True)
         except KeyboardInterrupt:
             return
         finally:

@@ -482,9 +482,14 @@ def test_watch_pipeline_redirected_to_helper():
     redirected = _pipeline_redirected_to(original, "/tmp/out")
     # Original is untouched.
     assert [s.redirects for s in original.stages] == [[], []]
-    # First stage unchanged; last stage gets the new redirect appended.
+    # First stage unchanged; last stage gets stdout + stderr redirected
+    # so command errors land in the watch frame rather than bleeding onto
+    # the alt-screen UI.
     assert redirected.stages[0].redirects == []
-    assert redirected.stages[-1].redirects == [Redirect(kind=">", target="/tmp/out")]
+    assert redirected.stages[-1].redirects == [
+        Redirect(kind=">", target="/tmp/out"),
+        Redirect(kind="2>&1", target="1"),
+    ]
     # Stage text is preserved.
     assert [s.text for s in redirected.stages] == ["echo hi", "grep h"]
 
