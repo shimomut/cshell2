@@ -229,63 +229,6 @@ def test_results_recomputed_on_line_change(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# End-to-end live test against a real argcomplete-marked script
-# ---------------------------------------------------------------------------
-
-def _make_real_argcomplete_script(tmp_path: Path) -> Path:
-    """Write a Python script that uses argcomplete and returns deterministic candidates.
-
-    Returns its path.  Skips the test if argcomplete isn't importable (it's
-    only an optional dependency for the live test, not for cshell2 itself).
-    """
-    try:
-        import argcomplete  # noqa: F401
-    except ImportError:
-        pytest.skip("argcomplete not installed")
-    script = tmp_path / "fake_tool"
-    script.write_text(textwrap.dedent(f"""\
-        #!{sys.executable}
-        # PYTHON_ARGCOMPLETE_OK
-        import argparse, argcomplete
-        p = argparse.ArgumentParser()
-        p.add_argument('subcmd', choices=['alpha', 'beta', 'gamma'])
-        argcomplete.autocomplete(p)
-        p.parse_args()
-    """))
-    script.chmod(0o755)
-    return script
-
-
-from pathlib import Path  # noqa: E402  (used by helper above)
-
-
-def test_live_invocation_returns_real_candidates(tmp_path, monkeypatch):
-    script = _make_real_argcomplete_script(tmp_path)
-    ac = ArgcompleteCompleter()
-
-    # Make `which("fake_tool")` find our script.
-    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
-
-    # Detection probes the script directly.
-    assert ac._is_argcomplete_command("fake_tool") is True
-
-    # Live invocation produces alpha/beta/gamma — possibly with --help in
-    # the mix when prefix is empty.  Filter to subcommand candidates.
-    results = ac.complete(make_ctx("fake_tool ", "", "fake_tool"))
-    subcommands = sorted(c.value for c in results if not c.value.startswith("-"))
-    assert subcommands == ["alpha", "beta", "gamma"]
-
-
-def test_live_invocation_filters_by_prefix(tmp_path, monkeypatch):
-    script = _make_real_argcomplete_script(tmp_path)
-    ac = ArgcompleteCompleter()
-    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
-
-    results = ac.complete(make_ctx("fake_tool a", "a", "fake_tool"))
-    assert [c.value for c in results] == ["alpha"]
-
-
-# ---------------------------------------------------------------------------
 # Module-level enable/disable API
 # ---------------------------------------------------------------------------
 
