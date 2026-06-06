@@ -948,11 +948,19 @@ def _positional_label(cmd, pos_idx: int, command_name: str, args: list[str]) -> 
 class PipelineSlot(PythonCommandSlot):
     """Background slot whose work unit is a parsed pipeline, not a single Python command.
 
-    Reuses the entire ``PythonCommandSlot`` runtime (proxy-buffered stdout,
-    raw-mode replay, kill via async exception, ``Ctrl+]`` switching) and only
-    overrides ``_run`` to drive ``Pipeline.run()`` instead of ``cmd.invoke()``.
-    Stdio is rebound to the slot's proxy on the worker thread so output goes to
-    the slot buffer until the user switches in.
+    Subclasses :class:`PythonCommandSlot` so the run-loop's resume path
+    (``isinstance(slot, PythonCommandSlot)``) treats it the same as a
+    Python-command slot — proxy-buffered output, no PTY, ``Ctrl+]`` switching.
+
+    Body output capture works at the kernel fd level via an OS pipe, not the
+    Python ``sys.stdout`` abstraction.  The slot thread sets
+    ``_in_pipeline.flag = True`` so :meth:`Shell._run_pipeline_from_decorator`
+    takes the ``_in_outer_pipe=True`` branch, which forces single-stage
+    external commands onto the ``subprocess.Popen`` path with stdout/stdin
+    bound to our pipe and ``/dev/null`` respectively.  Without that, a body
+    like ``df`` would allocate a real PTY-backed :class:`ProcessSlot` whose
+    reader writes straight to fd 1 (the real terminal), bypassing all of
+    ``@bg``'s capture and racing the main thread for stdin.
     """
 
     def __init__(self, pipeline: "Pipeline", display_text: str) -> None:
@@ -964,11 +972,18 @@ class PipelineSlot(PythonCommandSlot):
         self.argv: list[str] = [display_text]
         self._pipeline = pipeline
         self._thread: threading.Thread | None = None
+        # Unused: PipelineSlot captures output via an OS pipe (see below) so
+        # external subprocess fd-1 writes are caught.  The base-class
+        # methods that touch _proxy (activate/deactivate/replay_buffer)
+        # are overridden here.
         self._proxy: _StdoutProxy | None = None
         self._exit_exception: BaseException | None = None
         self._finished = threading.Event()
         self.buffer = _NullBuffer()
         self.exit_code: int | None = None
+        # Inherited PTY-passthrough state (passthrough_run() is unreachable
+        # from a piped @bg body, but the base class's resize/write_stdin
+        # still inspect these).
         self._pty_master_fd: int = -1
         self._pty_subproc: subprocess.Popen | None = None
         self._pty_reader: threading.Thread | None = None
@@ -982,10 +997,30 @@ class PipelineSlot(PythonCommandSlot):
         self._keybuf: bytearray = bytearray()
         self._keybuf_lock = threading.Lock()
         self._keybuf_event = threading.Event()
+        # Body output capture: an OS pipe so external subprocess output goes
+        # to a fd we own rather than the real terminal.  The reader thread
+        # buffers bytes while the slot is inactive and streams them live to
+        # stdout (with raw-mode \n→\r\n conversion) once the user switches in.
+        self._out_lock = threading.Lock()
+        self._out_buffer = OutputBuffer()
+        self._out_active = False
+        self._out_raw_mode = False
+        self._out_read_fd: int = -1
+        self._out_write_fd: int = -1
+        self._out_reader_thread: threading.Thread | None = None
+        # Stdin sink so external commands in the body don't block on the
+        # real terminal (which the main thread is reading in cooked mode).
+        self._in_devnull_fd: int = -1
 
     def start(self) -> None:
-        real = getattr(sys.stdout, "_real", sys.stdout)
-        self._proxy = _StdoutProxy(real)
+        self._out_read_fd, self._out_write_fd = os.pipe()
+        self._in_devnull_fd = os.open(os.devnull, os.O_RDONLY)
+        self._out_reader_thread = threading.Thread(
+            target=self._out_reader_loop,
+            name=f"bg-reader-{self.argv[0][:24]}",
+            daemon=True,
+        )
+        self._out_reader_thread.start()
         self._thread = threading.Thread(
             target=self._run,
             name=f"bg-{self.argv[0][:32]}",
@@ -993,9 +1028,49 @@ class PipelineSlot(PythonCommandSlot):
         )
         self._thread.start()
 
+    def _out_reader_loop(self) -> None:
+        try:
+            while True:
+                try:
+                    data = os.read(self._out_read_fd, 4096)
+                except OSError:
+                    break
+                if not data:
+                    break
+                with self._out_lock:
+                    if self._out_active:
+                        chunk = data.replace(b"\n", b"\r\n") if self._out_raw_mode else data
+                        try:
+                            sys.stdout.buffer.write(chunk)
+                            sys.stdout.buffer.flush()
+                        except OSError:
+                            pass
+                    else:
+                        self._out_buffer.append(data)
+        finally:
+            try:
+                os.close(self._out_read_fd)
+            except OSError:
+                pass
+            self._out_read_fd = -1
+
     def _run(self) -> None:
+        # Force the worker into the outer-pipe execution path so single-stage
+        # external bodies use subprocess.Popen with our pipe fd rather than
+        # _execute_external's PTY-backed ProcessSlot.
+        _in_pipeline.flag = True
+        out_obj = os.fdopen(self._out_write_fd, "wb", buffering=0, closefd=False)
+        out_wrapper = io.TextIOWrapper(
+            out_obj, encoding="utf-8", errors="replace", write_through=True
+        )
+        in_obj = os.fdopen(self._in_devnull_fd, "rb", buffering=0, closefd=False)
+        in_wrapper = io.TextIOWrapper(in_obj, encoding="utf-8", errors="replace")
         if hasattr(sys.stdout, "set_override"):
-            sys.stdout.set_override(self._proxy)
+            sys.stdout.set_override(out_wrapper)
+        if hasattr(sys.stderr, "set_override"):
+            sys.stderr.set_override(out_wrapper)
+        if hasattr(sys.stdin, "set_override"):
+            sys.stdin.set_override(in_wrapper)
         _current_slot.slot = self
         try:
             code = self._pipeline.run()
@@ -1010,9 +1085,75 @@ class PipelineSlot(PythonCommandSlot):
             _current_slot.slot = None
             if hasattr(sys.stdout, "clear_override"):
                 sys.stdout.clear_override()
+            if hasattr(sys.stderr, "clear_override"):
+                sys.stderr.clear_override()
+            if hasattr(sys.stdin, "clear_override"):
+                sys.stdin.clear_override()
+            _in_pipeline.flag = False
+            try:
+                out_wrapper.close()
+            except Exception:
+                pass
+            try:
+                in_wrapper.close()
+            except Exception:
+                pass
+            # Close our pipe write end so the reader thread sees EOF and
+            # drains.  closefd=False on the wrappers keeps us in charge of
+            # the underlying fd lifetimes.
+            if self._out_write_fd >= 0:
+                try:
+                    os.close(self._out_write_fd)
+                except OSError:
+                    pass
+                self._out_write_fd = -1
+            if self._in_devnull_fd >= 0:
+                try:
+                    os.close(self._in_devnull_fd)
+                except OSError:
+                    pass
+                self._in_devnull_fd = -1
+            if self._out_reader_thread is not None:
+                self._out_reader_thread.join(timeout=1.0)
             if self.exit_code is None:
                 self.exit_code = self._compute_exit_code()
             self._finished.set()
+
+    def activate(self, raw_mode: bool = False) -> None:
+        with self._out_lock:
+            chunks = self._out_buffer.drain()
+            self._out_active = True
+            self._out_raw_mode = raw_mode
+        for chunk in chunks:
+            if raw_mode:
+                chunk = chunk.replace(b"\n", b"\r\n")
+            try:
+                sys.stdout.buffer.write(chunk)
+            except OSError:
+                pass
+        try:
+            sys.stdout.buffer.flush()
+        except OSError:
+            pass
+
+    def deactivate(self) -> None:
+        with self._out_lock:
+            self._out_active = False
+            self._out_raw_mode = False
+
+    def replay_buffer(self) -> None:
+        # Cooked-mode replay (no \n→\r\n conversion): used by run() once the
+        # slot has exited and the terminal is back in cooked mode.
+        chunks = self._out_buffer.drain()
+        for chunk in chunks:
+            try:
+                sys.stdout.buffer.write(chunk)
+            except OSError:
+                pass
+        try:
+            sys.stdout.buffer.flush()
+        except OSError:
+            pass
 
 
 class Shell:

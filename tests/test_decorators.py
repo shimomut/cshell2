@@ -966,3 +966,55 @@ def test_bg_refuses_outer_pipeline_composition(capsys):
             )
     finally:
         _in_pipeline.flag = False
+
+
+def test_bg_external_body_output_is_buffered_until_activate(capfd):
+    """An ``@bg`` body running an external command must NOT write to the real
+    terminal — the bytes must be captured by the slot until the user switches
+    in.  Regression test for the original bug where ``@bg df`` showed output
+    immediately because ``_execute_external``'s PTY reader wrote to fd 1
+    directly, bypassing ``PipelineSlot``'s capture.
+    """
+    _enable_builtin("bg")
+    sh = Shell()
+    pipeline = Pipeline(stages=[Stage(text="echo bg-marker-xyz")])
+    name = sh._run_in_background(pipeline)
+    slot = sh.context_manager.contexts[name].process_slot
+    try:
+        slot._thread.join(timeout=2.0)
+        assert not slot._thread.is_alive(), "@bg body should have completed"
+        # Nothing should have reached the real stdout fd.
+        captured = capfd.readouterr()
+        assert "bg-marker-xyz" not in captured.out
+        # The slot's buffer holds the output, ready to replay on switch-in.
+        chunks = slot._out_buffer._buf
+        joined = b"".join(chunks)
+        assert b"bg-marker-xyz" in joined
+    finally:
+        if slot._thread.is_alive():
+            slot._thread.join(timeout=1.0)
+
+
+def test_bg_python_body_output_is_buffered_until_activate(capfd):
+    """Python-command bodies (``print(...)``) must also be captured, not
+    leak to the real terminal."""
+    _enable_builtin("bg")
+    sh = Shell()
+
+    @command_registry.command(name="_t_bg_py_body")
+    def _body():
+        print("py-marker-abc")
+
+    pipeline = Pipeline(stages=[Stage(text="_t_bg_py_body")])
+    name = sh._run_in_background(pipeline)
+    slot = sh.context_manager.contexts[name].process_slot
+    try:
+        slot._thread.join(timeout=2.0)
+        assert not slot._thread.is_alive()
+        captured = capfd.readouterr()
+        assert "py-marker-abc" not in captured.out
+        joined = b"".join(slot._out_buffer._buf)
+        assert b"py-marker-abc" in joined
+    finally:
+        if slot._thread.is_alive():
+            slot._thread.join(timeout=1.0)
