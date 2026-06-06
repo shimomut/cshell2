@@ -407,6 +407,29 @@ def test_stdout_isatty_visible_to_decorator_body():
     assert proxy.isatty() == _sys.__stdout__.isatty()
 
 
+def test_watch_pipeline_redirected_to_helper():
+    """`@watch`'s alt-screen path appends a `> /tmp/...` redirect to the
+    body's last stage so output can be captured before drawing.  The
+    helper that builds the redirected Pipeline must leave the original
+    AST untouched (subsequent iterations re-run the user's pipeline as
+    written) and override prior stdout redirects on the last stage."""
+    from cshell2.decorators.watch import _pipeline_redirected_to
+    from cshell2.pipeline import Pipeline, Redirect, Stage
+
+    original = Pipeline(stages=[
+        Stage(text="echo hi"),
+        Stage(text="grep h"),
+    ])
+    redirected = _pipeline_redirected_to(original, "/tmp/out")
+    # Original is untouched.
+    assert [s.redirects for s in original.stages] == [[], []]
+    # First stage unchanged; last stage gets the new redirect appended.
+    assert redirected.stages[0].redirects == []
+    assert redirected.stages[-1].redirects == [Redirect(kind=">", target="/tmp/out")]
+    # Stage text is preserved.
+    assert [s.text for s in redirected.stages] == ["echo hi", "grep h"]
+
+
 def test_thread_local_stdout_isatty_falls_through(monkeypatch):
     """``_ThreadLocalStdout`` must forward ``isatty()`` to either the
     real stream (no override) or the thread-local override — not return
