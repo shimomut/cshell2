@@ -238,21 +238,39 @@ class AwsRegionVar(Var):
 var_registry.register(AwsRegionVar())
 ```
 
-#### Recipe Integration
+#### Registering Vars from `~/.cshell2/config.py`
 
-Variable recipes follow the same `enable()` pattern as command completion recipes:
-
-```python
-# recipes/aws_vars.py
-def _enable():
-    var_registry.register(MultiEnvVar("aws_region", ["AWS_REGION", "AWS_DEFAULT_REGION"], ...))
-    var_registry.register(EnvVar("aws_profile", "AWS_PROFILE", CallbackCompleter(list_profiles)))
-```
+`Var` subclasses are plain Python — register them directly from the user
+config (or any module the config imports). `EnvVar(name, env_var,
+completer=...)` is the convenience subclass for a single-key passthrough;
+when a logical name needs to drive multiple `os.environ` keys, subclass
+`Var` directly:
 
 ```python
 # ~/.cshell2/config.py
-from cshell2.recipes import enable
-enable("aws_vars")
+from cshell2.completion import CallbackCompleter, ChoiceCompleter
+from cshell2 import Var, EnvVar, var_registry
+
+class AwsRegionVar(Var):
+    name = "aws_region"
+    description = "AWS region — sets AWS_REGION + AWS_DEFAULT_REGION"
+
+    def get(self):
+        return os.environ.get("AWS_REGION")
+
+    def set(self, value):
+        os.environ["AWS_REGION"] = value
+        os.environ["AWS_DEFAULT_REGION"] = value
+
+    @property
+    def value_completer(self):
+        return ChoiceCompleter(["us-east-1", "us-west-2", "eu-west-1"])
+
+var_registry.register(AwsRegionVar())
+var_registry.register(
+    EnvVar("aws_profile", "AWS_PROFILE",
+           completer=CallbackCompleter(list_profiles))
+)
 ```
 
 ### completion.py — Completion Engine
@@ -556,7 +574,7 @@ from cshell2.recipes import enable
 enable("make", "git", "ssh", "kill", "tail", "ls", "grep", "find", "du", "df", "aws")
 ```
 
-Available built-in recipes: `aws`, `df`, `du`, `find`, `git`, `grep`, `kill`, `ls`, `make`, `ssh`, `tail`.
+Available built-in recipes: `aws`, `awsut`, `chmod`, `chown`, `cp`, `curl`, `df`, `du`, `find`, `git`, `grep`, `kill`, `ls`, `lsof`, `make`, `mv`, `ps`, `rm`, `rsync`, `scp`, `ssh`, `tail`, `tar`, `terraform`, `top`, `unzip`, `zip` (see the `Available recipes:` block in `src/cshell2/recipes/__init__.py` for descriptions). Use `enable("*")` to load all built-ins plus user recipes.
 
 **Protocol fallbacks** — auto-activate after recipes, no `enable()` required:
 

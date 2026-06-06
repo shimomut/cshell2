@@ -297,8 +297,9 @@ defines its own subcommand tree — it now drives the AWS CLI v2
 and flag.)
 
 Other recipes (`ls`, `du`, `tail`, `kill`, `find`, `grep`, `make`, `ssh`,
-`df`) are flat and stay on the simple `register_external_completers`
-form. Cobra-based tools like `docker`, `kubectl`, and `helm` don't need
+`df`, …) are flat and stay on the simple form: a single
+`registry.command(name, params=[...])` call with no handler attached.
+Cobra-based tools like `docker`, `kubectl`, and `helm` don't need
 recipes at all — `CobraCompleter` handles them automatically.
 
 ## What Is Out of Scope

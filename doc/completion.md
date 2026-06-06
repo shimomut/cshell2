@@ -211,19 +211,23 @@ This design means:
 - Later completers see earlier args via `ctx.args`
 - All flags collected into a single `OptionsCompleter` under `None` — activated whenever the user types a `-`-prefixed token
 
-For system commands that should not be wrapped as Python functions, the registry exposes the underlying `{None: ..., N: ...}` dict directly:
+External recipes use the same `params=[arg(...)]` form, registered without a handler. The dispatch path treats handler-less Commands as external recipes and falls through to the system-command path:
 
 ```python
-from cshell2.commands import registry
-from cshell2.completion import FileCompleter, OptionsCompleter
+from cshell2.commands import arg, registry as command_registry
+from cshell2.completion import FileCompleter
 
-registry.register_external_completers("rsync", {
-    None: OptionsCompleter({"-a": "archive", "-v": "verbose", "-n": "dry run",
-                            "--exclude": "exclude pattern"},
-                           args={"--exclude": "PATTERN"}),
-    0: FileCompleter(),
-    1: FileCompleter(),
-})
+command_registry.command(
+    "rsync",
+    help="fast incremental file transfer",
+    params=[
+        arg("paths", nargs="*", completer=FileCompleter()),
+        arg("-a", action="store_true", help="archive"),
+        arg("-v", action="store_true", help="verbose"),
+        arg("-n", action="store_true", help="dry run"),
+        arg("--exclude", metavar="PATTERN", help="exclude pattern"),
+    ],
+)
 ```
 
 ## Writing Custom Completers

@@ -9,15 +9,19 @@ unambiguous and the construct doesn't collide with POSIX command names.
 ```
 @watch ls
 @watch -n 1 {df -h | grep abc}
-@time make build                       # future: not yet shipped
-@retry -n 3 flaky-test                 # future: not yet shipped
+@time make build
+@retry -n 3 flaky-test
+@bg --as build {make release}
+@quiet --stderr {noisy-cmd | filter}
 ```
 
-**Status:** `@watch` works end-to-end and `@deco {body} | next`
-composition runs the body's stdout through the outer pipeline. Stacking
-and more built-ins are still future work — see [What's left for
-follow-up commits](#whats-left-for-follow-up-commits) and
-[enhancements.md](enhancements.md) for the open items.
+**Status:** the feature is shipped. Parser, executor, registry, and
+five built-in decorators (`@watch`, `@time`, `@retry`, `@quiet`, `@bg`)
+are in place; `@deco {body} | next` composition runs the body's stdout
+through the outer pipeline. Open follow-ups (decorator stacking,
+outer sequencing, more built-ins) live in
+[enhancements.md](enhancements.md) under "Pipeline decorators —
+follow-up items."
 
 **Shipped:**
 
@@ -33,11 +37,12 @@ follow-up commits](#whats-left-for-follow-up-commits) and
 - `Pipeline.run()` indirection so decorator bodies can re-enter
   execution (`pipeline.py::set_pipeline_executor`).
 - Dispatch in `Shell._execute_decorator_stage`.
-- `@watch` built-in (`cshell2/decorators/watch.py`).
+- Built-ins: `@watch`, `@time`, `@retry`, `@quiet`, `@bg`
+  (`cshell2/decorators/*.py`).
 - `@<TAB>` completion: decorator-name list, decorator-flag picker, and
   body-command delegation through the existing recipe / argcomplete /
   cobra fallback chain.
-- 50 unit / integration tests in `tests/test_decorators.py`.
+- Tests in `tests/test_decorators.py`.
 
 ## Prior art: IPython magics
 
@@ -522,7 +527,7 @@ Shipped:
 | `@time` | print wall/user/sys time after the pipeline finishes |
 | `@retry [-n N] [--delay SEC]` | re-run on non-zero exit, up to N times |
 | `@quiet [--stderr]` | discard stdout (and optionally stderr) |
-| `@bg [--as NAME]` | run pipeline in a background context slot (replaces `&`); auto-named if `--as` omitted |
+| `@bg [--as NAME \| -n NAME]` | run pipeline in a background context slot (replaces `&`); auto-named if `--as` / `-n` omitted |
 
 `@bg` ties into cshell2's existing context-multiplexing primitives —
 a decorator becomes the natural surface for "run this pipeline in a
@@ -534,7 +539,7 @@ the first non-flag token and treats it as the start of the body (see
 [Args syntax](#resolved-ux-questions)), so the name flows through
 `--as` / `-n`.
 
-`@bg` is implemented on top of a new `PipelineSlot` (sibling of
+`@bg` is implemented on top of a new `PipelineSlot` (subclass of
 `PythonCommandSlot`) so a backgrounded pipeline behaves like any
 other slot: `Ctrl+]` switches in to watch live output, `context kill`
 sends `KeyboardInterrupt` to the worker, and `context list` shows

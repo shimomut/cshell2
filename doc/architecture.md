@@ -11,18 +11,26 @@
 │  ├── Line parsing / pipeline execution              │
 │  ├── Command dispatch                              │
 │  ├── PTY process multiplexing (process.py)         │
+│  ├── Python-command slots & passthrough_run        │
 │  └── Context switch TUI (tui.py)                   │
 ├─────────────────────────────────────────────────────┤
 │  Command Registry (commands.py)                     │
 │  ├── Built-in commands                             │
 │  ├── Python function commands (from config)        │
-│  ├── External completer registration               │
+│  ├── External recipes (handler-less Commands)      │
+│  ├── Aliases                                       │
 │  └── System command passthrough                    │
+├─────────────────────────────────────────────────────┤
+│  Variable Registry (variables.py)                   │
+│  ├── Var ABC — Python-backed shell variables       │
+│  ├── EnvVar — single-key passthrough               │
+│  └── VarCompleter — KEY=VALUE TAB completion       │
 ├─────────────────────────────────────────────────────┤
 │  Completion Engine (completion.py)                  │
 │  ├── Command name completion                       │
 │  ├── Argument completion (per-command completers)  │
 │  ├── Options completion (flags, multi-select TUI)  │
+│  ├── CobraCompleter / ArgcompleteCompleter         │
 │  └── Filesystem completion (fallback)              │
 ├─────────────────────────────────────────────────────┤
 │  TUI Widgets (tui.py)                               │
@@ -36,6 +44,11 @@
 │  ├── TAB completion via InlinePicker               │
 │  └── Ctrl+] context switch (inline picker)         │
 ├─────────────────────────────────────────────────────┤
+│  Cross-Platform Terminal Layer (terminal.py)        │
+│  ├── init / get_mode / set_raw / restore_mode      │
+│  ├── read_key — full logical key as bytes          │
+│  └── SIGWINCH (POSIX) / kbhit polling (Windows)    │
+├─────────────────────────────────────────────────────┤
 │  Context Manager (context.py)                       │
 │  ├── Context stack                                 │
 │  ├── Context-aware variable resolution             │
@@ -45,8 +58,15 @@
 │  Prompt (prompt.py)                                 │
 │  └── Default + user-overrideable prompt function   │
 ├─────────────────────────────────────────────────────┤
+│  Colors (colors.py)                                 │
+│  └── ColorScheme + set_color_scheme (dark/light)   │
+├─────────────────────────────────────────────────────┤
 │  Recipes (recipes/)                                 │
 │  └── Completion recipes for external commands      │
+├─────────────────────────────────────────────────────┤
+│  Decorators (decorators/)                           │
+│  ├── @name [flags] body — wrap pipeline at runtime │
+│  └── Built-ins: @watch, @time, @retry, @quiet, @bg │
 ├─────────────────────────────────────────────────────┤
 │  User Config (~/.cshell2/config.py)                 │
 │  ├── Custom command definitions                    │
@@ -71,13 +91,20 @@ Entry point and orchestrator. Owns the REPL cycle: read input, parse, dispatch, 
 
 Provides the `CommandRegistry` class and a global `registry` singleton.
 
-- `@registry.command(name=..., help=..., params=[arg(...)])` decorator for registering Python functions as commands. `params=` declares positionals and flags; the registry derives both an argparse parser and a per-position completer dict from the same list.
-- `arg(*names, completer=None, **argparse_kwargs)` builder used inside `params=`. Values from `choices=` automatically populate a `ChoiceCompleter` if no explicit `completer=` is given.
-- `registry.register()` for imperative registration
-- `registry.register_external_completers(name, completers)` for attaching a `{None: OptionsCompleter, N: positional}` dict to a system command (e.g. `git`, `make`) without wrapping it as a Python command
-- `registry.mark_builtins()` / `registry.clear_user_commands()` for hot-reload support
-- Each `Command` holds: name, callable, `params: list[Arg] | None`, derived per-argument completers dict, help text, description
-- Description comes from the explicit `help=` kwarg, falling back to the function's docstring
+- `@registry.command(name, *, help=None, params=None, delegate=None, options_completer=None)` — register a Python function (with handler) or an external recipe (no handler). `params=[arg(...)]` declares positionals and flags; the registry derives both an argparse parser and the per-position completer dict from the same list. `delegate=Completer` installs a single completer at every slot (used when an external tool drives its own completion protocol). `options_completer=OptionsCompleter` overrides the auto-built flag completer when a custom subclass is needed.
+- `arg(*names, completer=None, **argparse_kwargs)` builder used inside `params=`. `metavar=` becomes the inline hint for value-taking flags; `choices=` auto-populates a `ChoiceCompleter` when `completer=` is omitted.
+- Sub-command tree: `Command.command(name, ...)` registers a child sub-command. Used by `git`, `awsut`, and any nested CLI; see [subcommands.md](subcommands.md).
+- Aliases: `registry.alias(name, value)`, `registry.unalias(name)`, `get_alias`, `list_aliases`.
+- `registry.register(cmd)` for imperative registration of a pre-built `Command`.
+- `registry.mark_builtins()` / `registry.clear_user_commands()` for hot-reload support.
+- Each `Command` holds: name, optional callable, `params: list[Arg] | None`, derived per-argument completers dict, help text, description.
+- Description comes from the explicit `help=` kwarg, falling back to the function's docstring.
+
+A handler-less `Command` (no callable attached) is treated by the dispatch path as an external recipe — `Shell._execute` falls through to the system-command path so the registered completion + flag metadata drive TAB completion while the actual program runs as an OS process. There is no separate `register_external_completers()` API.
+
+### variables.py — Variable Registry
+
+Python-backed shell variables. `Var` is the ABC; subclass and register instances with `var_registry`. The `var` built-in command and `$NAME` / `${NAME}` expansion both check the registry first, then fall back to `os.environ`. `EnvVar(name, env_var, completer=...)` is the convenience subclass for a 1-to-1 passthrough to a single env key. `VarCompleter` handles `KEY=VALUE` TAB completion locally without changing the global tokenizer. See the Variable Registry section in CLAUDE.md.
 
 ### completion.py — Completion Engine
 
@@ -136,16 +163,29 @@ Provides `set_prompt()` / `get_prompt_func()` for customizable prompt generation
 
 Default prompt: `[context] path/cwd HH:MM:SS [bg:N]>` (ANSI colors). The `[context]` prefix is omitted when the context name is `"default"`. `[bg:N]` appears when N other contexts have live processes.
 
+### colors.py — Color Schemes
+
+`ColorScheme` dataclass holding ANSI colour codes used by the prompt and TUI widgets, with `dark` and `light` schemes shipped. `set_color_scheme(scheme)` swaps the active scheme; users override colours from `~/.cshell2/config.py`.
+
+### terminal.py — Cross-Platform Terminal Layer
+
+The single place that touches OS-specific terminal APIs. `lineedit.py`, `tui.py`, and the POSIX forwarding loops in `shell.py` go through `terminal.py` so the rest of the codebase is platform-agnostic. Provides `init()`, `get_mode/set_raw/restore_mode`, `read_key(fd)` (returns one logical key as bytes — control byte, full UTF-8 char, or full escape sequence), `wait_readable(fd, timeout)`, and SIGWINCH wiring on POSIX (`HAS_SIGWINCH`, `install_resize_handler`). On Windows it translates `msvcrt` scan-codes into the same ANSI sequences POSIX produces, so the keypress logic in `lineedit.py` is identical on both platforms.
+
 ### recipes/ — Completion Recipes
 
-Opt-in completion recipes for system commands. Each recipe registers completers via `registry.register_external_completers()`. Enable in config:
+Opt-in completion recipes for system commands. Each recipe calls `registry.command(name, params=[...])` with **no handler attached** — the dispatch path treats handler-less Commands as external recipes. Enable in config:
 
 ```python
 from cshell2.recipes import enable
-enable("git", "make", "ssh", "kill", "ls", "grep", "find", "du", "df", "tail", "aws")
+enable("*")                                     # all built-in + user recipes
+enable("git", "make", "ssh", "kill", "aws")     # or pick specific ones
 ```
 
 Cobra-based tools (`docker`, `kubectl`, `helm`, `gh`, …) and argcomplete-based Python CLIs (`pipx`, `conda`, …) don't need a recipe — `CobraCompleter` and `ArgcompleteCompleter` detect them automatically.
+
+### decorators/ — Pipeline Decorators
+
+A decorator is a token of the form `@name [flags]` at the start of a line that wraps the rest of the line as a pipeline and modifies how it runs. Authors register a function with `@decorator_registry.decorator(name, params=[...])` that receives a parsed `Pipeline` AST and the parsed flag namespace. Built-ins: `@watch`, `@time`, `@retry`, `@quiet`, `@bg`. Loaded with `enable_decorators(...)`. Pipelines that contain `|`, `;`, `&&`, `||`, or a redirect must be enclosed in `{...}`. See [decorators.md](decorators.md).
 
 ### parsing.py — Line Tokenization
 
@@ -217,37 +257,43 @@ cshell2/
 │   ├── architecture.md
 │   ├── completion.md
 │   ├── context.md
+│   ├── decorators.md
 │   ├── recipes.md
-│   └── terminal-resize.md
+│   ├── subcommands.md
+│   ├── cobra-fallback.md
+│   ├── argcomplete-fallback.md
+│   ├── terminal-resize.md
+│   ├── enhancements.md
+│   └── limitations.md
 ├── src/
 │   └── cshell2/
-│       ├── __init__.py         # exports set_prompt
+│       ├── __init__.py         # public exports
 │       ├── __main__.py         # entry point (calls Shell().run())
-│       ├── shell.py            # main loop, command dispatch, pipeline execution
-│       ├── commands.py         # command registry, @command decorator, arg() builder
+│       ├── _config.py          # bundled default ~/.cshell2/config.py template
+│       ├── shell.py            # main loop, command dispatch, pipeline execution, Python-command slots
+│       ├── commands.py         # command registry, @command decorator, arg() builder, CmdParser, sub-command tree
 │       ├── variables.py        # Var ABC, VarRegistry, EnvVar, VarCompleter
-│       ├── completion.py       # Completer ABC, CompletionContext, built-in completers
+│       ├── completion.py       # Completer ABC, CompletionContext, built-in completers, cobra/argcomplete fallbacks
 │       ├── context.py          # Context, ContextManager, ContextState
 │       ├── history.py          # history storage and search
 │       ├── lineedit.py         # DIY raw-mode line editor, TAB completion glue
 │       ├── parsing.py          # line tokenization, quote handling, var expansion
-│       ├── pipeline.py         # quote-aware operator parser: parse_line(), expand_globs()
+│       ├── pipeline.py         # quote-aware operator parser: parse_line(), expand_globs(), decorator extraction, Pipeline.run()
 │       ├── process.py          # PTY subprocess slots, output buffering, terminal-mode tracking
 │       ├── prompt.py           # set_prompt / get_prompt_func / default_prompt
+│       ├── colors.py           # ColorScheme + set_color_scheme (dark/light)
+│       ├── terminal.py         # cross-platform raw-mode + key reading
 │       ├── tui.py              # InlinePicker, InlineMultiPicker, InlineArgPrompt
-│       └── recipes/
-│           ├── __init__.py     # enable(*names) helper
-│           ├── aws.py
-│           ├── df.py
-│           ├── du.py
-│           ├── find.py
-│           ├── git.py
-│           ├── grep.py
-│           ├── kill.py
-│           ├── ls.py
-│           ├── make.py
-│           ├── ssh.py
-│           └── tail.py
+│       ├── recipes/            # external-command completion recipes (28+ files)
+│       │   ├── __init__.py     # enable(*names) helper, recipe_search_path, add_recipe_path
+│       │   └── <name>.py       # see Available recipes block in __init__.py
+│       └── decorators/
+│           ├── __init__.py     # DecoratorRegistry, enable_decorators, add_decorator_path
+│           ├── watch.py        # @watch built-in
+│           ├── time.py         # @time built-in
+│           ├── retry.py        # @retry built-in
+│           ├── quiet.py        # @quiet built-in
+│           └── bg.py           # @bg built-in
 └── tests/
     ├── test_alias_expansion.py
     ├── test_argcomplete_fallback.py
@@ -256,12 +302,15 @@ cshell2/
     ├── test_commands.py
     ├── test_completion.py
     ├── test_context.py
+    ├── test_decorators.py
     ├── test_parsing.py
     ├── test_pipeline.py
+    ├── test_piped_python_commands.py
     ├── test_process.py
     ├── test_recipes.py
     ├── test_shell_continuation.py
     ├── test_subcommands.py
+    ├── test_tar_recipe.py
     └── test_variables.py
 ```
 
@@ -280,3 +329,16 @@ cshell2/
 6. **Context variables as env vars** — switching contexts exports variables to `os.environ` and backs up originals. This means subprocesses (system commands) automatically inherit context variables without cshell2-specific wiring.
 
 7. **System command fallback** — unregistered commands pass through to a PTY subprocess, making cshell2 a drop-in replacement shell for daily use.
+
+## Known structural smells
+
+These are not bugs and they are not blocking work. They are the architectural rough edges that have accumulated as features (Python pipelines, decorators, `@bg`, passthrough subprocesses) layered on top of the original PTY-multiplexing core. Each is described in more detail in [enhancements.md](enhancements.md) under "Architectural follow-ups."
+
+- **`shell.py` is ~3300 lines** and hosts at least four concerns that are conceptually separate: thread-local stdio routing + `_StdoutProxy` + `PythonCommandSlot` + `PipelineSlot` (peer to `process.py`); the per-stage pipeline executor (`_execute_pipeline`, `_execute_stage`, redirect plumbing); the two raw-mode forwarding loops; and the actual REPL + built-ins + completion glue. Everything else in the package is right-sized.
+- **Module-global callback registration is the hidden contract between layers.** `pipeline.set_pipeline_executor`, `decorators.set_background_runner`, `pipeline._decorator_value_flag_lookup`, and the `_current_slot` / `_in_pipeline` thread-locals consumed by free `passthrough_*` functions are five independent global setters wired from `Shell.__init__`. Works, but: two `Shell` instances cannot coexist in one process, tests must reset the globals, and the real interface between `Pipeline.run` and `Shell._run_pipeline_from_decorator` is implicit.
+- **`shell.py` imports private names from `pipeline.py`** — `_split_on_operators` is used both for completion-stage isolation and for decorator-prefix remainder validation. It is part of `pipeline.py`'s effective public surface; the leading underscore is a leftover.
+- **Two near-identical raw-mode forwarding loops** (`_enter_forwarding_mode` for PTY-backed `ProcessSlot`, `_enter_python_forwarding_mode` for `PythonCommandSlot`) duplicate ~80% of their logic — termios snapshot/restore, SIGWINCH/SIGINT install, `\x1d` interception, byte forwarding. Any fix has to be applied twice today.
+- **Redirect-open code is duplicated** inside `_execute_pipeline` and `_execute_stage` with subtly different sentinels (`subprocess.STDOUT` vs the string `"stdout"` for `2>&1`). A single `_open_redirects(stage)` helper would unify both call sites.
+- **`PipelineSlot` reaches into `PythonCommandSlot` privates** (`_input_request`, `_pty_lock`, `_proxy`, ...) by mirroring `__init__` rather than calling `super().__init__()`. The base class is not subclass-friendly — the inheritance is more "happens to share fields" than "is-a."
+
+The shape of the relief is sketched in `enhancements.md`: extract `slots.py` (Python-command slot family + thread-local routers + passthrough helpers), extract `dispatch.py` (the pipeline executor), unify the two forwarding loops behind a small slot interface, and replace the global setters with a single `ExecutionEnvironment` interface that `Shell` constructs and passes down. None of this is a one-shot refactor — it is a sequence of medium-risk moves, each independently valuable.
