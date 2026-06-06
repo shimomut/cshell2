@@ -8,10 +8,14 @@ A lightweight but powerful terminal shell environment with rich tab completion a
 - **Multi-select flag picker** — TAB on flags opens a Space-to-toggle checkbox list
 - **Context switching** — named environments with variables and working directories, with push/pop and `Ctrl+]` live switching
 - **PTY process multiplexing** — run processes in contexts and switch between them without killing them
+- **Pipelines and redirections** — `|`, `>`, `>>`, `<`, `2>`, `2>&1`, `;`, `&&`, `||`, globs (`*`, `?`, `**`), and `\`-line-continuation
+- **Pipeline decorators** — wrap any pipeline with `@watch`, `@time`, `@retry`, `@quiet`, or `@bg`; authoring your own is a few lines of Python
 - **Custom commands** — define Python functions as shell commands with full completion support
+- **Python-backed variables** — `var aws_region=us-east-1` can drive multiple `os.environ` keys via a `Var` subclass; `$NAME` expansion is symmetric
 - **Completion recipes** — opt-in TAB completion for `git`, `make`, `ssh`, `aws`, and more
 - **Protocol fallbacks** — automatic completion for cobra-based tools (`docker`, `kubectl`, `helm`, `gh`, …) and argcomplete-based Python CLIs (`pipx`, `conda`, `pre-commit`, `tox`, …) — no recipe needed
 - **System command fallback** — anything not a registered command runs through the system shell
+- **Cross-platform** — interactive shell, completion, pipelines, redirects, contexts, and history all work on POSIX and Windows; PTY-backed multiplexing of running native processes is POSIX-only
 - **History** — persistent history with up/down navigation and `Ctrl+R` search
 
 ## Installation
@@ -94,6 +98,58 @@ Press TAB to complete:
 - Short boolean flags are combined: selecting `-a` and `-l` inserts `-al`
 - Flags that take a value (e.g. `-d N`) insert `flag ` then open a value picker or show an inline hint
 
+### Pipelines, Redirects, and Sequencing
+
+cshell2 supports the operators you'd expect from a POSIX shell:
+
+| Operator | Meaning |
+|----------|---------|
+| `cmd1 \| cmd2` | Pipe stdout of `cmd1` into stdin of `cmd2` |
+| `cmd > file` / `>> file` | Redirect stdout (truncate / append) |
+| `cmd < file` | Redirect stdin from a file |
+| `cmd 2> file` / `2>> file` | Redirect stderr |
+| `cmd 2>&1` | Merge stderr into stdout |
+| `cmd1 ; cmd2` | Sequence (run both regardless of exit code) |
+| `cmd1 && cmd2` | Run `cmd2` only if `cmd1` succeeded |
+| `cmd1 \|\| cmd2` | Run `cmd2` only if `cmd1` failed |
+| `*`, `?`, `**` | Glob expansion (recursive `**` supported) |
+| `\` at end of line | Continue command on the next line (one history entry) |
+
+```
+cshell2> ls *.py | grep test | wc -l
+cshell2> make 2>&1 | tee build.log
+cshell2> echo hello > out.txt && cat out.txt
+```
+
+Both registered Python commands and external programs work seamlessly inside pipelines.
+
+### Pipeline Decorators
+
+A **decorator** is a token of the form `@name [flags]` at the start of a line that wraps the rest of the line as a pipeline and modifies how it runs. The leading `@` keeps the syntax visually distinct so it never collides with a regular command name.
+
+```
+@watch ls                              # bare single-command body
+@watch -n 1 {df -h | grep abc}         # braced body required when operators appear
+@time {make && ./run-tests}
+@retry -n 5 --delay 2 curl https://flaky.example.com/
+@quiet pytest -q
+@bg {tail -f /var/log/system.log}      # run in a fresh background context
+```
+
+**Scope rule.** If the wrapped pipeline contains `|`, `;`, `&&`, `||`, or a redirect, it must be enclosed in `{...}`. Single-command bodies don't need braces. This makes the decorator's scope visible at a glance and side-steps the `watch -n 5 ls | grep abc` ambiguity that POSIX `watch` is famous for.
+
+**Built-in decorators:**
+
+| Decorator | Description |
+|-----------|-------------|
+| `@watch [-n SEC] [--no-clear]` | Repeatedly run a pipeline until interrupted |
+| `@time` | Print elapsed wall/user/sys time after the pipeline finishes |
+| `@retry [-n N] [--delay SEC]` | Re-run the pipeline on non-zero exit, up to `N` attempts |
+| `@quiet [--stderr]` | Discard stdout (and stderr with `--stderr`); still propagates the exit code |
+| `@bg [name]` | Run the pipeline in a fresh background context (resumable via `Ctrl+]`) |
+
+See the [Custom Decorators](#custom-decorators) section below for authoring your own.
+
 ## Customization
 
 Create `~/.cshell2/config.py` to define custom commands and completers. This file is plain Python that imports from cshell2. Use `reload` to apply changes without restarting.
@@ -126,6 +182,123 @@ def connect(account, region, instance_id):
     import os
     os.system(f"ssh {instance_id}")
 ```
+
+### Python-Backed Variables
+
+A `Var` subclass mirrors the `CommandRegistry` pattern: subclass `Var`, register an instance with `var_registry`, and the built-in `var` command (and bare `NAME=VALUE` assignment) dispatches through your class. `$NAME` / `${NAME}` expansion uses the same lookup, so a Python-backed variable is read- and write-symmetric with `os.environ`.
+
+```python
+# ~/.cshell2/config.py
+import os
+from cshell2 import Var, EnvVar, var_registry
+from cshell2.completion import ChoiceCompleter, CallbackCompleter
+
+class AwsRegionVar(Var):
+    name = "aws_region"
+    description = "AWS region — sets AWS_REGION + AWS_DEFAULT_REGION"
+
+    def get(self):
+        return os.environ.get("AWS_REGION")
+
+    def set(self, value):
+        os.environ["AWS_REGION"] = value
+        os.environ["AWS_DEFAULT_REGION"] = value
+
+    @property
+    def value_completer(self):
+        return ChoiceCompleter(["us-east-1", "us-west-2", "eu-west-1"])
+
+var_registry.register(AwsRegionVar())
+var_registry.register(
+    EnvVar("aws_profile", "AWS_PROFILE",
+           completer=CallbackCompleter(lambda: ["default", "prod", "staging"]))
+)
+```
+
+Use `EnvVar(name, env_var, completer=...)` for a single-key passthrough; subclass `Var` directly when one logical name needs to drive multiple `os.environ` keys (or any other side effect). With the variables above:
+
+```
+cshell2> var aws_region=us-west-2
+cshell2> echo $AWS_REGION
+us-west-2
+cshell2> aws ec2 describe-instances --region $aws_region
+```
+
+### Custom Decorators
+
+To author your own decorator, decorate a function with `decorator_registry.decorator(...)`. The function receives the wrapped `Pipeline` as its first positional argument and the parsed flag namespace as kwargs; call `pipeline.run()` to execute the body and return the exit code.
+
+```python
+# ~/.cshell2/config.py
+import sys
+import time
+from cshell2.commands import arg
+from cshell2.decorators import registry as decorator_registry
+from cshell2.pipeline import Pipeline
+
+@decorator_registry.decorator(
+    name="repeat",
+    help="Run the pipeline N times, stopping early on the first failure.",
+    params=[
+        arg("-n", "--count", type=int, default=3, metavar="N",
+            help="number of iterations (default 3)"),
+        arg("--delay", type=float, default=0.0, metavar="SEC",
+            help="seconds to sleep between iterations"),
+    ],
+)
+def repeat(pipeline: Pipeline, *, count: int, delay: float) -> int:
+    last = 0
+    for i in range(1, count + 1):
+        sys.stderr.write(f"@repeat: iteration {i}/{count}\n")
+        last = pipeline.run()
+        if last != 0:
+            return last
+        if delay > 0 and i < count:
+            time.sleep(delay)
+    return last
+```
+
+Usage:
+
+```
+cshell2> @repeat -n 5 --delay 1 ls
+cshell2> @repeat -n 3 {make && ./run-tests}
+```
+
+To share decorators across machines or teammates, drop a module under `~/.cshell2/decorators/<name>.py` that defines `register()` (same shape as the built-ins) and call `enable()` from `config.py`:
+
+```python
+# ~/.cshell2/config.py
+from cshell2.decorators import add_decorator_path, enable as enable_decorators
+
+add_decorator_path("/team/shared/decorators")   # optional extra directory
+enable_decorators("repeat")                     # found in ~/.cshell2/decorators/
+                                                # or /team/shared/decorators/
+```
+
+### Spawning Interactive Subprocesses
+
+If a custom command needs to spawn a subprocess that reads from the user (SSH-like sessions, TUIs, MFA prompts, anything that calls `getpass`), wrap the call with `passthrough_run` — *not* `subprocess.run`:
+
+```python
+from cshell2 import passthrough_run
+
+@registry.command(name="my_ssm", ...)
+def my_ssm():
+    passthrough_run(["aws", "ssm", "start-session", "--target", "i-abc123"])
+```
+
+Plain `subprocess.run` would have the main shell thread and the subprocess both reading from the real terminal, splitting keystrokes between them; `passthrough_run` allocates a slot-owned PTY for the child so input flows cleanly.
+
+For reading a single line of input back from the user, use `passthrough_input(prompt)` instead of plain `input()`:
+
+```python
+from cshell2 import passthrough_input
+
+answer = passthrough_input("Continue? [y/N] ")
+```
+
+Outside a Python command thread, both helpers fall back to the obvious thing (`subprocess.run` and `input`), so the same code is safe in either context. Non-interactive subprocesses (`capture_output=True`, pipeline stages with explicit pipes, `pexpect.popen_spawn`, …) don't need wrapping.
 
 ### Prompt Customization
 
@@ -286,3 +459,10 @@ registry.command(
 | `~/.cshell2/config.py` | User configuration |
 | `~/.cshell2/history` | Command history |
 | `~/.cshell2/recipes/<name>.py` | User-defined completion recipes (loaded by `enable("<name>")`) |
+| `~/.cshell2/decorators/<name>.py` | User-defined pipeline decorators (loaded by `enable("<name>")`) |
+
+## Platform Support
+
+The interactive shell — line editing, completion, all TUI pickers, history, pipelines, redirects, built-ins, decorators, and `Ctrl+]` context switching at the prompt — runs natively on both POSIX and Windows. Path separators are normalized to `/` on every platform (Git-Bash style) so a path can never be mistaken for a `\`-line-continuation.
+
+The one POSIX-only feature is **PTY-backed multiplexing of a live external process**: backgrounding a *running* native program with `Ctrl+]` and resuming it later. On Windows, external commands run on the real console with inherited stdio.

@@ -713,6 +713,66 @@ def connect(account, region, instance_id):
     os.system(f"ssh {instance_id}")
 ```
 
+#### Custom Decorators
+
+Custom decorators register the same way commands do — import
+`cshell2.decorators.registry` and decorate a function. The function
+receives the wrapped `Pipeline` as its first positional argument and the
+parsed flag namespace as kwargs; call `pipeline.run()` to execute the
+body. Return the int exit code (or let the return value of `pipeline.run()`
+propagate).
+
+```python
+# ~/.cshell2/config.py
+import sys
+import time
+from cshell2.commands import arg
+from cshell2.decorators import registry as decorator_registry
+from cshell2.pipeline import Pipeline
+
+@decorator_registry.decorator(
+    name="repeat",
+    help="Run the pipeline N times, stopping early on the first failure.",
+    params=[
+        arg("-n", "--count", type=int, default=3, metavar="N",
+            help="number of iterations (default 3)"),
+        arg("--delay", type=float, default=0.0, metavar="SEC",
+            help="seconds to sleep between iterations"),
+    ],
+)
+def repeat(pipeline: Pipeline, *, count: int, delay: float) -> int:
+    last = 0
+    for i in range(1, count + 1):
+        sys.stderr.write(f"@repeat: iteration {i}/{count}\n")
+        last = pipeline.run()
+        if last != 0:
+            return last
+        if delay > 0 and i < count:
+            time.sleep(delay)
+    return last
+```
+
+Usage at the prompt — the brace form is required when the body contains
+pipeline operators:
+
+```
+cshell2> @repeat -n 5 --delay 1 ls
+cshell2> @repeat -n 3 {make && ./run-tests}
+```
+
+For decorators shared across machines or teammates, drop a module under
+`~/.cshell2/decorators/<name>.py` that defines `register()` (same shape
+as the built-ins) and call `enable()` from `config.py`:
+
+```python
+# ~/.cshell2/config.py
+from cshell2.decorators import add_decorator_path, enable as enable_decorators
+
+add_decorator_path("/team/shared/decorators")   # optional extra directory
+enable_decorators("repeat")                     # found in ~/.cshell2/decorators/
+                                                # or /team/shared/decorators/
+```
+
 ## File Layout
 
 ```
