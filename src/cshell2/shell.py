@@ -40,6 +40,7 @@ from .context import ContextManager, ContextState
 from .lineedit import CONTEXT_CHANGED_SENTINEL, History, LineEditor, SWITCH_SENTINEL
 from .parsing import expand_vars, split_for_completion, tokenize
 from .pipeline import (
+    DecoratorParseError,
     Redirect,
     Sequence,
     Stage,
@@ -93,6 +94,15 @@ class _ThreadLocalStdout(io.TextIOBase):
     @property
     def errors(self) -> str:
         return getattr(self._real, "errors", "strict")
+
+    def isatty(self) -> bool:
+        # A pipe-end override is never a tty.  When no override is active
+        # (main thread) or the override forwards to the real stdout
+        # (_StdoutProxy in a PythonCommandSlot), defer to the real stream.
+        target = getattr(self._local, "override", None)
+        if target is not None:
+            return target.isatty()
+        return self._real.isatty()
 
     def set_override(self, proxy) -> None:
         self._local.override = proxy
@@ -245,6 +255,13 @@ class _StdoutProxy(io.TextIOBase):
 
     def fileno(self) -> int:
         return self._real.fileno()
+
+    def isatty(self) -> bool:
+        # The proxy buffers and forwards to the real stdout.  Whether the
+        # destination is a tty is what callers actually want to know
+        # (e.g. ``@watch`` checks ``sys.stdout.isatty()`` to decide
+        # whether emitting ANSI clear-screen escapes makes sense).
+        return self._real.isatty()
 
     def activate(self, raw_mode: bool = False) -> None:
         """Replay buffer to real stdout and start writing live."""
@@ -1642,7 +1659,11 @@ class Shell:
             self.context_manager.set_variable(key, value)
 
     def _execute(self, line: str) -> None:
-        seq = parse_line(expand_vars(line))
+        try:
+            seq = parse_line(expand_vars(line))
+        except DecoratorParseError as e:
+            print(f"cshell2: {e}", file=sys.stderr)
+            return
         last_exit = 0
         for op, pipeline in seq.items:
             if op == "&&" and last_exit != 0:

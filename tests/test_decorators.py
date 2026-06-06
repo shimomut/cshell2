@@ -360,3 +360,70 @@ def test_completion_after_decorator_with_flags_delegates(watch_deco):
     assert label == "command"
     values = {c.value for c in completions}
     assert "exit" in values
+
+
+# ---------------------------------------------------------------------------
+# Shell-level error handling for malformed decorator lines
+# ---------------------------------------------------------------------------
+
+def test_shell_execute_swallows_decorator_parse_error(capsys, watch_deco):
+    """A malformed decorator line should print an error and return to the
+    prompt, not crash the shell with an uncaught exception."""
+    sh = Shell()
+    sh._execute("@watch {ls")  # unmatched brace
+    err = capsys.readouterr().err
+    assert "unmatched" in err
+
+
+def test_shell_execute_swallows_decorator_composition_error(capsys, watch_deco):
+    """Decorator composition (`@deco {...} | next`) is not yet supported,
+    but the parse error must not crash the shell."""
+    sh = Shell()
+    sh._execute("@watch {ls} | grep foo")
+    err = capsys.readouterr().err
+    assert "text after" in err
+
+
+# ---------------------------------------------------------------------------
+# sys.stdout.isatty() inside a decorator body
+# ---------------------------------------------------------------------------
+
+def test_stdout_isatty_visible_to_decorator_body():
+    """``@watch`` checks ``sys.stdout.isatty()`` to decide whether to emit
+    the screen-clear ANSI escape.  The ``_StdoutProxy`` installed for a
+    Python-command thread must report the real stdout's tty status, not
+    the io.TextIOBase default of ``False`` — otherwise ``--no-clear``
+    has no observable effect (the clear path is skipped either way).
+
+    Verified directly against the proxy: under pytest's stdin capture
+    the real stdout isn't a tty, so the proxy must report False; what
+    matters is that it asks the real stream rather than returning
+    False unconditionally.
+    """
+    import sys as _sys
+    from cshell2.shell import _StdoutProxy
+
+    proxy = _StdoutProxy(_sys.__stdout__)
+    assert proxy.isatty() == _sys.__stdout__.isatty()
+
+
+def test_thread_local_stdout_isatty_falls_through(monkeypatch):
+    """``_ThreadLocalStdout`` must forward ``isatty()`` to either the
+    real stream (no override) or the thread-local override — not return
+    the io.TextIOBase default of ``False``."""
+    import sys as _sys
+    from cshell2.shell import _ThreadLocalStdout, _StdoutProxy
+
+    tls = _ThreadLocalStdout(_sys.__stdout__)
+    # No override: reflect the real stream.
+    assert tls.isatty() == _sys.__stdout__.isatty()
+
+    # With a _StdoutProxy override (the path a PythonCommandSlot uses),
+    # isatty() should reflect the proxy, which itself reflects the real
+    # stream.
+    proxy = _StdoutProxy(_sys.__stdout__)
+    tls.set_override(proxy)
+    try:
+        assert tls.isatty() == _sys.__stdout__.isatty()
+    finally:
+        tls.clear_override()
