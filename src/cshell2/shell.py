@@ -39,7 +39,16 @@ from .variables import registry as var_registry, VarCompleter
 from .context import ContextManager, ContextState
 from .lineedit import CONTEXT_CHANGED_SENTINEL, History, LineEditor, SWITCH_SENTINEL
 from .parsing import expand_vars, split_for_completion, tokenize
-from .pipeline import Redirect, Sequence, Stage, Pipeline, expand_globs, parse_line, _split_on_operators
+from .pipeline import (
+    Redirect,
+    Sequence,
+    Stage,
+    Pipeline,
+    expand_globs,
+    parse_line,
+    set_pipeline_executor,
+    _split_on_operators,
+)
 from .process import OutputBuffer, ProcessSlot
 from .prompt import get_prompt_func, set_prompt
 
@@ -832,6 +841,8 @@ class Shell:
         self._register_builtins()
         self.registry.mark_builtins()
         var_registry.mark_builtins()
+        from .decorators import registry as decorator_registry
+        decorator_registry.mark_builtins()
         self._load_user_config()
         # Install thread-local stdio routers so Python command threads can
         # rebind their own stdin/stdout/stderr (for buffering proxies or pipe
@@ -859,11 +870,158 @@ class Shell:
         self._file_completer = FileCompleter()
         self._var_completer = VarCompleter()
 
+        # Wire Pipeline.run() so decorator bodies can re-enter execution.
+        set_pipeline_executor(self._run_pipeline_from_decorator)
+
+    def _maybe_decorator_completion(
+        self,
+        tokens: list[str],
+        prefix: str,
+        line_before_cursor: str,
+    ):
+        """Handle TAB completion for ``@name [flags] <body>`` lines.
+
+        Returns one of three things:
+
+        * ``None`` — the line is not decorator-prefixed.
+        * ``("return", (completions, prefix, label))`` — decorator-specific
+          completions; caller returns this directly.
+        * ``("fallthrough", (stripped_tokens, prefix, stripped_line))`` —
+          cursor is in the body; caller continues with normal completion
+          using the rewritten locals.
+        """
+        from .decorators import registry as decorator_registry
+
+        # Case A: ``@<partial>`` — completing the decorator name itself.
+        if not tokens and prefix.startswith("@"):
+            partial = prefix[1:]
+            decos = decorator_registry.list_decorators()
+            completions = [
+                Completion(
+                    value=f"@{name}",
+                    display=f"@{name}",
+                    description=decorator_registry.get(name).description,
+                )
+                for name in sorted(decos)
+                if name.startswith(partial)
+            ]
+            return "return", (completions, prefix, "decorator")
+
+        # Case B/C: a decorator name has already been typed.
+        if not tokens or not tokens[0].startswith("@"):
+            return None
+        deco_name = tokens[0][1:]
+        deco = decorator_registry.get(deco_name)
+        if deco is None:
+            return None  # unknown decorator; fall through (treats it like a command)
+
+        # Walk past the decorator's flags to find where the body starts.
+        i = 1
+        body_start = 1
+        while i < len(tokens):
+            tok = tokens[i]
+            if not tok.startswith(("-", "+")):
+                body_start = i
+                break
+            if tok == "--":
+                body_start = i + 1
+                break
+            i += 1
+            # If the flag we just consumed takes a value, consume the value too.
+            if (
+                i < len(tokens)
+                and "=" not in tok
+                and decorator_registry.flag_takes_value(deco_name, tok)
+            ):
+                i += 1
+            body_start = i
+        else:
+            body_start = len(tokens)
+
+        # Case B: cursor is on a decorator-flag token (``@watch -<TAB>``).
+        if prefix.startswith(("-", "+")) and body_start >= len(tokens):
+            options_completer = deco.completers.get(None)
+            if options_completer is None:
+                return "return", ([], prefix, f"@{deco_name}")
+            ctx = CompletionContext(
+                command=f"@{deco_name}",
+                args=tokens[1:],
+                arg_index=0,
+                prefix=prefix,
+                line=line_before_cursor,
+                shell_context=self.context_manager.current(),
+            )
+            if options_completer.should_activate(ctx):
+                return "return", (options_completer.complete(ctx), prefix, f"@{deco_name} option")
+            return "return", ([], prefix, f"@{deco_name} option")
+
+        # Case C: cursor is in the body.  Strip the decorator portion and
+        # let normal completion run on what's left.  We rebuild the line
+        # so downstream completers see the body as if typed at top level.
+        stripped_tokens = tokens[body_start:]
+        stripped_line = self._strip_leading_tokens(
+            line_before_cursor, len(tokens) - len(stripped_tokens)
+        )
+        return "fallthrough", (stripped_tokens, prefix, stripped_line)
+
+    @staticmethod
+    def _strip_leading_tokens(line: str, n: int) -> str:
+        """Drop the first *n* whitespace-separated tokens from *line*.
+
+        Tokens that contain quotes are tracked correctly so a quoted
+        decorator-flag value isn't double-counted.
+        """
+        i = 0
+        ln = len(line)
+        dropped = 0
+        while dropped < n and i < ln:
+            # Skip leading whitespace
+            while i < ln and line[i] in (" ", "\t"):
+                i += 1
+            if i >= ln:
+                break
+            # Read one token
+            while i < ln and line[i] not in (" ", "\t"):
+                ch = line[i]
+                if ch in ('"', "'"):
+                    quote = ch
+                    i += 1
+                    while i < ln and line[i] != quote:
+                        if line[i] == "\\" and quote == '"' and i + 1 < ln:
+                            i += 2
+                        else:
+                            i += 1
+                    i += 1
+                    continue
+                if ch == "\\" and i + 1 < ln:
+                    i += 2
+                    continue
+                i += 1
+            dropped += 1
+        # Skip whitespace after the dropped tokens — preserve a single
+        # space so split_for_completion still sees an "empty prefix" if the
+        # cursor is mid-whitespace.
+        while i < ln and line[i] in (" ", "\t"):
+            i += 1
+        return line[i:]
+
     def _get_completions(self, line_before_cursor: str) -> tuple[list[Completion], str, str]:
         # Isolate the current pipeline stage so completions for `ls | grep -`
         # are computed against `grep`, not `ls`.
         stage_line = _split_on_operators(line_before_cursor, [";", "&&", "||", "|"])[-1][1]
         tokens, prefix = split_for_completion(stage_line)
+
+        # Decorator-prefixed stage (e.g. ``@watch -n 1 ls -l <TAB>``): handle
+        # the ``@``-name and decorator-flag completions here, then strip the
+        # decorator's tokens from the line and fall through so the wrapped
+        # command's completer sees ``ls -l <TAB>``.
+        deco_result = self._maybe_decorator_completion(tokens, prefix, line_before_cursor)
+        if deco_result is not None:
+            kind, payload = deco_result
+            if kind == "return":
+                return payload  # (completions, prefix, label)
+            # kind == "fallthrough"
+            tokens, prefix, line_before_cursor = payload
 
         # Expand the first token if it is an alias, so completions for
         # `hp <TAB>` come from the expansion's resolved command.
@@ -1419,6 +1577,10 @@ class Shell:
             else:
                 print(f"Unknown subcommand: {subcommand}")
 
+        # Register built-in pipeline decorators (@watch, etc.).
+        from .decorators import enable as enable_decorators
+        enable_decorators("watch")
+
     def _load_user_config(self) -> None:
         config_path = Path.home() / ".cshell2" / "config.py"
         if not config_path.exists():
@@ -1511,6 +1673,24 @@ class Shell:
         if not expansion_tokens:
             return tokens
         return expansion_tokens + tokens[1:]
+
+    def _run_pipeline_from_decorator(
+        self, pipeline: Pipeline, *, stdin=None, stdout=None, stderr=None
+    ) -> int:
+        """Entry point used by ``Pipeline.run()`` from a decorator body.
+
+        The MVP only supports the no-stdio-override case — the decorator
+        body inherits whatever stdio the decorator itself was given (which
+        is already routed correctly by the thread-local routers when the
+        decorator is in a pipeline).  ``stdin``/``stdout``/``stderr`` are
+        accepted for API forward-compatibility but currently rejected.
+        """
+        if any(x is not None for x in (stdin, stdout, stderr)):
+            raise NotImplementedError(
+                "Pipeline.run(stdin=, stdout=, stderr=) is not supported yet; "
+                "the decorator body inherits stdio from the decorator's caller."
+            )
+        return self._execute_pipeline(pipeline)
 
     def _execute_pipeline(self, pipeline: Pipeline) -> int:
         """Execute a pipeline; return exit code of last stage."""
@@ -1774,12 +1954,44 @@ class Shell:
         t.start()
         return handle
 
+    def _execute_decorator_stage(self, stage: Stage) -> int:
+        """Invoke a ``@name`` decorator with its parsed body pipeline."""
+        # Local import — keeps decorators-package init lazy and avoids any
+        # circular-import surprises during module load.
+        from .decorators import registry as decorator_registry, parse_decorator_args
+
+        deco_call = stage.decorator
+        deco = decorator_registry.get(deco_call.name)
+        if deco is None:
+            print(f"cshell2: unknown decorator: @{deco_call.name}", file=sys.stderr)
+            return 127
+
+        kwargs = parse_decorator_args(deco, deco_call.flag_tokens)
+        if kwargs is None:
+            return 2  # parse error already printed by CmdParser
+
+        try:
+            deco.func(deco_call.body, **kwargs)
+        except SystemExit:
+            raise
+        except KeyboardInterrupt:
+            print(f"@{deco.name}: interrupted")
+            return 130
+        except Exception as e:
+            print(f"@{deco.name}: error: {e}", file=sys.stderr)
+            traceback.print_exc()
+            return 1
+        return 0
+
     def _execute_stage(self, stage: Stage, stdin_fd, stdout_fd) -> int:
         """Execute a single stage (no pipe neighbours).
 
         stdin_fd / stdout_fd are file descriptors or None (meaning inherit terminal).
         Returns exit code.
         """
+        if stage.decorator is not None:
+            return self._execute_decorator_stage(stage)
+
         tokens = self._tokenize_stage(stage)
         if not tokens:
             return 0

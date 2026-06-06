@@ -4,7 +4,34 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+
+class DecoratorParseError(ValueError):
+    """Raised when a decorator-prefixed line is malformed.
+
+    Examples that raise:
+
+    * ``@watch ls | grep py`` — operator outside braces (use ``{...}``).
+    * ``@watch {ls`` — unmatched opening brace.
+    * ``@watch {ls} | next`` — text after closing brace (composition is
+      not yet supported in the MVP).
+    """
+
+
+@dataclass
+class DecoratorCall:
+    """A decorator wrapping a parsed pipeline.
+
+    Stored on a :class:`Stage` as ``stage.decorator``.  When set, the
+    stage represents "invoke this decorator with this body" rather than
+    a regular command.
+    """
+    name: str
+    flag_tokens: list[str]
+    body: "Pipeline"
 
 
 @dataclass
@@ -18,17 +45,74 @@ class Stage:
     """One command in a pipeline."""
     text: str
     redirects: list[Redirect] = field(default_factory=list)
+    decorator: DecoratorCall | None = None
 
 
 @dataclass
 class Pipeline:
     stages: list[Stage]
 
+    def run(self, stdin=None, stdout=None, stderr=None) -> int:
+        """Execute the pipeline.  Delegates to the registered executor.
+
+        The executor is registered by :class:`cshell2.shell.Shell` on
+        construction so a decorator body (or any external caller) can do
+        ``pipeline.run()`` without knowing about Shell.  Without a Shell
+        instance, this raises ``RuntimeError`` — Pipeline.run() always
+        runs *inside* a shell.
+        """
+        if _executor is None:
+            raise RuntimeError(
+                "Pipeline.run() called with no executor registered; "
+                "construct a Shell first or call set_pipeline_executor()"
+            )
+        return _executor(self, stdin=stdin, stdout=stdout, stderr=stderr)
+
 
 @dataclass
 class Sequence:
     """Pipelines joined by ;, &&, or ||.  operator is None for the first item."""
     items: list[tuple[str | None, Pipeline]]
+
+
+# ---------------------------------------------------------------------------
+# Pipeline.run() executor indirection
+# ---------------------------------------------------------------------------
+
+_executor: Optional[Callable[..., int]] = None
+
+
+def set_pipeline_executor(fn: Callable[..., int] | None) -> None:
+    """Register the function that runs a pipeline.
+
+    Called by ``Shell.__init__`` with a thin wrapper around
+    ``Shell._run_pipeline``.  Passing ``None`` clears the registration
+    (useful in tests).
+    """
+    global _executor
+    _executor = fn
+
+
+# Late-bound lookup for decorator value-taking-flag information.  The
+# decorator parser needs to know which flags consume the next token (so
+# ``@watch -n 5 ls`` correctly takes ``5`` as ``-n``'s value, leaving
+# ``ls`` as the body).  Registering a callback keeps pipeline.py free of
+# a hard import of cshell2.decorators (which would invert the layering —
+# decorators import the parser, not the other way around).
+_decorator_value_flag_lookup: Optional[Callable[[str, str], bool]] = None
+
+
+def set_decorator_value_flag_lookup(fn: Callable[[str, str], bool] | None) -> None:
+    """Register ``(decorator_name, flag) -> bool`` to identify value-taking flags."""
+    global _decorator_value_flag_lookup
+    _decorator_value_flag_lookup = fn
+
+
+def _flag_takes_value(decorator_name: str, flag: str) -> bool:
+    """True if *flag* on *decorator_name* consumes the next token as its value."""
+    if _decorator_value_flag_lookup is None:
+        return False
+    return _decorator_value_flag_lookup(decorator_name, flag)
 
 
 # ---------------------------------------------------------------------------
@@ -195,11 +279,338 @@ def expand_globs(tokens: list[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Brace-aware scanner (decorator scope)
+# ---------------------------------------------------------------------------
+
+_DECORATOR_NAME_RE = re.compile(r"@([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _find_matching_brace(text: str, open_pos: int) -> int:
+    """Find the index of the ``}`` that closes the ``{`` at *open_pos*.
+
+    The scan respects single-quote regions, double-quote regions
+    (with ``\\``-escapes), bare ``\\{`` / ``\\}`` escapes, and ``${...}``
+    parameter expansion (treated as a self-balanced span).  Returns -1
+    if no matching brace is found.
+    """
+    if open_pos >= len(text) or text[open_pos] != "{":
+        raise ValueError("expected '{' at open_pos")
+
+    depth = 1
+    i = open_pos + 1
+    n = len(text)
+
+    while i < n:
+        ch = text[i]
+
+        # Single-quoted span: every character literal until next '.
+        if ch == "'":
+            i += 1
+            while i < n and text[i] != "'":
+                i += 1
+            i += 1  # skip closing quote (or run off end)
+            continue
+
+        # Double-quoted span: respect \\-escapes, but ${...} inside is
+        # still recognised (and balanced) so the outer counter stays
+        # consistent.  Treat braces inside as literal.
+        if ch == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                c = text[i]
+                if c == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                # ${...} inside double quotes — skip past matching }
+                if c == "$" and i + 1 < n and text[i + 1] == "{":
+                    i = _skip_var_expansion(text, i + 1) + 1
+                    continue
+                i += 1
+            i += 1  # skip closing quote
+            continue
+
+        # Backslash escape outside quotes
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+
+        # ${...} parameter expansion — balanced span
+        if ch == "$" and i + 1 < n and text[i + 1] == "{":
+            i = _skip_var_expansion(text, i + 1) + 1
+            continue
+
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+
+    return -1
+
+
+def _skip_var_expansion(text: str, brace_pos: int) -> int:
+    """Given the position of the ``{`` after a ``$``, return the index
+    of the matching ``}``.  Returns the last index of *text* if unmatched
+    (caller will hit end-of-string and bail).
+    """
+    depth = 1
+    i = brace_pos + 1
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return n - 1
+
+
+def _split_tokens_simple(text: str) -> list[str]:
+    """Whitespace-split *text* into tokens, respecting quotes and escapes.
+
+    Used to chop a decorator's flag prefix into argparse-ready tokens.
+    Quotes are preserved on the boundary character but stripped from the
+    token's interior — which is what argparse expects.
+    """
+    tokens: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] in (" ", "\t"):
+            i += 1
+            continue
+        buf: list[str] = []
+        while i < n and text[i] not in (" ", "\t"):
+            ch = text[i]
+            if ch in ('"', "'"):
+                quote = ch
+                i += 1
+                while i < n and text[i] != quote:
+                    if text[i] == "\\" and quote == '"' and i + 1 < n:
+                        buf.append(text[i + 1])
+                        i += 2
+                    else:
+                        buf.append(text[i])
+                        i += 1
+                i += 1
+                continue
+            if ch == "\\" and i + 1 < n:
+                buf.append(text[i + 1])
+                i += 2
+                continue
+            buf.append(ch)
+            i += 1
+        if buf:
+            tokens.append("".join(buf))
+    return tokens
+
+
+def _extract_decorator_prefix(line: str) -> tuple[DecoratorCall | None, str]:
+    """Try to peel a leading ``@name [flags] body`` from *line*.
+
+    On success returns ``(DecoratorCall, "")`` — the body is parsed
+    here recursively, and there is no remainder for the outer parser
+    in the MVP (composition is rejected).
+
+    Returns ``(None, line)`` if the line does not start with ``@<ident>``.
+
+    Raises :class:`DecoratorParseError` on malformed input.
+    """
+    stripped = line.lstrip()
+    if not stripped.startswith("@"):
+        return None, line
+    m = _DECORATOR_NAME_RE.match(stripped)
+    if not m:
+        return None, line
+
+    name = m.group(1)
+    rest = stripped[m.end():]
+
+    # Walk forward token-by-token: every leading flag-shaped token (and
+    # its value if applicable) belongs to the decorator.  Stop at the
+    # first non-flag-shaped token, which is either '{' (braced body)
+    # or the first command token (un-braced single-command body).
+    flag_tokens: list[str] = []
+    i = 0
+    n = len(rest)
+    while i < n and rest[i] in (" ", "\t"):
+        i += 1
+
+    saw_double_dash = False
+    while i < n:
+        if rest[i] == "{":
+            break
+        # Read one whitespace-bounded token, respecting quotes
+        tok_start = i
+        while i < n and rest[i] not in (" ", "\t"):
+            if rest[i] in ('"', "'"):
+                quote = rest[i]
+                i += 1
+                while i < n and rest[i] != quote:
+                    if rest[i] == "\\" and quote == '"' and i + 1 < n:
+                        i += 2
+                    else:
+                        i += 1
+                i += 1
+                continue
+            if rest[i] == "\\" and i + 1 < n:
+                i += 2
+                continue
+            i += 1
+        tok = rest[tok_start:i]
+
+        if tok and tok[0] not in ("-", "+"):
+            # First non-flag-shaped token — body starts here.
+            i = tok_start
+            break
+
+        # Flag-shaped: keep it for the decorator.
+        flag_tokens.extend(_split_tokens_simple(tok))
+        flag_name = flag_tokens[-1] if flag_tokens else tok
+
+        # Skip whitespace before next token
+        while i < n and rest[i] in (" ", "\t"):
+            i += 1
+
+        # ``--`` terminates flag parsing — everything after is body.
+        if tok == "--":
+            saw_double_dash = True
+            flag_tokens.pop()  # don't pass `--` to the decorator's argparse
+            break
+
+        # If the flag we just consumed takes a value, consume the next
+        # token as its argument and append it to flag_tokens.  This is
+        # what makes ``@watch -n 5 ls`` parse as ``flags=["-n","5"]``,
+        # ``body="ls"``.  ``--flag=value`` is a single token that argparse
+        # already understands; no extra handling needed.
+        if (
+            i < n
+            and rest[i] != "{"
+            and "=" not in flag_name
+            and _flag_takes_value(name, flag_name)
+        ):
+            val_start = i
+            while i < n and rest[i] not in (" ", "\t"):
+                if rest[i] in ('"', "'"):
+                    quote = rest[i]
+                    i += 1
+                    while i < n and rest[i] != quote:
+                        if rest[i] == "\\" and quote == '"' and i + 1 < n:
+                            i += 2
+                        else:
+                            i += 1
+                    i += 1
+                    continue
+                if rest[i] == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                i += 1
+            val_tok = rest[val_start:i]
+            flag_tokens.extend(_split_tokens_simple(val_tok))
+            while i < n and rest[i] in (" ", "\t"):
+                i += 1
+
+    body_text = rest[i:]
+    if saw_double_dash:
+        # Everything after `--` is the body, even if the next token starts
+        # with `-`.  Trust that the body parser handles it.
+        pass
+
+    # Body: braced or bare?
+    body_text_stripped = body_text.lstrip()
+    if body_text_stripped.startswith("{"):
+        # Find the matching brace
+        ws_offset = len(body_text) - len(body_text_stripped)
+        open_pos = ws_offset
+        close_pos = _find_matching_brace(body_text, open_pos)
+        if close_pos < 0:
+            raise DecoratorParseError(
+                f"@{name}: unmatched '{{' in decorator body"
+            )
+        inner = body_text[open_pos + 1:close_pos]
+        remainder = body_text[close_pos + 1:].strip()
+        if remainder:
+            raise DecoratorParseError(
+                f"@{name}: text after closing '}}' (decorator composition is "
+                f"not yet supported; got {remainder!r})"
+            )
+        body_pipeline = _parse_braced_body(inner, decorator_name=name)
+    else:
+        # Bare single-command body — operators are rejected.
+        body_pipeline = _parse_bare_body(body_text_stripped, decorator_name=name)
+
+    return DecoratorCall(name=name, flag_tokens=flag_tokens, body=body_pipeline), ""
+
+
+def _parse_braced_body(inner: str, *, decorator_name: str) -> Pipeline:
+    """Parse the inside of a decorator's ``{...}`` as a pipeline.
+
+    Currently accepts a single pipeline (no top-level ``;``/``&&``/``||``);
+    multi-statement bodies inside braces are deferred — flag clearly so
+    a future relaxation has a focused place to land.
+    """
+    seq = parse_line(inner)
+    if not seq.items:
+        raise DecoratorParseError(
+            f"@{decorator_name}: empty decorator body"
+        )
+    if len(seq.items) > 1 or seq.items[0][0] is not None:
+        raise DecoratorParseError(
+            f"@{decorator_name}: ';', '&&', '||' inside decorator body "
+            f"are not supported yet"
+        )
+    return seq.items[0][1]
+
+
+def _parse_bare_body(text: str, *, decorator_name: str) -> Pipeline:
+    """Parse an un-braced decorator body (no operators allowed)."""
+    if not text:
+        raise DecoratorParseError(
+            f"@{decorator_name}: missing command after decorator"
+        )
+    # Use the same operator splitter so quote/escape handling matches
+    # the rest of the parser exactly.  More than one segment means an
+    # operator is present at the top level — reject with a clear error.
+    pipe_parts = _split_on_operators(text, ["|"])
+    if len(pipe_parts) > 1:
+        raise DecoratorParseError(
+            f"@{decorator_name}: '|' in decorator body without braces "
+            f"(wrap the pipeline in {{ ... }})"
+        )
+    seq_parts = _split_on_operators(text, [";", "&&", "||"])
+    if len(seq_parts) > 1:
+        bad_op = seq_parts[1][0]
+        raise DecoratorParseError(
+            f"@{decorator_name}: {bad_op!r} in decorator body without braces "
+            f"(wrap the statement in {{ ... }})"
+        )
+    cleaned, redirects = _extract_redirects(text)
+    return Pipeline(stages=[Stage(text=cleaned.strip(), redirects=redirects)])
+
+
+# ---------------------------------------------------------------------------
 # Top-level parser
 # ---------------------------------------------------------------------------
 
 def parse_line(line: str) -> Sequence:
     """Parse a raw shell line into a Sequence of Pipelines."""
+    # Decorator-prefix handling: peel off any leading @name [flags] body
+    # before the normal pipeline grammar runs.
+    deco_call, line = _extract_decorator_prefix(line)
+    if deco_call is not None:
+        # The decorator wrapped the whole line; build a one-stage Pipeline
+        # whose stage is "invoke this decorator".
+        stage = Stage(text=line.strip(), redirects=[], decorator=deco_call)
+        return Sequence(items=[(None, Pipeline(stages=[stage]))])
+
     seq_parts = _split_on_operators(line, [";", "&&", "||"])
     items: list[tuple[str | None, Pipeline]] = []
 
