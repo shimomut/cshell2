@@ -11,7 +11,6 @@ unambiguous and the construct doesn't collide with POSIX command names.
 @watch -n 1 {df -h | grep abc}
 @time make build                       # future: not yet shipped
 @retry -n 3 flaky-test                 # future: not yet shipped
-@every -i 5s {curl https://…/health}   # future: not yet shipped
 ```
 
 **Status:** `@watch` works end-to-end and `@deco {body} | next`
@@ -242,7 +241,6 @@ Examples:
 @watch -n 1 {df -h}           # one flag, braced pipeline (also fine)
 @watch -n 1 --no-clear ls     # multiple flags
 @retry -n 3 flaky-test        # positional-style count via -n
-@every -i 5s {curl https://…} # interval as a string the decorator parses
 ```
 
 **Where do the decorator's flags end and the pipeline begin?** First
@@ -310,8 +308,8 @@ Executor story
 Three things this unlocks:
 
 1. **Decorator output as a stream stage** —
-   `@every -i 5s {curl …} | jq '.status'` continuously processes
-   results.
+   `@watch --no-clear {curl …} | jq '.status'` continuously
+   processes results.
 2. **Redirects bind to whichever scope is braced** —
    `@time {make && ./run} > build.log` times the whole chain and
    redirects together; `@time {make} > build.log` times only `make`
@@ -528,14 +526,18 @@ Future starter set, ordered by how clearly they motivate the syntax:
 |-----------|---------|
 | `@time` | print wall/user/sys time after the pipeline finishes |
 | `@retry [-n N]` | re-run on non-zero exit, up to N times |
-| `@every -i INTERVAL` | like `@watch` but doesn't clear; logs each run |
 | `@quiet [--stderr]` | discard stdout (and optionally stderr) |
-| `@bg` | run pipeline in a fresh background context (replaces `&`) |
-| `@as NAME` | run pipeline in a named context (creating it if needed) |
+| `@bg [--as NAME]` | run pipeline in a background context slot (replaces `&`); auto-named if `--as` omitted |
 
-`@bg` and `@as` are interesting because they tie into cshell2's existing
+`@bg` is interesting because it ties into cshell2's existing
 context-multiplexing primitives — a decorator becomes the natural
-surface for "run this pipeline in a different process slot."
+surface for "run this pipeline in a different process slot."  The
+named and anonymous cases are the same decorator: omit `--as` for a
+fresh auto-named slot (`bg-1`, `bg-2`, …), pass `--as build` to
+target/create a context by name.  A positional NAME can't be used
+because the decorator parser stops at the first non-flag token and
+treats it as the start of the body (see [Args syntax](#resolved-ux-questions)),
+so the name flows through `--as` / `-n`.
 
 ## Resolved UX questions
 
@@ -641,9 +643,9 @@ follow-up items."
   Allowing it means letting the outer-sequence parser treat the
   decorator-stage as one statement; the parser already isolates the
   decorator scope so the additional change is small.
-- **More built-ins** (`@time`, `@retry`, `@every`, `@quiet`, `@bg`,
-  `@as`) — each gets its own `cshell2/decorators/<name>.py` and a
-  call to `enable(...)` in `_register_builtins`.
+- **More built-ins** (`@time`, `@retry`, `@quiet`, `@bg`) —
+  each gets its own `cshell2/decorators/<name>.py` and a call to
+  `enable(...)` in `_register_builtins`.
 - **Reload integration** — `reload` should call
   `decorator_registry.clear_user_decorators()` once user decorators
   start landing in `~/.cshell2/decorators/`.
