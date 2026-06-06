@@ -550,7 +550,7 @@ def _extract_decorator_prefix(line: str) -> tuple[DecoratorCall | None, str]:
     # the MVP.  ``;``/``&&``/``||`` after a decorator scope are rejected so
     # the outer-sequence interaction stays well-defined for a follow-up
     # commit (see "Composing decorators inside larger pipelines" in
-    # doc/enhancements.md).
+    # doc/decorators.md).
     remainder_stripped = remainder_after.strip()
     if remainder_stripped:
         # Use the same operator splitter as the rest of the parser so quote

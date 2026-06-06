@@ -2,7 +2,7 @@
 
 A decorator is a token of the form ``@name [flags]`` at the start of a
 line that wraps the rest of the line as a pipeline.  See
-``doc/enhancements.md`` for the full design.
+``doc/decorators.md`` for the full design.
 
 Built-in decorators are siblings of this module (e.g.
 ``cshell2.decorators.watch``).  Each module exposes ``register()`` which
