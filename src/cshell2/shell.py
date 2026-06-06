@@ -2426,6 +2426,7 @@ class Shell:
                 old_stdout = sys.stdout
                 old_stdin = sys.stdin
                 old_stderr = sys.stderr
+                exit_code = 0
                 try:
                     if stdout_override:
                         sys.stdout = io.TextIOWrapper(stdout_override)
@@ -2440,9 +2441,11 @@ class Shell:
                     raise
                 except TypeError as e:
                     print(f"{command_name}: {e}")
+                    exit_code = 1
                 except Exception as e:
                     print(f"{command_name}: error: {e}")
                     traceback.print_exc()
+                    exit_code = 1
                 finally:
                     sys.stdout = old_stdout
                     sys.stdin = old_stdin
@@ -2458,12 +2461,13 @@ class Shell:
                             stderr_override.close()
                         except Exception:
                             pass
+                return exit_code
             elif IS_WINDOWS:
                 # Windows lacks the PTY-backed slot used for thread-based
                 # context switching, so run the Python command synchronously.
                 # passthrough_run/passthrough_input fall back to direct
                 # subprocess.run/input since no slot is registered.
-                self._run_python_command_sync(cmd, command_name, args)
+                return self._run_python_command_sync(cmd, command_name, args)
             else:
                 # Interactive Python command — run in a thread so Ctrl+] works.
                 ctx = self.context_manager.current()
@@ -2475,17 +2479,18 @@ class Shell:
                     if ctx is not None:
                         ctx.process_slot = slot
                     self._handle_switch()
-                elif result == "interrupted":
+                    return 0
+                if result == "interrupted":
                     print(f"{command_name}: interrupted")
-                else:
-                    slot.deactivate()
-                    exc = slot._exit_exception
-                    if isinstance(exc, SystemExit):
-                        raise exc
-                    if exc is not None and not isinstance(exc, KeyboardInterrupt):
-                        print(f"{command_name}: error: {exc}")
-                        traceback.print_exc()
-            return 0
+                    return 130
+                slot.deactivate()
+                exc = slot._exit_exception
+                if isinstance(exc, SystemExit):
+                    raise exc
+                if exc is not None and not isinstance(exc, KeyboardInterrupt):
+                    print(f"{command_name}: error: {exc}")
+                    traceback.print_exc()
+                return slot.exit_code or 0
 
         # External command
         if has_redirects:
@@ -2525,10 +2530,9 @@ class Shell:
                         pass
             return p.returncode
         else:
-            self._execute_external(command_name, args)
-            return 0
+            return self._execute_external(command_name, args)
 
-    def _run_python_command_sync(self, cmd, command_name: str, args: list[str]) -> None:
+    def _run_python_command_sync(self, cmd, command_name: str, args: list[str]) -> int:
         """Invoke a Python command on the main thread (Windows path)."""
         try:
             cmd.invoke(args)
@@ -2536,13 +2540,17 @@ class Shell:
             raise
         except KeyboardInterrupt:
             print(f"{command_name}: interrupted")
+            return 130
         except TypeError as e:
             print(f"{command_name}: {e}")
+            return 1
         except Exception as e:
             print(f"{command_name}: error: {e}")
             traceback.print_exc()
+            return 1
+        return 0
 
-    def _execute_external_windows(self, command_name: str, args: list[str]) -> None:
+    def _execute_external_windows(self, command_name: str, args: list[str]) -> int:
         """Run an external command on the real console (Windows path).
 
         Without ConPTY-based multiplexing, the child simply inherits the
@@ -2553,21 +2561,23 @@ class Shell:
         env = dict(os.environ)
         cwd = os.getcwd()
         try:
-            subprocess.run(argv, env=env, cwd=cwd)
+            return subprocess.run(argv, env=env, cwd=cwd).returncode
         except FileNotFoundError:
             try:
-                subprocess.run(["cmd", "/c", *argv], env=env, cwd=cwd)
+                return subprocess.run(["cmd", "/c", *argv], env=env, cwd=cwd).returncode
             except FileNotFoundError:
                 print(f"cshell2: command not found: {command_name}")
+                return 127
             except OSError as e:
                 print(f"cshell2: {e}")
+                return 1
         except OSError as e:
             print(f"cshell2: {e}")
+            return 1
 
-    def _execute_external(self, command_name: str, args: list[str]) -> None:
+    def _execute_external(self, command_name: str, args: list[str]) -> int:
         if IS_WINDOWS:
-            self._execute_external_windows(command_name, args)
-            return
+            return self._execute_external_windows(command_name, args)
 
         ctx = self.context_manager.current()
 
@@ -2580,10 +2590,10 @@ class Shell:
             )
         except FileNotFoundError:
             print(f"cshell2: command not found: {command_name}")
-            return
+            return 127
         except OSError as e:
             print(f"cshell2: {e}")
-            return
+            return 1
 
         slot.activate()
         slot.replay_buffer()  # flush any output that arrived before activate()
@@ -2594,13 +2604,15 @@ class Shell:
             ctx.process_slot = slot
             slot.deactivate()
             self._handle_switch()
-        elif result == "exited":
-            slot.deactivate()
-            if ctx is not None:
-                ctx.process_slot = None
-            exit_code = slot.exit_code
-            if exit_code and exit_code != 0:
-                print(f"\n[Process exited with code {exit_code}]")
+            return 0
+        # result == "exited"
+        slot.deactivate()
+        if ctx is not None:
+            ctx.process_slot = None
+        exit_code = slot.exit_code or 0
+        if exit_code != 0:
+            print(f"\n[Process exited with code {exit_code}]")
+        return exit_code
 
     def _enter_forwarding_mode(self, slot: ProcessSlot, force_redraw: bool = False) -> str:
         """Forward I/O between real terminal and subprocess PTY.
