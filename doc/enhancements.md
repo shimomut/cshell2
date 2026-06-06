@@ -10,7 +10,23 @@ For known limitations of existing features, see [limitations.md](limitations.md)
 
 ## Pipeline decorators
 
-**Status:** design draft — not yet implemented.
+**Status:** MVP shipped — `@watch` works end-to-end. Extensions listed
+below (stacking, composition, more built-ins) are future work.
+
+**Shipped (MVP):**
+
+- Parser support for `@name [flags] body` and `@name [flags] {body}`
+  (`pipeline.py::_extract_decorator_prefix`, `_find_matching_brace`).
+- Decorator registry mirroring `CommandRegistry` / `VarRegistry`
+  (`cshell2/decorators/__init__.py`).
+- `Pipeline.run()` indirection so decorator bodies can re-enter
+  execution (`pipeline.py::set_pipeline_executor`).
+- Dispatch in `Shell._execute_decorator_stage`.
+- `@watch` built-in (`cshell2/decorators/watch.py`).
+- `@<TAB>` completion: decorator-name list, decorator-flag picker, and
+  body-command delegation through the existing recipe / argcomplete /
+  cobra fallback chain.
+- 32 unit / integration tests in `tests/test_decorators.py`.
 
 A **decorator** is a token of the form `@name` (with optional shell-style
 flags) at the start of a line that wraps the rest of the line as a
@@ -21,9 +37,9 @@ unambiguous and the construct doesn't collide with POSIX command names.
 ```
 @watch ls
 @watch -n 1 {df -h | grep abc}
-@time make build
-@retry -n 3 flaky-test
-@every -i 5s {curl https://example.com/health}
+@time make build                       # future: not yet shipped
+@retry -n 3 flaky-test                 # future: not yet shipped
+@every -i 5s {curl https://…/health}   # future: not yet shipped
 ```
 
 ### Prior art: IPython magics
@@ -470,13 +486,18 @@ execution path runs. It exposes at least:
 iteration; the decorator decides whether to loop again or propagate.
 (`@watch` would propagate; `@retry` would catch and re-run.)
 
-### Built-in decorators we'd ship
+### Built-in decorators
 
-Starter set, ordered by how clearly they motivate the syntax:
+Shipped:
 
 | Decorator | Purpose |
 |-----------|---------|
 | `@watch [-n SEC] [--no-clear]` | re-run pipeline on a timer |
+
+Future starter set, ordered by how clearly they motivate the syntax:
+
+| Decorator | Purpose |
+|-----------|---------|
 | `@time` | print wall/user/sys time after the pipeline finishes |
 | `@retry [-n N]` | re-run on non-zero exit, up to N times |
 | `@every -i INTERVAL` | like `@watch` but doesn't clear; logs each run |
@@ -488,52 +509,52 @@ Starter set, ordered by how clearly they motivate the syntax:
 context-multiplexing primitives — a decorator becomes the natural
 surface for "run this pipeline in a different process slot."
 
-### UX questions to nail down
+### UX questions
 
-1. ~~**Args syntax** — Python kwargs vs. shell-style?~~ **Resolved:**
-   shell-style flags via the existing `arg(...)` helper. Matches
-   IPython precedent and reuses `OptionsCompleter` directly.
-2. ~~**Scope of the wrapped pipeline.**~~ **Resolved:** braces
-   required whenever the wrapped pipeline contains a shell operator;
-   bare single-command form allowed for the simple case.
-3. ~~**Bracket choice.**~~ **Resolved (provisionally):** `{...}`,
-   position-restricted to "after `@decorator [flags]`" so it doesn't
-   preempt future brace expansion. `(...)` is the fallback if that
-   constraint feels fragile in practice.
-4. **Stacking direction** — Python convention is outer-first (top
-   decorator wraps last). Match that, or invert because shell users
-   read left-to-right "what happens first"?
-5. ~~**Where does decorator output go relative to pipeline output?**~~
-   **Resolved by in-process pipelines (commit `047086b`):** decorator
-   output goes through `sys.stdout` like any other Python command. In
-   a piped context (`@time {make} | tee log`) it follows the pipe; in
-   a bare context it goes to the terminal. Convention only:
-   diagnostic lines (`@time`'s timing summary, `@retry`'s "attempt
-   2/3 failed") should go to `sys.stderr` so they don't poison
-   pipelines, but that's a per-decorator style guideline, not a
-   framework rule.
-6. **Interaction with `;` and `&&` *outside* the braces.** `@watch ls;
-   pwd` — the `;` is outside the wrapped pipeline (no braces, so the
-   decorator owns just `ls`), and `pwd` runs once after the watcher
-   exits. Worth a parser test to make sure that reads naturally.
-7. **Redirects and the decorator.** `@time {make} > build.log` — does
-   `@time`'s output go into `build.log` too? Probably no: redirects
-   bind to the braced pipeline, not the decorator. Decorator output
-   goes to the original stdio.
-8. **Ctrl+] context switching while a decorator is looping.** `@watch`
-   running `ls` should be backgroundable like any other long-running
-   command. Does the decorator body run on a `PythonCommandSlot`?
-   (Probably yes — it's a Python command in everything but syntax.)
-9. **History.** Does `@watch ls` get stored in history as written, or
-   does each iteration land in history? (Almost certainly: stored once
-   as written.)
-10. **Reload semantics.** Does `reload` re-register user decorators
-    alongside commands and vars? Same lifecycle as
-    `clear_user_commands()`.
-11. **Error messages.** `@watche ls` — typo. Do we suggest `@watch`?
-    Plain command typos already get a "command not found" via the
-    system shell; for decorators we own the lookup, so we can be
-    friendlier.
+1. ~~**Args syntax**~~ **Resolved:** shell-style flags via the existing
+   `arg(...)` helper. Matches IPython precedent and reuses
+   `OptionsCompleter` directly.
+2. ~~**Scope of the wrapped pipeline.**~~ **Resolved:** braces required
+   whenever the wrapped pipeline contains a shell operator; bare
+   single-command form allowed for the simple case.
+3. ~~**Bracket choice.**~~ **Resolved:** `{...}`, position-restricted
+   to "after `@decorator [flags]`" so it doesn't preempt future brace
+   expansion.
+4. ~~**Where does decorator output go relative to pipeline output?**~~
+   **Resolved:** decorator body output goes through `sys.stdout` like
+   any other Python command (the in-process pipeline routes it
+   through the thread-local stdio installed in `Shell.__init__`).
+   Convention only: diagnostic lines should go to `sys.stderr` so
+   they don't poison piped output.
+5. ~~**Reload semantics.**~~ **Resolved:**
+   `decorator_registry.mark_builtins()` runs alongside the existing
+   command/var calls in `Shell.__init__`; `clear_user_decorators()`
+   exists for parity even though `reload` doesn't yet call it.
+6. **Stacking direction** *(future)* — Python convention is
+   outer-first (top decorator wraps last). Worth confirming with a
+   real second built-in (`@time @watch {ls}`).
+7. **Interaction with `;` and `&&` *outside* the braces** *(future)* —
+   `@watch ls; pwd` should mean "watch `ls`, then once it exits, run
+   `pwd`." The MVP rejects this with a parse error
+   (`@watch: ';' in decorator body without braces`); relaxing it
+   needs a small parser change to let the outer `_split_on_operators`
+   path see the decorator-call as one statement.
+8. **Redirects and the decorator** *(future)* — `@time {make} > build.log`
+   — should `@time`'s timing line go into `build.log` too? Current
+   behavior: the redirect binds to the body's only stage, so timing
+   would print to terminal. Likely correct; codify with a test once
+   `@time` exists.
+9. **Ctrl+] context switching while a decorator is looping** *(future)* —
+   `@watch ls` should be backgroundable like any other long-running
+   command. The MVP doesn't run decorator bodies on a
+   `PythonCommandSlot`, so `Ctrl+]` won't suspend cleanly during
+   `@watch`. Fix: route decorator dispatch through the existing
+   slot-based execution path the way standalone Python commands are.
+10. **History** *(future)* — `@watch ls` gets stored in history as
+    written, not per-iteration. Add a test once we settle on the
+    behavior; almost certainly the right default.
+11. **Error messages** *(future)* — `@watche ls` could suggest
+    `@watch`. We own the lookup, so suggestions are cheap.
 
 ### Non-goals (for the first cut)
 
@@ -550,38 +571,69 @@ surface for "run this pipeline in a different process slot."
   may extend it later, but reserving it now would foreclose brace
   expansion.
 
-### Implementation sketch (to flesh out after design lock)
+### What's shipped
 
-1. **Tokenizer change** in `pipeline.py`: at line start, while the next
-   token is `@<ident>`, peel off the decorator name plus any following
-   flag tokens its argparse spec consumes; push onto a decorator
-   stack. Then check for an opening `{` — if present, parse a
-   balanced-brace subexpression as the wrapped pipeline; otherwise
-   consume a single command (and reject any pipeline operator with a
-   clear error).
-2. **`decorators.py` module** mirroring `commands.py` / `variables.py`:
-   `Decorator` ABC, `DecoratorRegistry`, module-level `registry`
-   singleton, `@registry.decorator(...)` API. Reuses `arg(...)` from
-   `commands.py` directly — no new helper.
-3. **Pipeline AST handle**: `pipeline.Pipeline` already exists as a
-   dataclass (since the in-process pipelines work in commit
-   `047086b`). The remaining work is to expose a `.run(stdin=...,
-   stdout=..., stderr=...) -> int` method on it that delegates to a
-   helper extracted from `Shell._execute_pipeline`. The execution
-   model is unchanged; we're just giving it a public entry point so
-   decorators can call it.
-4. **Completion glue** in `completion.py`: detect the `@` prefix in
-   `CompletionContext` and dispatch to a `DecoratorNameCompleter` for
-   the name, then to the decorator's `OptionsCompleter` for its flags.
-   Once past the decorator's flags (and inside an open `{` if
-   present), strip the decorator portion from `ctx.line`/`ctx.args`
-   and delegate to the normal completion pipeline.
-5. **Built-in decorators** in `cshell2/decorators/` (parallel to
-   `recipes/`): `watch.py`, `time.py`, `retry.py`, etc.
-   `mark_builtins()` analog to keep them across `reload`.
-6. **Tests**: `tests/test_decorators.py` for parsing edge cases
-   (stacked, with flags, with braced pipelines, with redirects inside
-   and outside braces, with continuation lines, with `--` terminator,
-   with `@deco {...} | next-stage`, plus brace-handling cases:
-   `{echo "}"}`, `{echo '{' }`, `{echo ${abc}}`, `{echo "${abc}"}`,
-   `{echo \}}`), plus completion tests for the `@`-token codepath.
+1. **Parser** in [pipeline.py](../src/cshell2/pipeline.py):
+   `_extract_decorator_prefix` peels `@name [flags] body` before the
+   normal pipeline grammar runs; `_find_matching_brace` honours
+   single quotes, double quotes (with `\\`-escapes), `${...}` var
+   spans, and bare `\\{` / `\\}`. The flag-extraction loop respects
+   the decorator's argparse spec via a late-bound callback so
+   `@watch -n 5 ls` parses as `flags=["-n", "5"]`, `body="ls"`.
+2. **Registry** in
+   [cshell2/decorators/__init__.py](../src/cshell2/decorators/__init__.py):
+   `Decorator` dataclass, `DecoratorRegistry`, module-level `registry`
+   singleton, `@registry.decorator(...)` API with three call forms
+   matching `CommandRegistry.command(...)`. Reuses `arg(...)`,
+   `CmdParser`, `_build_completers`, `_build_help_text` from
+   `commands.py` — no parallel helpers. `enable("*")` /
+   search-path mechanism mirrors `cshell2/recipes/`.
+3. **`Pipeline.run()` indirection** in
+   [pipeline.py](../src/cshell2/pipeline.py): `Pipeline.run(stdin=,
+   stdout=, stderr=) -> int` calls into a registered executor. The
+   `Shell.__init__` flow registers
+   `Shell._run_pipeline_from_decorator`, which currently ignores the
+   stdio kwargs (decorator bodies inherit the decorator's stdio,
+   which is already correctly routed by the thread-local stdio).
+4. **Dispatch** in
+   [shell.py::_execute_decorator_stage](../src/cshell2/shell.py):
+   resolves the decorator, runs its argparse, calls
+   `deco.func(body_pipeline, **kwargs)`. `SystemExit` propagates;
+   `KeyboardInterrupt` exits 130; other exceptions print and exit 1;
+   unknown decorator name returns 127.
+5. **`@watch` built-in** in
+   [cshell2/decorators/watch.py](../src/cshell2/decorators/watch.py)
+   — TTY-aware screen-clear, `BrokenPipeError` graceful exit.
+6. **`@<TAB>` completion** in
+   [shell.py::_maybe_decorator_completion](../src/cshell2/shell.py):
+   three cases — decorator-name list, decorator-flag picker via
+   `OptionsCompleter`, and body-command delegation through the
+   normal command-completion path.
+7. **Tests** in
+   [tests/test_decorators.py](../tests/test_decorators.py): 32 tests
+   covering registry, parser (all brace-handling cases from the
+   "Brace handling" subsection plus error-path coverage), executor
+   indirection, dispatch, and completion.
+
+### What's left for follow-up commits
+
+- **Stacking** (`@time @watch {ls}`) — the parser currently peels one
+  decorator. Loop in `_extract_decorator_prefix` and chain calls in
+  dispatch.
+- **Composition** (`@deco {...} | next-stage`) — currently rejected
+  with `text after closing '}'`. Allowing it means letting the outer
+  pipeline parser consume the decorator-stage as one stage, then
+  resuming with `_split_on_operators` on the remainder.
+- **Decorator inside a multi-stage outer pipeline** — the dispatch
+  helper only handles single-stage `_execute_pipeline` calls; the
+  multi-stage path of `_execute_pipeline` doesn't check for
+  `stage.decorator`. Wire it up if/when composition lands.
+- **More built-ins** (`@time`, `@retry`, `@every`, `@quiet`, `@bg`,
+  `@as`) — each gets its own `cshell2/decorators/<name>.py` and a
+  call to `enable(...)` in `_register_builtins`.
+- **Reload integration** — `reload` should call
+  `decorator_registry.clear_user_decorators()` once user decorators
+  start landing in `~/.cshell2/decorators/`.
+- **Slot-aware `@watch`** — route long-running decorator bodies
+  through `PythonCommandSlot` so `Ctrl+]` backgrounding works the
+  same as for regular Python commands.

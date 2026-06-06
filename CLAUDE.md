@@ -75,6 +75,10 @@ change.
 │  Recipes (recipes/)                                 │
 │  └── Completion recipes for external commands      │
 ├─────────────────────────────────────────────────────┤
+│  Decorators (decorators/)                           │
+│  ├── @name [flags] body — wrap pipeline at runtime │
+│  └── Built-ins: @watch                             │
+├─────────────────────────────────────────────────────┤
 │  User Config (~/.cshell2/config.py)                 │
 │  ├── Custom command definitions                    │
 │  └── Custom completer definitions                  │
@@ -605,6 +609,57 @@ enable("my_tool")      # found in ~/.cshell2/recipes/ or /team/shared/recipes/
 
 `recipe_search_path` is a plain `list[Path]` and can be read or manipulated directly when finer control is needed.
 
+### decorators/ — Pipeline Decorators
+
+A **decorator** is a token of the form `@name [flags]` at the start of a line that wraps the rest of the line as a pipeline and modifies how that pipeline is run. The leading `@` makes the syntax visually distinct from regular commands so parsing priority is unambiguous and the construct doesn't collide with POSIX command names.
+
+```
+@watch ls                              # bare single-command body
+@watch -n 1 {df -h | grep abc}         # braced body required when operators appear
+@watch --no-clear {tail -f log}
+```
+
+**Scope rule.** Any pipeline that contains `|`, `;`, `&&`, `||`, or a redirect must be enclosed in `{...}`. The single-command form is allowed without braces. Operators outside braces raise `DecoratorParseError` at parse time with a message pointing at the offending operator.
+
+**Brace handling.** The brace-balancer in `pipeline.py::_find_matching_brace` shares a single scan with the existing quote/escape tracker and handles three things so braces inside the body don't terminate the scope:
+
+1. Single-quoted regions: every char (including `}`) is literal.
+2. Double-quoted regions: `"}"` is literal; `${...}` inside is still a balanced span.
+3. `${name}` parameter expansion: matched as its own balanced `{...}` so the inner closing brace doesn't decrement the outer counter.
+4. Backslash escapes: `\{` and `\}` are literal.
+
+**Authoring a decorator:**
+
+```python
+from cshell2.commands import arg
+from cshell2.decorators import registry as decorator_registry
+
+@decorator_registry.decorator(
+    name="watch",
+    help="Repeatedly run a pipeline until interrupted.",
+    params=[
+        arg("-n", "--interval", type=float, default=2.0, metavar="SEC"),
+        arg("--no-clear", action="store_true"),
+    ],
+)
+def watch(pipeline, *, interval, no_clear):
+    while True:
+        if not no_clear and sys.stdout.isatty():
+            sys.stdout.write("\x1b[2J\x1b[H")
+        pipeline.run()
+        time.sleep(interval)
+```
+
+The decorator function receives a `Pipeline` (the parsed AST of the wrapped body) and the parsed flag namespace as kwargs. `pipeline.run()` re-enters `Shell._execute_pipeline` so redirects, pipes, and Python-stage routing all work the same as at the top level.
+
+**Built-in decorators:** `@watch` (in `cshell2/decorators/watch.py`).
+
+**Loading:** `Shell._register_builtins` calls `enable_decorators("watch")` on construction. The `enable("*")` helper, search-path mechanism, and `add_decorator_path()` mirror `cshell2/recipes/`.
+
+**Caveats inherited from in-process Python pipelines.** A decorator body is a Python command in everything but syntax, so the constraints from `doc/limitations.md` ("Python commands in pipelines — caveats of the in-process model") apply: nested `subprocess.run` writes to the real terminal unless given `stdout=sys.stdout`, pure-CPU loops can't be `Ctrl+C`-interrupted in a piped context, and `passthrough_run`/`passthrough_input` raise `RuntimeError` from a piped decorator.
+
+See `doc/enhancements.md` under "Pipeline decorators" for the full design rationale, IPython-magic precedent, and the future-extension list (stacking, `@deco {...} | next` composition, more built-ins).
+
 ### User Config (~/.cshell2/config.py)
 
 Users define custom commands and completers here. Loaded at shell startup; reloadable with the `reload` command.
@@ -657,27 +712,31 @@ cshell2/
 │       ├── history.py          # history storage and search
 │       ├── lineedit.py         # DIY raw-mode line editor, History, TAB completion glue
 │       ├── parsing.py          # line tokenization, quote handling, var expansion
-│       ├── pipeline.py         # quote-aware operator parser: parse_line(), expand_globs()
+│       ├── pipeline.py         # quote-aware operator parser: parse_line(), expand_globs(), decorator extraction, Pipeline.run()
 │       ├── process.py          # PTY subprocess slots, output buffering, terminal-mode tracking
 │       ├── prompt.py           # set_prompt / get_prompt_func / default_prompt
 │       ├── tui.py              # InlinePicker, InlineMultiPicker, InlineArgPrompt
-│       └── recipes/
-│           ├── __init__.py     # enable(*names) helper
-│           ├── aws.py
-│           ├── df.py
-│           ├── du.py
-│           ├── find.py
-│           ├── git.py
-│           ├── grep.py
-│           ├── kill.py
-│           ├── ls.py
-│           ├── make.py
-│           ├── ssh.py
-│           └── tail.py
+│       ├── recipes/
+│       │   ├── __init__.py     # enable(*names) helper
+│       │   ├── aws.py
+│       │   ├── df.py
+│       │   ├── du.py
+│       │   ├── find.py
+│       │   ├── git.py
+│       │   ├── grep.py
+│       │   ├── kill.py
+│       │   ├── ls.py
+│       │   ├── make.py
+│       │   ├── ssh.py
+│       │   └── tail.py
+│       └── decorators/
+│           ├── __init__.py     # Decorator/DecoratorRegistry/enable(*names)
+│           └── watch.py        # @watch built-in
 └── tests/
     ├── test_commands.py
     ├── test_completion.py
     ├── test_context.py
+    ├── test_decorators.py
     ├── test_parsing.py
     ├── test_pipeline.py
     ├── test_process.py
@@ -688,7 +747,9 @@ cshell2/
 ~/.cshell2/
 ├── config.py           # user configuration (commands, completers, recipes)
 ├── history             # persistent command history
-└── recipes/            # user-defined recipes (loaded by enable("<name>"))
+├── recipes/            # user-defined recipes (loaded by enable("<name>"))
+│   └── <name>.py       # must define register()
+└── decorators/         # user-defined decorators (loaded by enable("<name>"))
     └── <name>.py       # must define register()
 ```
 
@@ -758,3 +819,5 @@ The thread-local routing (`_ThreadLocalStdin` / `_ThreadLocalStdout` / `_ThreadL
 8. **Python-backed variables mirror the command registry pattern** — `Var` subclasses handle `get`/`set` logic; a single logical name (e.g. `aws_region`) can drive multiple `os.environ` keys or arbitrary side effects. The `var` command and bare `NAME=VALUE` assignment dispatch through `VarRegistry` before falling back to plain env writes, and `$NAME` / `${NAME}` expansion does the same lookup in reverse — so registered Vars are read- and write-symmetric with `os.environ` and a Python-backed variable behaves transparently like an OS variable on the command line. `VarCompleter` handles `=`-split completion locally without touching the global tokenizer.
 
 9. **One reader for real stdin** — when a Python command spawns an interactive subprocess, the child must not inherit fd 0 directly. The main forwarding thread is already reading stdin in raw mode; a second reader (the subprocess) splits keystrokes unpredictably between them. `passthrough_run` enforces the rule by allocating a slot-owned PTY for the child, so the chain stays `stdin → main → master → subprocess`. This is the same architecture `ProcessSlot` uses for external commands; `passthrough_run` extends it to subprocesses launched from inside a `PythonCommandSlot`.
+
+10. **Decorators as a sigil-prefixed grammar, not a built-in command** — `@name [flags] body` is parsed *before* the normal pipeline grammar runs (`pipeline.py::_extract_decorator_prefix`), so the syntax is unambiguous to the parser and can never collide with a POSIX command name. Borrowed from IPython's magics (`%name args`); see `doc/enhancements.md` under "Pipeline decorators". The `{...}` body delimiter is required when the wrapped pipeline contains operators, which makes the decorator's scope visible at a glance and side-steps the `watch -n 5 ls | grep abc` ambiguity that POSIX `watch` is famous for. `Pipeline.run()` lets a decorator body re-enter `Shell._execute_pipeline` so redirects/pipes/Python-stage routing all work the same as at the top level.
