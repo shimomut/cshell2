@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 def _fg(r: int, g: int, b: int) -> str:
@@ -15,36 +15,28 @@ def _bg(r: int, g: int, b: int) -> str:
 
 @dataclass
 class ColorScheme:
-    # Prompt
-    prompt_context: tuple[int, int, int] = (0, 188, 212)
-    prompt_path: tuple[int, int, int] = (100, 149, 237)
-    prompt_time: tuple[int, int, int] = (80, 200, 100)
-    prompt_bg_count: tuple[int, int, int] = (229, 192, 123)
-    # Picker
+    # List rows — picker (and any future scrollable list widget)
     picker_row_bg: tuple[int, int, int] = (68, 68, 68)
     picker_row_fg: tuple[int, int, int] = (220, 220, 220)
     picker_sel_bg: tuple[int, int, int] = (0, 95, 135)
     picker_sel_fg: tuple[int, int, int] = (255, 255, 255)
-    picker_scroll_thumb: tuple[int, int, int] = (128, 128, 128)
-    picker_scroll_track: tuple[int, int, int] = (48, 48, 48)
-    # Status bar (bottom line shown while TUI is active)
+    # Scroll bar — shared by picker and @watch's body scroll
+    scroll_thumb: tuple[int, int, int] = (128, 128, 128)
+    scroll_track: tuple[int, int, int] = (48, 48, 48)
+    # Status bars — picker bottom hint bar + @watch header/footer
     statusbar_bg: tuple[int, int, int] = (30, 30, 30)
-    statusbar_fg: tuple[int, int, int] = (130, 130, 130)
+    statusbar_fg: tuple[int, int, int] = (200, 200, 200)
 
 
 SCHEMES: dict[str, ColorScheme] = {
     "dark": ColorScheme(),
     "light": ColorScheme(
-        prompt_context=(0, 150, 170),
-        prompt_path=(30, 80, 200),
-        prompt_time=(30, 140, 60),
-        prompt_bg_count=(180, 100, 0),
         picker_row_bg=(220, 220, 220),
         picker_row_fg=(30, 30, 30),
         picker_sel_bg=(0, 100, 180),
         picker_sel_fg=(255, 255, 255),
-        picker_scroll_thumb=(160, 160, 160),
-        picker_scroll_track=(200, 200, 200),
+        scroll_thumb=(160, 160, 160),
+        scroll_track=(200, 200, 200),
         statusbar_bg=(195, 210, 225),
         statusbar_fg=(60, 60, 80),
     ),

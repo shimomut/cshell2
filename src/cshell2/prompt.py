@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING, Callable
 if TYPE_CHECKING:
     from .context import ContextManager
 
-from .colors import _fg, get_color_scheme
-
 PromptFunc = Callable[["ContextManager"], str]
 
 _prompt_func: PromptFunc | None = None
@@ -31,19 +29,15 @@ def get_prompt_func() -> PromptFunc:
 
 
 def default_prompt(context_manager: "ContextManager") -> str:
-    """Default prompt: [context] parent/cwd HH:MM:SS [bg:N]> with ANSI colors."""
-    s = get_color_scheme()
-    CYAN_BOLD = "\033[1m" + _fg(*s.prompt_context)
-    BLUE_BOLD = "\033[1m" + _fg(*s.prompt_path)
-    GREEN = _fg(*s.prompt_time)
-    YELLOW = _fg(*s.prompt_bg_count)
-    RESET = "\033[0m"
+    """Default prompt: [context] parent/cwd HH:MM:SS [bg:N]> in plain text.
 
+    Customize colors and layout by passing your own function to set_prompt().
+    """
     parts = []
 
     ctx = context_manager.current()
     if ctx and ctx.name != "default":
-        parts.append(f"{CYAN_BOLD}[{ctx.name}]{RESET}")
+        parts.append(f"[{ctx.name}]")
 
     cwd = os.getcwd()
     home = os.path.expanduser("~")
@@ -69,8 +63,8 @@ def default_prompt(context_manager: "ContextManager") -> str:
     short_path = short_path.replace(os.sep, "/") if os.altsep else short_path
 
     timestamp = datetime.now().strftime("%H:%M:%S")
-    parts.append(f"{BLUE_BOLD}{short_path}{RESET}")
-    parts.append(f"{GREEN}{timestamp}{RESET}")
+    parts.append(short_path)
+    parts.append(timestamp)
 
     bg_count = 0
     current_name = context_manager.current_name
@@ -78,6 +72,6 @@ def default_prompt(context_manager: "ContextManager") -> str:
         if name != current_name and c.process_slot and c.process_slot.is_alive():
             bg_count += 1
     if bg_count:
-        parts.append(f"{YELLOW}[bg:{bg_count}]{RESET}")
+        parts.append(f"[bg:{bg_count}]")
 
     return " ".join(parts) + "> "

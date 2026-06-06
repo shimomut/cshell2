@@ -14,6 +14,7 @@ import time
 from dataclasses import replace
 
 from .. import terminal
+from ..colors import _bg, _fg, get_color_scheme
 from ..commands import arg
 from ..pipeline import Pipeline, Redirect
 from . import registry as decorator_registry
@@ -31,7 +32,6 @@ _HIDE_CURSOR = "\x1b[?25l"
 _SHOW_CURSOR = "\x1b[?25h"
 _CLEAR_SCREEN = "\x1b[2J"
 _CURSOR_HOME = "\x1b[H"
-_REVERSE_VIDEO = "\x1b[7m"
 _RESET = "\x1b[0m"
 # Disable / enable line wrap.  Drawing the last cell of the bottom-right
 # corner of the terminal otherwise advances the cursor off-screen and
@@ -255,12 +255,16 @@ def _render_scrollbar(
     """Return body_rows single-char strings — the scrollbar column.
 
     Empty when content fits on screen.  Otherwise a thumb proportional
-    to the visible window; track is a thin vertical line.
+    to the visible window; track is the rest.  Colors come from the
+    active ColorScheme (shared with the inline picker's scrollbar).
     """
     if body_rows <= 0:
         return []
     if total_lines <= body_rows:
         return [" "] * body_rows
+    s = get_color_scheme()
+    thumb = _bg(*s.scroll_thumb) + " " + _RESET
+    track = _bg(*s.scroll_track) + " " + _RESET
     # Thumb size: at least 1, at most body_rows.
     thumb_size = max(1, int(round(body_rows * body_rows / total_lines)))
     travel = body_rows - thumb_size
@@ -272,9 +276,9 @@ def _render_scrollbar(
     bar: list[str] = []
     for i in range(body_rows):
         if thumb_start <= i < thumb_start + thumb_size:
-            bar.append("█")
+            bar.append(thumb)
         else:
-            bar.append("│")
+            bar.append(track)
     return bar
 
 
@@ -508,11 +512,13 @@ def register() -> None:
             # because the cursor is repositioned absolutely on the next
             # row before it can wrap.
             footer_padded = footer  # already exactly cols - 1 wide
+            scheme = get_color_scheme()
+            statusbar_sgr = _bg(*scheme.statusbar_bg) + _fg(*scheme.statusbar_fg)
             parts: list[str] = [
                 _RESET,
                 "\x1b[1;1H",
                 "\x1b[K",
-                _REVERSE_VIDEO,
+                statusbar_sgr,
                 _pad_or_trunc(header, cols),
                 _RESET,
             ]
@@ -523,7 +529,7 @@ def register() -> None:
                     row += bar[i] if i < len(bar) else " "
                 parts.append(f"\x1b[{i + 2};1H{_RESET}\x1b[K{row}")
             parts.append(
-                f"\x1b[{rows};1H{_RESET}\x1b[K{_REVERSE_VIDEO}{footer_padded}{_RESET}"
+                f"\x1b[{rows};1H{_RESET}\x1b[K{statusbar_sgr}{footer_padded}{_RESET}"
             )
             out.write("".join(parts))
             out.flush()

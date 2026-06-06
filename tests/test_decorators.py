@@ -453,7 +453,15 @@ def test_watch_apply_scroll_key_clamps_to_range():
 
 def test_watch_render_scrollbar_thumb_size_and_position():
     """Scrollbar thumb is proportional to visible/total and slides as we scroll."""
+    from cshell2.colors import _bg, get_color_scheme
     from cshell2.decorators.watch import _render_scrollbar
+
+    s = get_color_scheme()
+    thumb_sgr = _bg(*s.scroll_thumb)
+    track_sgr = _bg(*s.scroll_track)
+
+    def is_thumb(cell: str) -> bool:
+        return thumb_sgr in cell
 
     # No scrollbar when content fits.
     bar = _render_scrollbar(body_rows=10, scroll_y=0, total_lines=10)
@@ -461,12 +469,13 @@ def test_watch_render_scrollbar_thumb_size_and_position():
 
     # 100 lines into a 10-row body → thumb is 1 row at the very top.
     bar = _render_scrollbar(body_rows=10, scroll_y=0, total_lines=100)
-    assert bar[0] == "█"
-    assert bar.count("█") >= 1
+    assert is_thumb(bar[0])
+    assert sum(1 for c in bar if is_thumb(c)) >= 1
+    assert all(is_thumb(c) or track_sgr in c for c in bar)
 
     # Scrolled to bottom → thumb is at the last row.
     bar = _render_scrollbar(body_rows=10, scroll_y=90, total_lines=100)
-    assert bar[-1] == "█"
+    assert is_thumb(bar[-1])
 
 
 def test_watch_slice_for_render_pads_and_trims():

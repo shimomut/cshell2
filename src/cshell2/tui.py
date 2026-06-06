@@ -247,8 +247,8 @@ class InlinePicker(Generic[T]):
         thumb_start = self._offset * self._height // n
         thumb_end = max(thumb_start + 1, (self._offset + self._height) * self._height // n)
         if thumb_start <= row_index < thumb_end:
-            return _bg(*s.picker_scroll_thumb) + " \033[0m"
-        return _bg(*s.picker_scroll_track) + " \033[0m"
+            return _bg(*s.scroll_thumb) + " \033[0m"
+        return _bg(*s.scroll_track) + " \033[0m"
 
     def _compute_layout(self) -> tuple[int, int, int]:
         """Return (label_col, meta_col, panel_w).
@@ -690,8 +690,8 @@ class InlineMultiPicker(Generic[T]):
         thumb_start = self._offset * self._height // n
         thumb_end = max(thumb_start + 1, (self._offset + self._height) * self._height // n)
         if thumb_start <= row_index < thumb_end:
-            return _bg(*s.picker_scroll_thumb) + " \033[0m"
-        return _bg(*s.picker_scroll_track) + " \033[0m"
+            return _bg(*s.scroll_thumb) + " \033[0m"
+        return _bg(*s.scroll_track) + " \033[0m"
 
     def _format_row(self, item: T, *, checked: bool, selected: bool, row_index: int = 0, panel_w: int = 0) -> str:
         label = self._display_fn(item)

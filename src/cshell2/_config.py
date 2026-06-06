@@ -300,7 +300,9 @@ set_prompt(my_prompt)
 # ── Color scheme ──────────────────────────────────────────────────────────────
 #
 # Choose a built-in scheme or define a fully custom one.
-# Applies to both the prompt colors and the TUI picker colors.
+# Applies to TUI widgets — inline pickers and @watch's framing chrome
+# (header / footer / scrollbar).  Prompt colors are deliberately not part
+# of the scheme: customize the prompt by passing a function to set_prompt().
 # Built-in schemes: "dark" (default), "light".
 #
 # Uncomment one of the examples below:
@@ -313,16 +315,12 @@ from cshell2 import set_color_scheme, ColorScheme
 
 # Fully custom scheme — specify any subset of colors as (R, G, B) tuples:
 # set_color_scheme(ColorScheme(
-#     prompt_context=(180, 100, 255),      # context name in prompt
-#     prompt_path=(100, 149, 237),         # cwd in prompt
-#     prompt_time=(80, 200, 100),          # timestamp in prompt
-#     prompt_bg_count=(229, 192, 123),     # [bg:N] indicator in prompt
 #     picker_row_bg=(50, 50, 60),          # non-selected picker row background
 #     picker_row_fg=(220, 220, 220),       # non-selected picker row foreground
 #     picker_sel_bg=(80, 40, 160),         # selected row background
 #     picker_sel_fg=(255, 255, 255),       # selected row foreground
-#     picker_scroll_thumb=(120, 120, 120), # scrollbar thumb
-#     picker_scroll_track=(40, 40, 50),    # scrollbar track
-#     statusbar_bg=(30, 30, 30),           # status bar background
-#     statusbar_fg=(130, 130, 130),        # status bar foreground
+#     scroll_thumb=(120, 120, 120),        # scrollbar thumb (picker + @watch)
+#     scroll_track=(40, 40, 50),           # scrollbar track (picker + @watch)
+#     statusbar_bg=(30, 30, 30),           # picker bottom bar + @watch header/footer bg
+#     statusbar_fg=(200, 200, 200),        # picker bottom bar + @watch header/footer fg
 # ))
