@@ -12,6 +12,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -387,6 +388,29 @@ def passthrough_run(argv: list[str], **popen_kwargs) -> int:
     return slot._run_in_pty(argv, popen_kwargs)
 
 
+def passthrough_poll_key(timeout: float | None = 0.0) -> bytes:
+    """Poll for a keystroke from inside a Python command thread.
+
+    Returns whatever bytes the main forwarding loop has buffered for the
+    enclosing slot, or ``b""`` if the timeout expires before any arrive.
+    ``timeout=None`` blocks forever; ``timeout=0`` returns immediately.
+
+    Outside a slot thread (e.g. synchronous command on the main thread)
+    returns ``b""`` — there is no separate forwarding loop to receive
+    from.  In a piped Python command, raises ``RuntimeError`` for the
+    same reason ``passthrough_input`` does: stdin is wired to a pipe.
+    """
+    if getattr(_in_pipeline, "flag", False):
+        raise RuntimeError(
+            "passthrough_poll_key cannot be used inside a piped Python command "
+            "(stdin is wired to a pipe, not the terminal)"
+        )
+    slot = getattr(_current_slot, "slot", None)
+    if slot is None:
+        return b""
+    return slot.poll_key(timeout)
+
+
 def passthrough_input(prompt: str = "") -> str:
     """Read a line from real stdin from inside a Python command thread.
 
@@ -447,6 +471,14 @@ class PythonCommandSlot:
         # for it and raises KeyboardInterrupt on the slot thread instead
         # of leaving the user with an unresponsive prompt.
         self._input_interrupted = threading.Event()
+        # Raw stdin bytes the main forwarding loop received while no PTY
+        # subprocess was active.  Decorators (e.g. ``@watch``) consume
+        # these via :func:`passthrough_poll_key` to react to keystrokes
+        # like ``q`` or ``Ctrl+C``.  Cleared each time the slot thread
+        # picks up a Python command.
+        self._keybuf: bytearray = bytearray()
+        self._keybuf_lock = threading.Lock()
+        self._keybuf_event = threading.Event()
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -553,15 +585,55 @@ class PythonCommandSlot:
         return ""
 
     def write_stdin(self, data: bytes) -> None:
-        """Forward bytes to a passthrough_run() subprocess, if one is active."""
+        """Forward bytes from the main loop's stdin reader.
+
+        Two destinations:
+
+        * If a ``passthrough_run`` subprocess is active, the bytes go to
+          its PTY master so the child sees the user's typing.
+        * Otherwise the bytes are buffered in ``_keybuf`` so a Python
+          command body running on this slot can poll for them via
+          :func:`passthrough_poll_key`.  Decorators like ``@watch`` use
+          this to handle ``q``-to-quit etc.
+        """
         with self._pty_lock:
             fd = self._pty_master_fd
-            if fd < 0:
-                return
-        try:
-            os.write(fd, data)
-        except OSError:
-            pass
+        if fd >= 0:
+            try:
+                os.write(fd, data)
+            except OSError:
+                pass
+            return
+        with self._keybuf_lock:
+            self._keybuf.extend(data)
+            self._keybuf_event.set()
+
+    def poll_key(self, timeout: float | None) -> bytes:
+        """Return up to one buffered keystroke worth of stdin, or ``b\"\"``.
+
+        Blocks up to *timeout* seconds (``None`` = forever) for a key.
+        Returns an empty ``bytes`` if the timeout expires.  Returns the
+        full byte sequence for one logical key (which may be a multi-byte
+        escape sequence — the caller is expected to interpret it).
+
+        Intended for Python command bodies that want to react to user
+        keystrokes while the main forwarding loop holds stdin.  Bytes
+        consumed here will not later reach a ``passthrough_run``
+        subprocess (none is active by the time this returns data).
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            with self._keybuf_lock:
+                if self._keybuf:
+                    data = bytes(self._keybuf)
+                    self._keybuf.clear()
+                    self._keybuf_event.clear()
+                    return data
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if remaining == 0.0:
+                return b""
+            if not self._keybuf_event.wait(timeout=remaining):
+                return b""
 
     def resize(self, rows: int, cols: int) -> None:
         """Propagate a SIGWINCH-driven resize to a passthrough_run() subprocess."""

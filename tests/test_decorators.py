@@ -430,6 +430,30 @@ def test_watch_pipeline_redirected_to_helper():
     assert [s.text for s in redirected.stages] == ["echo hi", "grep h"]
 
 
+def test_python_command_slot_poll_key_returns_buffered_bytes():
+    """The slot's stdin keybuf collects bytes the main forwarding loop
+    received while no PTY subprocess is active, so a Python command body
+    can poll for keystrokes (e.g. ``q`` to quit ``@watch``)."""
+    from cshell2.shell import PythonCommandSlot
+
+    class _DummyCmd:
+        name = "_dummy"
+
+        def invoke(self, args):
+            pass
+
+    slot = PythonCommandSlot(_DummyCmd(), [])
+
+    # No data and a zero timeout → empty bytes immediately.
+    assert slot.poll_key(timeout=0) == b""
+
+    # write_stdin with no PTY active: bytes should land in the keybuf.
+    slot.write_stdin(b"q")
+    assert slot.poll_key(timeout=0) == b"q"
+    # Subsequent poll with the buffer drained returns empty.
+    assert slot.poll_key(timeout=0) == b""
+
+
 def test_thread_local_stdout_isatty_falls_through(monkeypatch):
     """``_ThreadLocalStdout`` must forward ``isatty()`` to either the
     real stream (no override) or the thread-local override — not return
