@@ -16,8 +16,8 @@ class DecoratorParseError(ValueError):
 
     * ``@watch ls | grep py`` — operator outside braces (use ``{...}``).
     * ``@watch {ls`` — unmatched opening brace.
-    * ``@watch {ls} | next`` — text after closing brace (composition is
-      not yet supported in the MVP).
+    * ``@watch {ls} ; pwd`` — sequencing operator after the closing brace
+      (only ``|`` composition is supported in the MVP).
     """
 
 
@@ -416,9 +416,12 @@ def _split_tokens_simple(text: str) -> list[str]:
 def _extract_decorator_prefix(line: str) -> tuple[DecoratorCall | None, str]:
     """Try to peel a leading ``@name [flags] body`` from *line*.
 
-    On success returns ``(DecoratorCall, "")`` — the body is parsed
-    here recursively, and there is no remainder for the outer parser
-    in the MVP (composition is rejected).
+    On success returns ``(DecoratorCall, remainder)`` — the body is parsed
+    here recursively.  When the input is just ``@deco {body}`` the remainder
+    is the empty string.  When the line continues past the body with one
+    or more pipe stages (``@deco {body} | next | other``) the remainder
+    starts with ``|`` and is fed back to the outer pipeline parser, which
+    splices the additional stages onto the decorator-stage's pipeline.
 
     Returns ``(None, line)`` if the line does not start with ``@<ident>``.
 
@@ -526,6 +529,7 @@ def _extract_decorator_prefix(line: str) -> tuple[DecoratorCall | None, str]:
 
     # Body: braced or bare?
     body_text_stripped = body_text.lstrip()
+    remainder_after = ""
     if body_text_stripped.startswith("{"):
         # Find the matching brace
         ws_offset = len(body_text) - len(body_text_stripped)
@@ -536,18 +540,35 @@ def _extract_decorator_prefix(line: str) -> tuple[DecoratorCall | None, str]:
                 f"@{name}: unmatched '{{' in decorator body"
             )
         inner = body_text[open_pos + 1:close_pos]
-        remainder = body_text[close_pos + 1:].strip()
-        if remainder:
-            raise DecoratorParseError(
-                f"@{name}: text after closing '}}' (decorator composition is "
-                f"not yet supported; got {remainder!r})"
-            )
+        remainder_after = body_text[close_pos + 1:]
         body_pipeline = _parse_braced_body(inner, decorator_name=name)
     else:
         # Bare single-command body — operators are rejected.
         body_pipeline = _parse_bare_body(body_text_stripped, decorator_name=name)
 
-    return DecoratorCall(name=name, flag_tokens=flag_tokens, body=body_pipeline), ""
+    # Validate the remainder: only a `|`-prefixed continuation is allowed in
+    # the MVP.  ``;``/``&&``/``||`` after a decorator scope are rejected so
+    # the outer-sequence interaction stays well-defined for a follow-up
+    # commit (see "Composing decorators inside larger pipelines" in
+    # doc/enhancements.md).
+    remainder_stripped = remainder_after.strip()
+    if remainder_stripped:
+        # Use the same operator splitter as the rest of the parser so quote
+        # / escape handling matches.  Reject `;`/`&&`/`||` here.
+        seq_parts = _split_on_operators(remainder_stripped, [";", "&&", "||"])
+        if len(seq_parts) > 1:
+            bad_op = seq_parts[1][0]
+            raise DecoratorParseError(
+                f"@{name}: {bad_op!r} after decorator scope is not supported "
+                f"yet (only `|` composition is allowed)"
+            )
+        if not remainder_stripped.startswith("|"):
+            raise DecoratorParseError(
+                f"@{name}: text after closing '}}' must start with `|` "
+                f"(decorator composition); got {remainder_stripped!r}"
+            )
+
+    return DecoratorCall(name=name, flag_tokens=flag_tokens, body=body_pipeline), remainder_stripped
 
 
 def _parse_braced_body(inner: str, *, decorator_name: str) -> Pipeline:
@@ -606,10 +627,25 @@ def parse_line(line: str) -> Sequence:
     # before the normal pipeline grammar runs.
     deco_call, line = _extract_decorator_prefix(line)
     if deco_call is not None:
-        # The decorator wrapped the whole line; build a one-stage Pipeline
-        # whose stage is "invoke this decorator".
-        stage = Stage(text=line.strip(), redirects=[], decorator=deco_call)
-        return Sequence(items=[(None, Pipeline(stages=[stage]))])
+        # If there is no remainder, the decorator wrapped the whole line:
+        # build a one-stage Pipeline whose stage is "invoke this decorator".
+        deco_stage = Stage(text="", redirects=[], decorator=deco_call)
+        if not line:
+            return Sequence(items=[(None, Pipeline(stages=[deco_stage]))])
+
+        # Composition: the remainder starts with `|` (validated upstream).
+        # Drop the leading `|` and parse the rest as additional pipe stages,
+        # then prepend the decorator-stage.
+        rest_text = line[1:]
+        pipe_parts = _split_on_operators(rest_text, ["|"])
+        stages: list[Stage] = [deco_stage]
+        for _, stage_text in pipe_parts:
+            stage_text = stage_text.strip()
+            if not stage_text:
+                continue
+            cleaned, redirects = _extract_redirects(stage_text)
+            stages.append(Stage(text=cleaned.strip(), redirects=redirects))
+        return Sequence(items=[(None, Pipeline(stages=stages))])
 
     seq_parts = _split_on_operators(line, [";", "&&", "||"])
     items: list[tuple[str | None, Pipeline]] = []

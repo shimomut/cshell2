@@ -209,6 +209,63 @@ def test_brace_handling_var_expansion(watch_deco):
 
 
 # ---------------------------------------------------------------------------
+# Parser — composition (`@deco {body} | next`)
+# ---------------------------------------------------------------------------
+
+def test_parse_compose_decorator_with_pipe(watch_deco):
+    """``@watch {ls} | grep py`` parses as a two-stage pipeline whose
+    first stage is the decorator-call and second stage is ``grep py``."""
+    seq = parse_line("@watch {ls} | grep py")
+    assert len(seq.items) == 1
+    pipeline = seq.items[0][1]
+    assert len(pipeline.stages) == 2
+    deco_stage, next_stage = pipeline.stages
+    assert deco_stage.decorator is not None
+    assert deco_stage.decorator.name == "watch"
+    assert [s.text for s in deco_stage.decorator.body.stages] == ["ls"]
+    assert next_stage.decorator is None
+    assert next_stage.text == "grep py"
+
+
+def test_parse_compose_decorator_with_multistage_body(watch_deco):
+    stage_seq = parse_line("@watch {df -h | grep abc} | wc -l")
+    pipeline = stage_seq.items[0][1]
+    assert len(pipeline.stages) == 2
+    assert pipeline.stages[0].decorator is not None
+    assert [s.text for s in pipeline.stages[0].decorator.body.stages] == [
+        "df -h", "grep abc"
+    ]
+    assert pipeline.stages[1].text == "wc -l"
+
+
+def test_parse_compose_decorator_with_flags_and_pipe(watch_deco):
+    seq = parse_line("@watch -n 1 {ls} | grep py")
+    pipeline = seq.items[0][1]
+    deco_stage, next_stage = pipeline.stages
+    assert deco_stage.decorator.flag_tokens == ["-n", "1"]
+    assert [s.text for s in deco_stage.decorator.body.stages] == ["ls"]
+    assert next_stage.text == "grep py"
+
+
+def test_parse_compose_decorator_with_multiple_pipe_stages(watch_deco):
+    seq = parse_line("@watch {ls} | grep py | wc -l")
+    pipeline = seq.items[0][1]
+    assert len(pipeline.stages) == 3
+    assert pipeline.stages[0].decorator is not None
+    assert pipeline.stages[1].text == "grep py"
+    assert pipeline.stages[2].text == "wc -l"
+
+
+def test_parse_compose_decorator_redirect_on_following_stage(watch_deco):
+    """A redirect on a stage *after* the decorator binds to that stage,
+    not the decorator's body."""
+    seq = parse_line("@watch {ls} | tee out.log")
+    pipeline = seq.items[0][1]
+    assert pipeline.stages[0].decorator is not None
+    assert pipeline.stages[1].text == "tee out.log"
+
+
+# ---------------------------------------------------------------------------
 # Parser — error cases
 # ---------------------------------------------------------------------------
 
@@ -227,9 +284,19 @@ def test_unmatched_brace_is_rejected(watch_deco):
         parse_line("@watch {ls")
 
 
-def test_text_after_close_brace_is_rejected(watch_deco):
-    with pytest.raises(DecoratorParseError, match="text after"):
-        parse_line("@watch {ls} | grep foo")
+def test_seq_after_close_brace_is_rejected(watch_deco):
+    """``@deco {body} ; pwd`` mixes a decorator scope with the outer
+    sequence grammar — only ``|`` composition is supported in the MVP."""
+    with pytest.raises(DecoratorParseError, match="not supported"):
+        parse_line("@watch {ls} ; pwd")
+    with pytest.raises(DecoratorParseError, match="not supported"):
+        parse_line("@watch {ls} && pwd")
+
+
+def test_text_after_close_brace_without_pipe_is_rejected(watch_deco):
+    """Plain trailing text after `}` (not a pipe) is still rejected."""
+    with pytest.raises(DecoratorParseError, match="must start with"):
+        parse_line("@watch {ls} grep foo")
 
 
 def test_empty_body_is_rejected(watch_deco):
@@ -325,6 +392,58 @@ def test_decorator_argparse_error_returns_2():
 
 
 # ---------------------------------------------------------------------------
+# Decorator composition (`@deco {body} | next`) — execution path
+# ---------------------------------------------------------------------------
+
+def test_compose_decorator_pipes_body_output_through_next_stage(tmp_path):
+    """``@_t_emit {body} | grep`` should run the decorator's body with
+    its stdout wired to the next stage's stdin.  The decorator runs the
+    body once (no looping) so we get a deterministic single capture."""
+    from cshell2.commands import registry as command_registry
+
+    sh = Shell()
+
+    @command_registry.command(name="_t_emit_lines2")
+    def _emit():
+        print("apple")
+        print("banana")
+        print("cherry")
+
+    @decorator_registry.decorator(name="_t_once")
+    def _once(pipeline):
+        # Run the body once and return — exercises the composition path
+        # without the timing complexity @watch brings.
+        pipeline.run()
+
+    out_path = tmp_path / "out"
+    sh._execute(f"@_t_once {{_t_emit_lines2}} | grep an > {out_path}")
+    assert out_path.read_text() == "banana\n"
+
+
+def test_compose_decorator_runs_body_inside_outer_pipe(tmp_path):
+    """A bare-body decorator (no braces) under composition still runs
+    the wrapped command and feeds the next stage."""
+    from cshell2.commands import registry as command_registry
+
+    sh = Shell()
+
+    @command_registry.command(name="_t_emit_lines3")
+    def _emit():
+        print("xx")
+        print("yy")
+        print("xz")
+
+    @decorator_registry.decorator(name="_t_once_b")
+    def _once(pipeline):
+        pipeline.run()
+
+    out_path = tmp_path / "out"
+    sh._execute(f"@_t_once_b {{_t_emit_lines3}} | grep x > {out_path}")
+    text = out_path.read_text()
+    assert "xx" in text and "xz" in text and "yy" not in text
+
+
+# ---------------------------------------------------------------------------
 # @<TAB> completion
 # ---------------------------------------------------------------------------
 
@@ -375,13 +494,13 @@ def test_shell_execute_swallows_decorator_parse_error(capsys, watch_deco):
     assert "unmatched" in err
 
 
-def test_shell_execute_swallows_decorator_composition_error(capsys, watch_deco):
-    """Decorator composition (`@deco {...} | next`) is not yet supported,
-    but the parse error must not crash the shell."""
+def test_shell_execute_swallows_decorator_composition_seq_error(capsys, watch_deco):
+    """``@deco {body} ; pwd`` is rejected — only ``|`` composition is
+    supported.  The parse error must not crash the shell."""
     sh = Shell()
-    sh._execute("@watch {ls} | grep foo")
+    sh._execute("@watch {ls} ; pwd")
     err = capsys.readouterr().err
-    assert "text after" in err
+    assert "not supported" in err
 
 
 # ---------------------------------------------------------------------------

@@ -10,13 +10,19 @@ For known limitations of existing features, see [limitations.md](limitations.md)
 
 ## Pipeline decorators
 
-**Status:** MVP shipped — `@watch` works end-to-end. Extensions listed
-below (stacking, composition, more built-ins) are future work.
+**Status:** `@watch` works end-to-end and `@deco {body} | next`
+composition runs the body's stdout through the outer pipeline. Stacking
+and more built-ins are still future work.
 
-**Shipped (MVP):**
+**Shipped:**
 
 - Parser support for `@name [flags] body` and `@name [flags] {body}`
   (`pipeline.py::_extract_decorator_prefix`, `_find_matching_brace`).
+- Composition: `@deco {body} | next-stage` parses as a two-stage
+  pipeline; the executor runs the decorator body in a worker thread
+  whose stdio is wired to the outer pipe via the thread-local routers
+  (`shell.py::_start_decorator_stage_thread`,
+  `_run_pipeline_from_decorator`).
 - Decorator registry mirroring `CommandRegistry` / `VarRegistry`
   (`cshell2/decorators/__init__.py`).
 - `Pipeline.run()` indirection so decorator bodies can re-enter
@@ -26,7 +32,7 @@ below (stacking, composition, more built-ins) are future work.
 - `@<TAB>` completion: decorator-name list, decorator-flag picker, and
   body-command delegation through the existing recipe / argcomplete /
   cobra fallback chain.
-- 32 unit / integration tests in `tests/test_decorators.py`.
+- 50 unit / integration tests in `tests/test_decorators.py`.
 
 A **decorator** is a token of the form `@name` (with optional shell-style
 flags) at the start of a line that wraps the rest of the line as a
@@ -257,18 +263,19 @@ Edge case: a wrapped command whose first token *does* start with `-`.
 The user can write `@watch -- ls -la` (POSIX-style `--` terminator) or
 just brace it: `@watch {ls -la}`. Same convention as POSIX.
 
-### Composing decorators inside larger pipelines (future extension)
+### Composing decorators inside larger pipelines
 
-Once `{...}` is an explicit scope boundary, the decorator-call can sit
-inside a larger pipeline as a single stage — its stdout becomes the
-input to whatever follows the closing brace:
+**Status:** shipped.  ``@deco {body} | next`` now parses and runs as a
+two-stage pipeline whose first stage is the decorator-call and second
+stage is whatever follows the closing brace.
 
 ```
-@abc -n 5 {df -h} | grep xyz
-└──────── stage 1 ────┘   └─ stage 2
+@watch {ls} | grep py
+└──── stage 1 ──┘   └─ stage 2
 ```
 
-Parser story:
+Parser story (implemented in
+[pipeline.py::_extract_decorator_prefix](../src/cshell2/pipeline.py)):
 
 ```
 @abc -n 5 {df -h} | grep xyz
@@ -279,7 +286,36 @@ Parser story:
        └── decorator's flags (consumed by argparse)
 ```
 
-Three things this unlocks naturally:
+The remainder after the closing ``}`` is fed back through the same
+``_split_on_operators`` path as a top-level pipeline, so any number of
+``|``-stages can follow.  ``;``/``&&``/``||`` after the closing ``}``
+are explicitly rejected with a clear error — relaxing that needs the
+outer-sequence parser to treat the decorator-stage as one statement,
+which is a separate change.
+
+Executor story
+([shell.py::_execute_pipeline](../src/cshell2/shell.py)):
+
+* The decorator-call stage runs on a worker thread spawned by
+  ``_start_decorator_stage_thread`` — analogous to
+  ``_start_python_stage_thread`` for ordinary Python commands.  The
+  thread's ``sys.stdin``/``sys.stdout`` are rebound (via the
+  thread-local routers) to the boundary pipe ends so anything the
+  decorator body writes via ``print`` flows downstream.
+* When the decorator body does ``pipeline.run()``, the registered
+  executor (``_run_pipeline_from_decorator``) detects the in-pipe
+  context, dups the thread-local stdio fds, and forces the multi-stage
+  codepath in ``_execute_pipeline`` so the body's first/last stage
+  read/write those fds directly.  Without this the body would route
+  through the standalone-command path (``ProcessSlot`` /
+  ``PythonCommandSlot``) and grab the real terminal — wrong from a
+  worker thread.
+* fds duped from thread-local overrides are owned by Popen / the
+  Python-stage thread, so subsequent body runs (e.g. each
+  ``@watch`` iteration) re-dup from the parent's wrappers — the
+  parent's own stdio stays valid across iterations.
+
+Three things this unlocks:
 
 1. **Decorator output as a stream stage** —
    `@every -i 5s {curl …} | jq '.status'` continuously processes
@@ -287,7 +323,8 @@ Three things this unlocks naturally:
 2. **Redirects bind to whichever scope is braced** —
    `@time {make && ./run} > build.log` times the whole chain and
    redirects together; `@time {make} > build.log` times only `make`
-   but redirects only `make`'s output.
+   but redirects only `make`'s output.  (`@time` itself isn't
+   shipped yet, but the parsing/execution rule is in place.)
 3. **Decorators on top of decorators on subexpressions** —
    `@retry -n 3 @time {flaky-test}` already works under the existing
    stacking rule; nothing new.
@@ -298,6 +335,7 @@ Two caveats worth flagging to decorator authors:
   codes are wrong when its stdout is piped. Decorators that emit
   terminal control (or produce non-pipeable output) need to check
   `sys.stdout.isatty()` — same discipline as any well-behaved program.
+  (`@watch` already does — see ``_StdoutProxy.isatty()``.)
 - **Infinite-output decorators in a pipeline.** `@watch {ls} | grep foo`
   runs forever; the user has to `Ctrl+C` (or `Ctrl+]` to background)
   just like `tail -f | grep`. Not a bug, but worth a sentence so it's
@@ -580,6 +618,10 @@ surface for "run this pipeline in a different process slot."
    spans, and bare `\\{` / `\\}`. The flag-extraction loop respects
    the decorator's argparse spec via a late-bound callback so
    `@watch -n 5 ls` parses as `flags=["-n", "5"]`, `body="ls"`.
+   Composition: any `|`-prefixed remainder after the closing `}` is
+   handed back to `parse_line`, which prepends the decorator-stage
+   to a regular multi-stage pipeline.  `;`/`&&`/`||` after the
+   closing `}` are rejected with a focused error.
 2. **Registry** in
    [cshell2/decorators/__init__.py](../src/cshell2/decorators/__init__.py):
    `Decorator` dataclass, `DecoratorRegistry`, module-level `registry`
@@ -600,7 +642,12 @@ surface for "run this pipeline in a different process slot."
    resolves the decorator, runs its argparse, calls
    `deco.func(body_pipeline, **kwargs)`. `SystemExit` propagates;
    `KeyboardInterrupt` exits 130; other exceptions print and exit 1;
-   unknown decorator name returns 127.
+   unknown decorator name returns 127.  In a multi-stage pipeline
+   (`@deco {...} | next`) the decorator runs on a worker thread via
+   `_start_decorator_stage_thread`; `_run_pipeline_from_decorator`
+   detects the in-pipe context and forces the body onto the
+   pipeline-execution path so its first/last stage read/write the
+   thread's rebound stdio (the outer pipe ends).
 5. **`@watch` built-in** in
    [cshell2/decorators/watch.py](../src/cshell2/decorators/watch.py)
    — TTY-aware screen-clear, `BrokenPipeError` graceful exit.
@@ -610,24 +657,22 @@ surface for "run this pipeline in a different process slot."
    `OptionsCompleter`, and body-command delegation through the
    normal command-completion path.
 7. **Tests** in
-   [tests/test_decorators.py](../tests/test_decorators.py): 32 tests
+   [tests/test_decorators.py](../tests/test_decorators.py): 50 tests
    covering registry, parser (all brace-handling cases from the
-   "Brace handling" subsection plus error-path coverage), executor
-   indirection, dispatch, and completion.
+   "Brace handling" subsection plus error-path coverage),
+   composition (parser + execution), executor indirection,
+   dispatch, and completion.
 
 ### What's left for follow-up commits
 
 - **Stacking** (`@time @watch {ls}`) — the parser currently peels one
   decorator. Loop in `_extract_decorator_prefix` and chain calls in
   dispatch.
-- **Composition** (`@deco {...} | next-stage`) — currently rejected
-  with `text after closing '}'`. Allowing it means letting the outer
-  pipeline parser consume the decorator-stage as one stage, then
-  resuming with `_split_on_operators` on the remainder.
-- **Decorator inside a multi-stage outer pipeline** — the dispatch
-  helper only handles single-stage `_execute_pipeline` calls; the
-  multi-stage path of `_execute_pipeline` doesn't check for
-  `stage.decorator`. Wire it up if/when composition lands.
+- **Outer sequencing after a decorator scope** (`@deco {...} ; pwd`,
+  `@deco {...} && other`) — currently rejected with a clear error.
+  Allowing it means letting the outer-sequence parser treat the
+  decorator-stage as one statement; the parser already isolates the
+  decorator scope so the additional change is small.
 - **More built-ins** (`@time`, `@retry`, `@every`, `@quiet`, `@bg`,
   `@as`) — each gets its own `cshell2/decorators/<name>.py` and a
   call to `enable(...)` in `_register_builtins`.

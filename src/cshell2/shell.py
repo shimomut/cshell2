@@ -356,6 +356,33 @@ _current_slot = threading.local()
 _in_pipeline = threading.local()
 
 
+def _dup_threadlocal_override_fd(stream) -> int | None:
+    """Duplicate the underlying pipe fd of a thread-local stdio override.
+
+    *stream* is one of the ``sys.std{in,out,err}`` thread-local routers.
+    When the calling thread has set an override (a TextIOWrapper around a
+    pipe end), this returns a freshly ``os.dup()``-ed fd that the caller
+    owns and must close — used by ``_execute_pipeline`` to wire a
+    decorator body's first/last stage to the outer pipeline's fds without
+    invalidating the parent thread's wrappers (so the body can be re-run
+    on the next iteration of e.g. ``@watch``).
+
+    Returns ``None`` when no override is set.  Quietly returns ``None``
+    if the override has no fileno — the caller has nothing to wire.
+    """
+    override = getattr(getattr(stream, "_local", None), "override", None)
+    if override is None:
+        return None
+    try:
+        fd = override.fileno()
+    except (AttributeError, OSError, ValueError):
+        return None
+    try:
+        return os.dup(fd)
+    except OSError:
+        return None
+
+
 def passthrough_run(argv: list[str], **popen_kwargs) -> int:
     """Run an interactive subprocess from inside a Python command thread.
 
@@ -1772,39 +1799,94 @@ class Shell:
     ) -> int:
         """Entry point used by ``Pipeline.run()`` from a decorator body.
 
-        The MVP only supports the no-stdio-override case — the decorator
-        body inherits whatever stdio the decorator itself was given (which
-        is already routed correctly by the thread-local routers when the
-        decorator is in a pipeline).  ``stdin``/``stdout``/``stderr`` are
-        accepted for API forward-compatibility but currently rejected.
+        The MVP rejects explicit ``stdin``/``stdout``/``stderr`` overrides;
+        the body inherits stdio from the decorator's caller via the
+        thread-local routers.
+
+        When the decorator itself is a stage of an outer pipeline
+        (composition: ``@deco {body} | next``), the body's stdout must
+        feed into the outer pipe — not the real terminal.  We detect that
+        case via ``_in_pipeline.flag`` and pipe the body's last stage to
+        the thread's rebound ``sys.stdout`` (which is the outer pipe's
+        write end).  Without this, a body like ``@watch {ls}`` running
+        under ``@watch {ls} | grep py`` would route through the
+        standalone-command path (``ProcessSlot`` / ``PythonCommandSlot``)
+        and grab the real terminal — wrong from a worker thread.
         """
         if any(x is not None for x in (stdin, stdout, stderr)):
             raise NotImplementedError(
                 "Pipeline.run(stdin=, stdout=, stderr=) is not supported yet; "
                 "the decorator body inherits stdio from the decorator's caller."
             )
-        return self._execute_pipeline(pipeline)
+        in_outer_pipe = getattr(_in_pipeline, "flag", False)
+        return self._execute_pipeline(pipeline, _in_outer_pipe=in_outer_pipe)
 
-    def _execute_pipeline(self, pipeline: Pipeline) -> int:
-        """Execute a pipeline; return exit code of last stage."""
+    def _execute_pipeline(
+        self,
+        pipeline: Pipeline,
+        *,
+        _in_outer_pipe: bool = False,
+    ) -> int:
+        """Execute a pipeline; return exit code of last stage.
+
+        ``_in_outer_pipe`` is set when this call is the body of a
+        decorator that is itself a stage of an outer pipeline
+        (``@deco {body} | next``).  In that case the body's last stage
+        must write into the thread's rebound ``sys.stdout`` (the outer
+        pipe's write end) rather than the real terminal — so we force
+        every stage onto the worker-thread / Popen path even when the
+        body has only one stage (where ``_execute_stage`` would
+        otherwise grab a real PTY).
+        """
         stages = pipeline.stages
-        if len(stages) == 1:
+        if len(stages) == 1 and not _in_outer_pipe:
             return self._execute_stage(stages[0], stdin_fd=None, stdout_fd=None)
 
-        # Multi-stage pipeline: connect with OS pipes.  External stages run
-        # via subprocess.Popen; registered Python commands run in worker
-        # threads that rebind sys.stdin/stdout/stderr to the pipe ends via
-        # the thread-local routers installed in __init__.
+        # Multi-stage pipeline (or single-stage decorator body running
+        # under an outer pipe): connect with OS pipes.  External stages
+        # run via subprocess.Popen; registered Python commands run in
+        # worker threads that rebind sys.stdin/stdout/stderr to the pipe
+        # ends via the thread-local routers installed in __init__.
 
         n = len(stages)
         pipe_fds: list[tuple[int, int]] = []
         for _ in range(n - 1):
             pipe_fds.append(os.pipe())
 
+        # When running under an outer pipe, dup the boundary fds from the
+        # thread-local stdio overrides so the body's first stage reads
+        # from whatever feeds the decorator and the last stage writes to
+        # whatever follows it.  We dup so that the worker (Popen or
+        # Python-stage thread) takes ownership of its own fd copy and the
+        # parent thread's wrappers stay open for subsequent iterations
+        # (e.g. ``@watch {ls} | grep py`` re-runs the body each tick).
+        outer_in_fd = _dup_threadlocal_override_fd(sys.stdin) if _in_outer_pipe else None
+        outer_out_fd = _dup_threadlocal_override_fd(sys.stdout) if _in_outer_pipe else None
+
         # Workers list contains either subprocess.Popen instances or
         # _PyStageHandle objects (see _start_python_stage_thread).
         workers: list = []
         for idx, stage in enumerate(stages):
+            stdin_fd_pipe = pipe_fds[idx - 1][0] if idx > 0 else outer_in_fd
+            stdout_fd_pipe = pipe_fds[idx][1] if idx < n - 1 else outer_out_fd
+
+            # Decorator stage (e.g. ``@watch {ls} | grep foo``).  The
+            # decorator body inherits the thread's rebound stdio via the
+            # thread-local routers, so its writes flow through the pipe
+            # to the next stage just like a Python command would.
+            if stage.decorator is not None:
+                # Decorator stages don't currently honour explicit redirects
+                # on the stage itself — redirects belong inside the braced
+                # body where the user can scope them precisely.  An MVP-level
+                # warning would be noise; just ignore them silently.
+                worker = self._start_decorator_stage_thread(
+                    decorator_call=stage.decorator,
+                    stdin_fd=stdin_fd_pipe,
+                    stdout_fd=stdout_fd_pipe,
+                )
+                workers.append(worker)
+                continue
+
             tokens = self._tokenize_stage(stage)
             if not tokens:
                 continue
@@ -1812,9 +1894,6 @@ class Shell:
             cmd = self.registry.get(tokens[0])
             if cmd is not None and not cmd.has_any_handler():
                 cmd = None
-
-            stdin_fd_pipe = pipe_fds[idx - 1][0] if idx > 0 else None
-            stdout_fd_pipe = pipe_fds[idx][1] if idx < n - 1 else None
 
             # Resolve explicit redirects (override the pipe ends).
             stdin_file = stdout_file = None
@@ -1875,13 +1954,25 @@ class Shell:
             # itself — so close here only if the stage *didn't* use that end
             # (because of an explicit redirect, or because the stage failed
             # to start at all).
+            #
+            # Outer-pipe boundary fds (idx=0 stdin, idx=n-1 stdout when
+            # ``_in_outer_pipe`` is set) were duped from the thread-local
+            # overrides; they need to be closed by the parent under exactly
+            # the same rules — Popen handles its own dup, Python-thread
+            # owns the fd, otherwise close here.
+            stdin_fd_is_owned = idx > 0 or (
+                outer_in_fd is not None and stdin_fd_pipe == outer_in_fd
+            )
+            stdout_fd_is_owned = idx < n - 1 or (
+                outer_out_fd is not None and stdout_fd_pipe == outer_out_fd
+            )
             close_stdin_pipe = (
-                idx > 0
+                stdin_fd_is_owned
                 and stdin_fd_pipe is not None
                 and (worker is None or not is_py_stage or not stdin_pipe_used)
             )
             close_stdout_pipe = (
-                idx < n - 1
+                stdout_fd_is_owned
                 and stdout_fd_pipe is not None
                 and (worker is None or not is_py_stage or not stdout_pipe_used)
             )
@@ -2043,6 +2134,100 @@ class Shell:
                 handle.done.set()
 
         t = threading.Thread(target=_target, name=f"pipe-{cmd.name}", daemon=True)
+        handle.thread = t
+        t.start()
+        return handle
+
+    def _start_decorator_stage_thread(
+        self,
+        *,
+        decorator_call,
+        stdin_fd: int | None,
+        stdout_fd: int | None,
+    ) -> "_PyStageHandle":
+        """Run a ``@name`` decorator as one stage of a multi-stage pipeline.
+
+        Mirrors :meth:`_start_python_stage_thread` but invokes the decorator
+        function directly rather than dispatching through the command
+        registry.  The decorator's body re-enters ``_execute_pipeline`` via
+        ``Pipeline.run()``; that nested execution inherits this thread's
+        rebound ``sys.stdout`` (the pipe's write end) through the
+        thread-local routers, so the body's output flows downstream
+        transparently.
+        """
+        from .decorators import registry as decorator_registry, parse_decorator_args
+
+        in_obj = os.fdopen(stdin_fd, "rb", buffering=0, closefd=True) if stdin_fd is not None else None
+        out_obj = os.fdopen(stdout_fd, "wb", buffering=0, closefd=True) if stdout_fd is not None else None
+
+        handle = _PyStageHandle(cmd_name=f"@{decorator_call.name}")
+        in_wrapper = io.TextIOWrapper(in_obj, encoding="utf-8", errors="replace") if in_obj is not None else None
+        out_wrapper = io.TextIOWrapper(out_obj, encoding="utf-8", errors="replace", write_through=True) if out_obj is not None else None
+        for w in (in_wrapper, out_wrapper):
+            if w is not None:
+                handle._io_objs.append(w)
+
+        deco = decorator_registry.get(decorator_call.name)
+
+        def _target():
+            _in_pipeline.flag = True
+            try:
+                if in_wrapper is not None:
+                    sys.stdin.set_override(in_wrapper)
+                if out_wrapper is not None:
+                    sys.stdout.set_override(out_wrapper)
+
+                if deco is None:
+                    print(
+                        f"cshell2: unknown decorator: @{decorator_call.name}",
+                        file=sys.stderr,
+                    )
+                    handle.exit_code = 127
+                    return
+
+                kwargs = parse_decorator_args(deco, decorator_call.flag_tokens)
+                if kwargs is None:
+                    handle.exit_code = 2
+                    return
+
+                try:
+                    deco.func(decorator_call.body, **kwargs)
+                    handle.exit_code = 0
+                except SystemExit as e:
+                    code = e.code
+                    handle.exit_code = code if isinstance(code, int) else (1 if code else 0)
+                except BrokenPipeError:
+                    handle.exit_code = 0
+                except KeyboardInterrupt:
+                    handle.exit_code = 130
+                except Exception as e:
+                    if handle.interrupted:
+                        handle.exit_code = 130
+                    else:
+                        print(f"@{deco.name}: error: {e}", file=sys.stderr)
+                        traceback.print_exc()
+                        handle.exit_code = 1
+            finally:
+                sys.stdin.clear_override()
+                sys.stdout.clear_override()
+                sys.stderr.clear_override()
+                if out_wrapper is not None:
+                    try:
+                        out_wrapper.flush()
+                    except Exception:
+                        pass
+                for w in (out_wrapper, in_wrapper):
+                    if w is not None:
+                        try:
+                            w.close()
+                        except Exception:
+                            pass
+                _in_pipeline.flag = False
+                handle.done.set()
+
+        t = threading.Thread(
+            target=_target, name=f"pipe-@{decorator_call.name}", daemon=True
+        )
         handle.thread = t
         t.start()
         return handle
