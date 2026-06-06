@@ -684,6 +684,13 @@ class PythonCommandSlot:
 
     def _run_in_pty(self, argv: list[str], popen_kwargs: dict) -> int:
         """Run *argv* on a slot-owned PTY; main thread forwards stdin via write_stdin."""
+        # Snapshot whether the proxy was active (i.e. the user was watching
+        # this slot in the foreground) before deactivating it for the
+        # subprocess.  The PTY reader thread mirrors this state — if the
+        # subprocess starts while the slot is backgrounded (e.g. a Python
+        # ``@bg`` body that calls ``passthrough_run``), the reader buffers
+        # to ``_pty_buffer`` instead of writing to the real terminal.
+        proxy_was_active = bool(self._proxy and self._proxy._active)
         # Pause the buffering stdout proxy: while the subprocess runs, its
         # output is written to the slot's PTY master and copied to stdout
         # by a reader thread.
@@ -717,7 +724,7 @@ class PythonCommandSlot:
         with self._pty_lock:
             self._pty_master_fd = master_fd
             self._pty_subproc = proc
-            self._pty_active = True
+            self._pty_active = proxy_was_active
 
         reader = threading.Thread(
             target=self._pty_reader_loop,
