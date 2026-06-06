@@ -1008,12 +1008,15 @@ def test_bg_external_body_uses_process_slot(capfd):
             slot.kill()
 
 
-def test_bg_python_body_uses_pipeline_slot(capfd):
-    """A Python-command body must run on ``PipelineSlot`` (no PTY); its
-    ``print(...)`` output goes through the slot's pipe and is buffered until
-    the user switches in.
+def test_bg_python_body_uses_python_command_slot(capfd):
+    """A single-stage registered Python command must run on
+    ``PythonCommandSlot`` (not the PipelineSlot pipe path) so the body can
+    call :func:`passthrough_run` to allocate its own PTY for nested
+    interactive subprocesses (``aws ssm start-session`` etc.).  Output is
+    buffered through the slot's ``_StdoutProxy`` until the user switches
+    in.
     """
-    from cshell2.shell import PipelineSlot
+    from cshell2.shell import PythonCommandSlot, PipelineSlot
 
     _enable_builtin("bg")
     sh = Shell()
@@ -1026,13 +1029,32 @@ def test_bg_python_body_uses_pipeline_slot(capfd):
     name = sh._run_in_background(pipeline)
     slot = sh.context_manager.contexts[name].process_slot
     try:
-        assert isinstance(slot, PipelineSlot)
+        assert isinstance(slot, PythonCommandSlot)
+        assert not isinstance(slot, PipelineSlot)
         slot._thread.join(timeout=2.0)
         assert not slot._thread.is_alive()
         captured = capfd.readouterr()
         assert "py-marker-abc" not in captured.out
-        joined = b"".join(slot._out_buffer._buf)
-        assert b"py-marker-abc" in joined
+        # Output is buffered in the slot's _StdoutProxy ready to replay.
+        assert "py-marker-abc" in slot._proxy._buf.getvalue()
+    finally:
+        if slot._thread.is_alive():
+            slot._thread.join(timeout=1.0)
+
+
+def test_bg_multi_stage_body_uses_pipeline_slot():
+    """A multi-stage pipeline body falls through to :class:`PipelineSlot`
+    (OS pipe + Popen)."""
+    from cshell2.shell import PipelineSlot
+
+    _enable_builtin("bg")
+    sh = Shell()
+    pipeline = Pipeline(stages=[Stage(text="echo hi"), Stage(text="cat")])
+    name = sh._run_in_background(pipeline)
+    slot = sh.context_manager.contexts[name].process_slot
+    try:
+        assert isinstance(slot, PipelineSlot)
+        slot._thread.join(timeout=2.0)
     finally:
         if slot._thread.is_alive():
             slot._thread.join(timeout=1.0)

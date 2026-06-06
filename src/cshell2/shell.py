@@ -2080,34 +2080,74 @@ class Shell:
     def _make_background_slot(self, pipeline: Pipeline, display: str):
         """Return a started slot for *pipeline*, or ``None`` on startup error.
 
-        A single-stage external command (no decorator, no redirects, no
-        assignments, no registered Python handler) gets a real PTY-backed
-        :class:`ProcessSlot` so interactive TUIs (``vi``, ``htop``, …) work
-        when the user switches in.  Anything else — multi-stage pipelines,
-        Python commands, decorators in the body — runs on a
-        :class:`PipelineSlot` (OS pipe + ``subprocess.Popen``), since those
-        cases would either break under a single PTY or have no obvious
-        argv/env to launch.
+        Three-way dispatch matches the foreground execution path for the
+        same body shape, so resume after ``Ctrl+]`` works the same as if
+        the user had backgrounded a foreground job:
 
-        On Windows ``ProcessSlot`` is unavailable, so everything goes
-        through ``PipelineSlot`` as before.
+        * **Single-stage external** (``@bg vi``) → :class:`ProcessSlot`
+          (real PTY).  Interactive TUIs work; alt-screen restore works.
+        * **Single-stage Python command** (``@bg hp ssm xyz``) →
+          :class:`PythonCommandSlot`.  ``_in_pipeline.flag`` stays ``False``
+          so :func:`passthrough_run` can allocate its own PTY for the
+          subprocess just like in the foreground path.
+        * **Anything else** — multi-stage pipelines, decorator-bodied
+          stages, redirected bodies → :class:`PipelineSlot` (OS pipe +
+          ``subprocess.Popen``).
+
+        On Windows ``ProcessSlot`` and ``PythonCommandSlot``'s passthrough
+        machinery are unavailable, so everything goes through
+        ``PipelineSlot`` as before.
         """
-        argv = self._pipeline_external_argv(pipeline) if not IS_WINDOWS else None
-        if argv is None:
-            slot = PipelineSlot(pipeline, display)
-            slot.start()
-            return slot
+        if not IS_WINDOWS:
+            argv = self._pipeline_external_argv(pipeline)
+            if argv is not None:
+                slot = ProcessSlot()
+                try:
+                    slot.start(argv=argv, env=dict(os.environ), cwd=os.getcwd())
+                except FileNotFoundError:
+                    print(f"cshell2: command not found: {argv[0]}")
+                    return None
+                except OSError as e:
+                    print(f"cshell2: {e}")
+                    return None
+                return slot
 
-        slot = ProcessSlot()
-        try:
-            slot.start(argv=argv, env=dict(os.environ), cwd=os.getcwd())
-        except FileNotFoundError:
-            print(f"cshell2: command not found: {argv[0]}")
-            return None
-        except OSError as e:
-            print(f"cshell2: {e}")
-            return None
+            py = self._pipeline_python_command(pipeline)
+            if py is not None:
+                cmd, args = py
+                slot = PythonCommandSlot(cmd, args)
+                slot.start()
+                return slot
+
+        slot = PipelineSlot(pipeline, display)
+        slot.start()
         return slot
+
+    def _pipeline_python_command(self, pipeline: Pipeline):
+        """Return ``(cmd, args)`` if *pipeline* is a single-stage Python command.
+
+        Same gating as :meth:`_pipeline_external_argv` but inverted on the
+        registry check: returns the registered :class:`Command` (with its
+        Python handler) rather than raw argv.
+        """
+        if type(pipeline).run is not Pipeline.run:
+            return None
+        if len(pipeline.stages) != 1:
+            return None
+        stage = pipeline.stages[0]
+        if stage.decorator is not None:
+            return None
+        if stage.redirects:
+            return None
+        tokens = self._tokenize_stage(stage)
+        if not tokens:
+            return None
+        if all(self._ASSIGNMENT_RE.match(t) for t in tokens):
+            return None
+        cmd = self.registry.get(tokens[0])
+        if cmd is None or not cmd.has_any_handler():
+            return None
+        return cmd, tokens[1:]
 
     def _pipeline_external_argv(self, pipeline: Pipeline) -> list[str] | None:
         """Return argv if *pipeline* is a single-stage external command.
