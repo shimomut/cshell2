@@ -474,16 +474,18 @@ def register() -> None:
             # Clamp scroll if the current content can't accommodate it.
             sy = min(scroll_y, max(0, total - body_rows))
             sx = min(scroll_x, max(0, max_line_len - max(1, body_cols)))
-            header = _format_header(cmd_text, interval, cols)
-            # Footer renders one cell short of the full width.  Writing
-            # the bottom-right cell would advance the cursor past the
-            # margin and trigger a scroll on some terminals (xterm.js /
-            # VS Code) even with wrap disabled.  Build the footer at
-            # ``cols - 1`` so the right-edge hint ("q quit") isn't
-            # truncated by a post-hoc pad-or-trunc.
-            footer_w = max(0, cols - 1)
+            # Header and footer render one cell short of the full
+            # width — writing the bottom-right cell would advance the
+            # cursor past the margin and trigger a scroll on some
+            # terminals (xterm.js / VS Code) even with wrap disabled.
+            # The right-edge cell on each bar is then painted by EL
+            # (\x1b[K) under the status-bar SGR — see the assembly
+            # below — so the background reaches the edge without any
+            # character actually being written there.
+            bar_w = max(0, cols - 1)
+            header = _format_header(cmd_text, interval, bar_w)
             footer = _format_footer(
-                footer_w,
+                bar_w,
                 scroll_y=sy,
                 total_lines=total,
                 visible_rows=body_rows,
@@ -511,15 +513,19 @@ def register() -> None:
             # The body and header rows are safe to fill edge-to-edge
             # because the cursor is repositioned absolutely on the next
             # row before it can wrap.
-            footer_padded = footer  # already exactly cols - 1 wide
             scheme = get_color_scheme()
             statusbar_sgr = _bg(*scheme.statusbar_bg) + _fg(*scheme.statusbar_fg)
+            # EL (\x1b[K) clears to end-of-line in the *current* SGR
+            # background (back-color-erase), so issuing it after the
+            # status-bar SGR paints the unwritten right-edge cell with
+            # the bar's background colour.  EL doesn't move the cursor,
+            # so it can't trip the margin-overflow scroll the way
+            # writing a character into that cell would.
             parts: list[str] = [
-                _RESET,
                 "\x1b[1;1H",
-                "\x1b[K",
                 statusbar_sgr,
-                _pad_or_trunc(header, cols),
+                "\x1b[K",
+                _pad_or_trunc(header, bar_w),
                 _RESET,
             ]
             for i in range(body_rows):
@@ -529,7 +535,7 @@ def register() -> None:
                     row += bar[i] if i < len(bar) else " "
                 parts.append(f"\x1b[{i + 2};1H{_RESET}\x1b[K{row}")
             parts.append(
-                f"\x1b[{rows};1H{_RESET}\x1b[K{statusbar_sgr}{footer_padded}{_RESET}"
+                f"\x1b[{rows};1H{statusbar_sgr}\x1b[K{footer}{_RESET}"
             )
             out.write("".join(parts))
             out.flush()
