@@ -407,6 +407,65 @@ def test_stdout_isatty_visible_to_decorator_body():
     assert proxy.isatty() == _sys.__stdout__.isatty()
 
 
+def test_watch_apply_scroll_key_clamps_to_range():
+    """Scroll deltas must clamp to ``[0, max]`` so the user can't navigate
+    past the start or end of the buffered output."""
+    from cshell2.decorators.watch import (
+        _KEY_DOWN, _KEY_END, _KEY_HOME, _KEY_PAGE_DOWN, _KEY_PAGE_UP, _KEY_UP,
+        _apply_scroll_key,
+    )
+
+    common = dict(body_rows=10, total_lines=100, max_line_len=80, body_cols=80)
+
+    # PageDown from 0 → +10.  Up from 0 → still 0.
+    assert _apply_scroll_key(_KEY_PAGE_DOWN, scroll_y=0, scroll_x=0, **common)[0] == 10
+    assert _apply_scroll_key(_KEY_UP, scroll_y=0, scroll_x=0, **common)[0] == 0
+    # G jumps to the bottom; further Down stays clamped.
+    end_y = _apply_scroll_key(_KEY_END, scroll_y=0, scroll_x=0, **common)[0]
+    assert end_y == 90  # total - body_rows
+    assert _apply_scroll_key(_KEY_DOWN, scroll_y=end_y, scroll_x=0, **common)[0] == end_y
+    # Home returns to the top.
+    assert _apply_scroll_key(_KEY_HOME, scroll_y=end_y, scroll_x=0, **common)[0] == 0
+    # PageUp from middle clamps to 0 when the chunk overshoots.
+    assert _apply_scroll_key(_KEY_PAGE_UP, scroll_y=5, scroll_x=0, **common)[0] == 0
+
+
+def test_watch_render_scrollbar_thumb_size_and_position():
+    """Scrollbar thumb is proportional to visible/total and slides as we scroll."""
+    from cshell2.decorators.watch import _render_scrollbar
+
+    # No scrollbar when content fits.
+    bar = _render_scrollbar(body_rows=10, scroll_y=0, total_lines=10)
+    assert bar == [" "] * 10
+
+    # 100 lines into a 10-row body → thumb is 1 row at the very top.
+    bar = _render_scrollbar(body_rows=10, scroll_y=0, total_lines=100)
+    assert bar[0] == "█"
+    assert bar.count("█") >= 1
+
+    # Scrolled to bottom → thumb is at the last row.
+    bar = _render_scrollbar(body_rows=10, scroll_y=90, total_lines=100)
+    assert bar[-1] == "█"
+
+
+def test_watch_slice_for_render_pads_and_trims():
+    """The visible window is body_rows tall, body_cols wide, padded with
+    blanks when the buffered output is shorter than the body."""
+    from cshell2.decorators.watch import _slice_for_render
+
+    lines = ["aaa", "bbbb", "cc"]
+    out = _slice_for_render(lines, scroll_y=0, scroll_x=0, body_rows=5, body_cols=3)
+    assert out == ["aaa", "bbb", "cc", "", ""]
+
+    # Vertical scroll skips the head.
+    out = _slice_for_render(lines, scroll_y=1, scroll_x=0, body_rows=2, body_cols=10)
+    assert out == ["bbbb", "cc"]
+
+    # Horizontal scroll skips columns.
+    out = _slice_for_render(lines, scroll_y=0, scroll_x=2, body_rows=3, body_cols=10)
+    assert out == ["a", "bb", ""]
+
+
 def test_watch_pipeline_redirected_to_helper():
     """`@watch`'s alt-screen path appends a `> /tmp/...` redirect to the
     body's last stage so output can be captured before drawing.  The
