@@ -22,9 +22,9 @@ here in enhancements.md until each item lands.
   Allowing it means letting the outer-sequence parser treat the
   decorator-stage as one statement; the parser already isolates the
   decorator scope so the additional change is small.
-- **More built-ins** (`@time`, `@retry`, `@quiet`, `@bg`) —
-  each gets its own `cshell2/decorators/<name>.py` and a call to
-  `enable(...)` in `_register_builtins`.
+- **More built-ins** — `@time`, `@retry`, `@quiet`, and `@bg` are
+  shipped (alongside `@watch`).  Future candidates: `@confirm`
+  (prompt before running) and `@nice -n N` (process-priority wrapper).
 - **Reload integration** — `reload` should call
   `decorator_registry.clear_user_decorators()` once user decorators
   start landing in `~/.cshell2/decorators/`.

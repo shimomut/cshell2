@@ -77,7 +77,7 @@ change.
 ├─────────────────────────────────────────────────────┤
 │  Decorators (decorators/)                           │
 │  ├── @name [flags] body — wrap pipeline at runtime │
-│  └── Built-ins: @watch                             │
+│  └── Built-ins: @watch, @time, @retry, @quiet, @bg │
 ├─────────────────────────────────────────────────────┤
 │  User Config (~/.cshell2/config.py)                 │
 │  ├── Custom command definitions                    │
@@ -652,9 +652,11 @@ def watch(pipeline, *, interval, no_clear):
 
 The decorator function receives a `Pipeline` (the parsed AST of the wrapped body) and the parsed flag namespace as kwargs. `pipeline.run()` re-enters `Shell._execute_pipeline` so redirects, pipes, and Python-stage routing all work the same as at the top level.
 
-**Built-in decorators:** `@watch` (in `cshell2/decorators/watch.py`).
+**Built-in decorators:** `@watch`, `@time`, `@retry`, `@quiet`, `@bg` (each in its own `cshell2/decorators/<name>.py`).
 
-**Loading:** `Shell._register_builtins` calls `enable_decorators("watch")` on construction. The `enable("*")` helper, search-path mechanism, and `add_decorator_path()` mirror `cshell2/recipes/`.
+**Loading:** `Shell._register_builtins` calls `enable_decorators("watch", "time", "retry", "quiet", "bg")` on construction. The `enable("*")` helper, search-path mechanism, and `add_decorator_path()` mirror `cshell2/recipes/`.
+
+**`@bg` and slot infrastructure.** `@bg` runs its body on a `PipelineSlot` — a subclass of `PythonCommandSlot` whose work unit is a `Pipeline.run()` call instead of a single Python command. It registers itself as the new context's `process_slot`, so the run-loop's existing resume path (proxy buffering, `Ctrl+]` switching, `_compute_exit_code`) handles it without further wiring. The decorator-side hook is `set_background_runner()` in `cshell2.decorators` (parallel to `set_pipeline_executor`); `Shell.__init__` registers `_run_in_background` against it.
 
 **Caveats inherited from in-process Python pipelines.** A decorator body is a Python command in everything but syntax, so the constraints from `doc/limitations.md` ("Python commands in pipelines — caveats of the in-process model") apply: nested `subprocess.run` writes to the real terminal unless given `stdout=sys.stdout`, pure-CPU loops can't be `Ctrl+C`-interrupted in a piped context, and `passthrough_run`/`passthrough_input` raise `RuntimeError` from a piped decorator.
 
@@ -731,7 +733,11 @@ cshell2/
 │       │   └── tail.py
 │       └── decorators/
 │           ├── __init__.py     # Decorator/DecoratorRegistry/enable(*names)
-│           └── watch.py        # @watch built-in
+│           ├── watch.py        # @watch built-in
+│           ├── time.py         # @time built-in
+│           ├── retry.py        # @retry built-in
+│           ├── quiet.py        # @quiet built-in
+│           └── bg.py           # @bg built-in
 └── tests/
     ├── test_commands.py
     ├── test_completion.py

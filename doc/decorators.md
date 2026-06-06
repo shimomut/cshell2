@@ -519,25 +519,44 @@ Shipped:
 | Decorator | Purpose |
 |-----------|---------|
 | `@watch [-n SEC] [--no-clear]` | re-run pipeline on a timer |
-
-Future starter set, ordered by how clearly they motivate the syntax:
-
-| Decorator | Purpose |
-|-----------|---------|
 | `@time` | print wall/user/sys time after the pipeline finishes |
-| `@retry [-n N]` | re-run on non-zero exit, up to N times |
+| `@retry [-n N] [--delay SEC]` | re-run on non-zero exit, up to N times |
 | `@quiet [--stderr]` | discard stdout (and optionally stderr) |
 | `@bg [--as NAME]` | run pipeline in a background context slot (replaces `&`); auto-named if `--as` omitted |
 
-`@bg` is interesting because it ties into cshell2's existing
-context-multiplexing primitives — a decorator becomes the natural
-surface for "run this pipeline in a different process slot."  The
-named and anonymous cases are the same decorator: omit `--as` for a
-fresh auto-named slot (`bg-1`, `bg-2`, …), pass `--as build` to
-target/create a context by name.  A positional NAME can't be used
-because the decorator parser stops at the first non-flag token and
-treats it as the start of the body (see [Args syntax](#resolved-ux-questions)),
-so the name flows through `--as` / `-n`.
+`@bg` ties into cshell2's existing context-multiplexing primitives —
+a decorator becomes the natural surface for "run this pipeline in a
+different process slot."  The named and anonymous cases are the same
+decorator: omit `--as` for a fresh auto-named slot (`bg-1`, `bg-2`,
+…), pass `--as build` to target/create a context by name.  A
+positional NAME can't be used because the decorator parser stops at
+the first non-flag token and treats it as the start of the body (see
+[Args syntax](#resolved-ux-questions)), so the name flows through
+`--as` / `-n`.
+
+`@bg` is implemented on top of a new `PipelineSlot` (sibling of
+`PythonCommandSlot`) so a backgrounded pipeline behaves like any
+other slot: `Ctrl+]` switches in to watch live output, `context kill`
+sends `KeyboardInterrupt` to the worker, and `context list` shows
+the slot's pipeline text as the "command line."  `@bg` cannot be a
+stage of an outer pipeline (`@bg {body} | next`) because it returns
+immediately and the next stage would have nothing to read; that
+case raises a clear error.
+
+`@quiet` is implemented by appending `> /dev/null` (and `2>&1` with
+`--stderr`) to the body's last stage via the same `Redirect` AST the
+shell already understands, so it composes naturally with everything
+else.
+
+`@retry`'s `--delay` is an extension over the original sketch — it
+sleeps between attempts to avoid hammering a flaky service.
+
+Future ideas:
+
+| Decorator | Purpose |
+|-----------|---------|
+| `@confirm` | prompt before running (e.g. for destructive commands) |
+| `@nice -n N` | run pipeline at a different process priority |
 
 ## Resolved UX questions
 
@@ -643,9 +662,9 @@ follow-up items."
   Allowing it means letting the outer-sequence parser treat the
   decorator-stage as one statement; the parser already isolates the
   decorator scope so the additional change is small.
-- **More built-ins** (`@time`, `@retry`, `@quiet`, `@bg`) —
-  each gets its own `cshell2/decorators/<name>.py` and a call to
-  `enable(...)` in `_register_builtins`.
+- **More built-ins** — `@time`, `@retry`, `@quiet`, and `@bg` are
+  shipped.  Future candidates: `@confirm` (prompt before running)
+  and `@nice -n N` (process-priority wrapper).
 - **Reload integration** — `reload` should call
   `decorator_registry.clear_user_decorators()` once user decorators
   start landing in `~/.cshell2/decorators/`.

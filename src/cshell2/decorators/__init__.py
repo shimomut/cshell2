@@ -40,7 +40,29 @@ from ..commands import (
     _effective_description,
 )
 from ..completion import Completer
-from ..pipeline import set_decorator_value_flag_lookup
+from ..pipeline import Pipeline, set_decorator_value_flag_lookup
+
+
+# Late-bound hook so ``@bg`` can ask the running Shell to spawn a background
+# slot.  Wired from ``Shell.__init__`` to keep the decorator package free of
+# any Shell import (decorators are loaded *during* Shell construction).  The
+# callable's contract: ``run_in_background(pipeline, name=None) -> str`` —
+# returns the resolved context name on success, raises ValueError on
+# collision/invalid input.
+_background_runner: Callable[..., str] | None = None
+
+
+def set_background_runner(fn: Callable[..., str] | None) -> None:
+    global _background_runner
+    _background_runner = fn
+
+
+def run_in_background(pipeline: Pipeline, *, name: str | None = None) -> str:
+    if _background_runner is None:
+        raise RuntimeError(
+            "@bg requires a running Shell; no background runner is registered"
+        )
+    return _background_runner(pipeline, name=name)
 
 
 @dataclass

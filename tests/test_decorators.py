@@ -6,6 +6,8 @@ the registry, the executor dispatch, and ``@<TAB>`` completion.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from cshell2.commands import arg, registry as command_registry
@@ -687,3 +689,280 @@ def test_thread_local_stdout_isatty_falls_through(monkeypatch):
         assert tls.isatty() == _sys.__stdout__.isatty()
     finally:
         tls.clear_override()
+
+
+# ---------------------------------------------------------------------------
+# @time, @retry, @quiet, @bg — built-in decorators
+# ---------------------------------------------------------------------------
+
+def _enable_builtin(name: str) -> None:
+    """Load a built-in decorator without spinning up a full Shell.
+
+    Tests that just need the decorator registered (parsing / arg checks)
+    can call this and rely on the autouse fixture to pop it again.
+    """
+    from cshell2.decorators import enable as enable_decorators
+    enable_decorators(name)
+
+
+def _make_recording_pipeline(callback):
+    """Return a Pipeline whose run() invokes *callback()* and returns its int.
+
+    Tests use this to drive decorator functions directly without going
+    through ``_execute`` (which under pytest needs a real terminal for the
+    Python-command forwarding path).
+    """
+    from cshell2.pipeline import Pipeline as _P, Stage as _S
+
+    class _RecordingPipeline(_P):
+        def run(self, stdin=None, stdout=None, stderr=None):
+            return callback()
+
+    return _RecordingPipeline(stages=[_S(text="<recorded>")])
+
+
+def test_time_decorator_runs_body_and_emits_summary(capsys):
+    _enable_builtin("time")
+    deco = decorator_registry.get("time")
+
+    calls = {"n": 0}
+
+    def _body():
+        calls["n"] += 1
+        return 0
+
+    pipeline = _make_recording_pipeline(_body)
+    rc = deco.func(pipeline)
+    assert rc == 0
+    assert calls["n"] == 1
+    err = capsys.readouterr().err
+    for label in ("real\t", "user\t", "sys\t"):
+        assert label in err
+
+
+def test_retry_succeeds_first_attempt(capsys):
+    _enable_builtin("retry")
+    deco = decorator_registry.get("retry")
+    calls = {"n": 0}
+
+    def _ok():
+        calls["n"] += 1
+        return 0
+
+    pipeline = _make_recording_pipeline(_ok)
+    rc = deco.func(pipeline, attempts=3, delay=0.0)
+    assert rc == 0
+    assert calls["n"] == 1
+
+
+def test_retry_eventual_success(capsys):
+    _enable_builtin("retry")
+    deco = decorator_registry.get("retry")
+    calls = {"n": 0}
+
+    def _flaky():
+        calls["n"] += 1
+        return 0 if calls["n"] >= 3 else 1
+
+    pipeline = _make_recording_pipeline(_flaky)
+    rc = deco.func(pipeline, attempts=5, delay=0.0)
+    assert rc == 0
+    assert calls["n"] == 3
+    err = capsys.readouterr().err
+    assert err.count("retrying") == 2
+
+
+def test_retry_gives_up(capsys):
+    _enable_builtin("retry")
+    deco = decorator_registry.get("retry")
+    calls = {"n": 0}
+
+    def _bad():
+        calls["n"] += 1
+        return 7
+
+    pipeline = _make_recording_pipeline(_bad)
+    rc = deco.func(pipeline, attempts=2, delay=0.0)
+    assert rc == 7
+    assert calls["n"] == 2
+    err = capsys.readouterr().err
+    assert "gave up" in err
+
+
+def test_retry_invalid_attempts(capsys):
+    _enable_builtin("retry")
+    deco = decorator_registry.get("retry")
+    pipeline = _make_recording_pipeline(lambda: 0)
+    rc = deco.func(pipeline, attempts=0, delay=0.0)
+    assert rc == 2
+    assert "must be >= 1" in capsys.readouterr().err
+
+
+def test_quiet_silenced_helper_appends_redirect():
+    _enable_builtin("quiet")
+    from cshell2.decorators.quiet import _silenced
+    from cshell2.pipeline import Pipeline, Redirect, Stage
+
+    original = Pipeline(stages=[Stage(text="echo hi"), Stage(text="grep h")])
+    silenced = _silenced(original, also_stderr=False)
+    # Original untouched.
+    assert [s.redirects for s in original.stages] == [[], []]
+    # Last stage now writes to /dev/null.
+    assert silenced.stages[-1].redirects[0].kind == ">"
+    assert silenced.stages[-1].redirects[0].target == os.devnull
+    assert len(silenced.stages[-1].redirects) == 1
+
+    silenced2 = _silenced(original, also_stderr=True)
+    # With --stderr, an additional 2>&1 is appended so stderr follows stdout.
+    assert silenced2.stages[-1].redirects[1] == Redirect(kind="2>&1", target="1")
+
+
+def test_quiet_discards_stdout(tmp_path):
+    _enable_builtin("quiet")
+    sh = Shell()
+
+    out_marker = tmp_path / "should_be_empty"
+    out_marker.write_text("placeholder\n")  # ensure file gets overwritten
+
+    @command_registry.command(name="_t_quiet_body")
+    def _body():
+        print("hidden output")
+        import sys
+        print("err output", file=sys.stderr)
+
+    # @quiet's body's stdout goes to /dev/null; our outer redirect captures
+    # whatever stdout reaches the decorator (which is nothing now).
+    sh._execute(f"@quiet _t_quiet_body > {out_marker}")
+    # The outer ``>`` redirect creates an empty file (the decorator
+    # function returned 0 having printed nothing to its own stdout).
+    assert out_marker.read_text() == ""
+
+
+def _make_blocking_pipeline(release_event):
+    """Pipeline whose run() blocks until *release_event* is set, then returns 0."""
+    def _body():
+        release_event.wait(timeout=2.0)
+        return 0
+    return _make_recording_pipeline(_body)
+
+
+def test_bg_starts_background_context_with_auto_name():
+    import threading
+    _enable_builtin("bg")
+    sh = Shell()
+    release = threading.Event()
+    name = sh._run_in_background(_make_blocking_pipeline(release))
+    try:
+        assert name == "bg-1"
+        ctx = sh.context_manager.contexts["bg-1"]
+        assert ctx.process_slot is not None
+        assert ctx.process_slot.is_alive()
+    finally:
+        release.set()
+        sh.context_manager.contexts["bg-1"].process_slot._thread.join(timeout=2.0)
+
+
+def test_bg_named_context():
+    import threading
+    _enable_builtin("bg")
+    sh = Shell()
+    release = threading.Event()
+    name = sh._run_in_background(_make_blocking_pipeline(release), name="my-job")
+    try:
+        assert name == "my-job"
+        assert "my-job" in sh.context_manager.contexts
+    finally:
+        release.set()
+        sh.context_manager.contexts["my-job"].process_slot._thread.join(timeout=2.0)
+
+
+def test_bg_refuses_collision_with_running_slot():
+    import threading
+    _enable_builtin("bg")
+    sh = Shell()
+    release = threading.Event()
+    sh._run_in_background(_make_blocking_pipeline(release), name="taken")
+    try:
+        with pytest.raises(ValueError, match="already has a running process"):
+            sh._run_in_background(_make_blocking_pipeline(release), name="taken")
+    finally:
+        release.set()
+        sh.context_manager.contexts["taken"].process_slot._thread.join(timeout=2.0)
+
+
+def test_bg_auto_name_skips_existing():
+    import threading
+    _enable_builtin("bg")
+    sh = Shell()
+    release = threading.Event()
+    n1 = sh._run_in_background(_make_blocking_pipeline(release))
+    n2 = sh._run_in_background(_make_blocking_pipeline(release))
+    try:
+        assert n1 == "bg-1"
+        assert n2 == "bg-2"
+    finally:
+        release.set()
+        for n in ("bg-1", "bg-2"):
+            sh.context_manager.contexts[n].process_slot._thread.join(timeout=2.0)
+
+
+def test_bg_decorator_function_calls_runner(capsys):
+    """The @bg decorator function delegates to the shell-side runner via
+    the ``set_background_runner`` hook.  Verify the message format and
+    return code without spinning up a real Shell."""
+    _enable_builtin("bg")
+    deco = decorator_registry.get("bg")
+    from cshell2.decorators import set_background_runner
+
+    received = {}
+
+    def _fake_runner(pipeline, *, name=None):
+        received["pipeline"] = pipeline
+        received["name"] = name
+        return name or "bg-fake"
+
+    set_background_runner(_fake_runner)
+    try:
+        pipeline = _make_recording_pipeline(lambda: 0)
+        rc = deco.func(pipeline, ctx_name="explicit")
+        assert rc == 0
+        assert received["pipeline"] is pipeline
+        assert received["name"] == "explicit"
+        assert "started in context 'explicit'" in capsys.readouterr().err
+    finally:
+        # Restore the shell's runner if one was registered before this test.
+        from cshell2.shell import Shell as _Shell  # noqa: F401
+        # Simplest restore: register None; subsequent Shell() calls re-wire.
+        set_background_runner(None)
+
+
+def test_bg_pipeline_slot_is_python_command_slot_subclass():
+    """run() loop's resume path branches on isinstance(slot, PythonCommandSlot).
+    PipelineSlot must subclass it so backgrounded pipelines take the
+    Python-command resume path (proxy buffering, no PTY)."""
+    from cshell2.shell import PipelineSlot, PythonCommandSlot
+
+    assert issubclass(PipelineSlot, PythonCommandSlot)
+
+
+def test_bg_refuses_outer_pipeline_composition(capsys):
+    """`@bg {body} | next` makes no sense — @bg returns immediately and the
+    next stage would have nothing to read.  Verify the runner refuses it."""
+    _enable_builtin("bg")
+    sh = Shell()
+    import threading
+    from cshell2.shell import _in_pipeline
+
+    @command_registry.command(name="_t_bg_pipe_body")
+    def _body():
+        pass
+
+    # Simulate being inside an outer pipeline by setting the thread-local flag.
+    _in_pipeline.flag = True
+    try:
+        with pytest.raises(ValueError, match="outer pipeline"):
+            sh._run_in_background(
+                Pipeline(stages=[Stage(text="echo hi")]),
+            )
+    finally:
+        _in_pipeline.flag = False

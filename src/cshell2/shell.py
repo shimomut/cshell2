@@ -945,6 +945,76 @@ def _positional_label(cmd, pos_idx: int, command_name: str, args: list[str]) -> 
     return f"arg {pos_idx + 1}"
 
 
+class PipelineSlot(PythonCommandSlot):
+    """Background slot whose work unit is a parsed pipeline, not a single Python command.
+
+    Reuses the entire ``PythonCommandSlot`` runtime (proxy-buffered stdout,
+    raw-mode replay, kill via async exception, ``Ctrl+]`` switching) and only
+    overrides ``_run`` to drive ``Pipeline.run()`` instead of ``cmd.invoke()``.
+    Stdio is rebound to the slot's proxy on the worker thread so output goes to
+    the slot buffer until the user switches in.
+    """
+
+    def __init__(self, pipeline: "Pipeline", display_text: str) -> None:
+        # Bypass PythonCommandSlot.__init__ — it expects a Command, which we
+        # don't have.  We mirror its attribute set ourselves.  ``argv`` is what
+        # the context list / picker shows as the "command line" for the slot.
+        self._cmd = None  # never used; kept so ``_pty_lock``/etc. branches are safe
+        self._raw_args: list[str] = []
+        self.argv: list[str] = [display_text]
+        self._pipeline = pipeline
+        self._thread: threading.Thread | None = None
+        self._proxy: _StdoutProxy | None = None
+        self._exit_exception: BaseException | None = None
+        self._finished = threading.Event()
+        self.buffer = _NullBuffer()
+        self.exit_code: int | None = None
+        self._pty_master_fd: int = -1
+        self._pty_subproc: subprocess.Popen | None = None
+        self._pty_reader: threading.Thread | None = None
+        self._pty_buffer = OutputBuffer()
+        self._pty_active = False
+        self._pty_lock = threading.Lock()
+        self._input_request = threading.Event()
+        self._input_released = threading.Event()
+        self._input_resume = threading.Event()
+        self._input_interrupted = threading.Event()
+        self._keybuf: bytearray = bytearray()
+        self._keybuf_lock = threading.Lock()
+        self._keybuf_event = threading.Event()
+
+    def start(self) -> None:
+        real = getattr(sys.stdout, "_real", sys.stdout)
+        self._proxy = _StdoutProxy(real)
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"bg-{self.argv[0][:32]}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        if hasattr(sys.stdout, "set_override"):
+            sys.stdout.set_override(self._proxy)
+        _current_slot.slot = self
+        try:
+            code = self._pipeline.run()
+            self.exit_code = code if isinstance(code, int) else 0
+        except SystemExit as e:
+            self._exit_exception = e
+        except KeyboardInterrupt as e:
+            self._exit_exception = e
+        except Exception as e:
+            self._exit_exception = e
+        finally:
+            _current_slot.slot = None
+            if hasattr(sys.stdout, "clear_override"):
+                sys.stdout.clear_override()
+            if self.exit_code is None:
+                self.exit_code = self._compute_exit_code()
+            self._finished.set()
+
+
 class Shell:
     def __init__(self):
         # Enable VT output / disable newline translation (Windows) before any
@@ -988,6 +1058,9 @@ class Shell:
 
         # Wire Pipeline.run() so decorator bodies can re-enter execution.
         set_pipeline_executor(self._run_pipeline_from_decorator)
+        # Wire @bg so it can ask the running shell for a new background slot.
+        from .decorators import set_background_runner
+        set_background_runner(self._run_in_background)
 
     def _maybe_decorator_completion(
         self,
@@ -1693,9 +1766,9 @@ class Shell:
             else:
                 print(f"Unknown subcommand: {subcommand}")
 
-        # Register built-in pipeline decorators (@watch, etc.).
+        # Register built-in pipeline decorators.
         from .decorators import enable as enable_decorators
-        enable_decorators("watch")
+        enable_decorators("watch", "time", "retry", "quiet", "bg")
 
     def _load_user_config(self) -> None:
         config_path = Path.home() / ".cshell2" / "config.py"
@@ -1820,6 +1893,45 @@ class Shell:
             )
         in_outer_pipe = getattr(_in_pipeline, "flag", False)
         return self._execute_pipeline(pipeline, _in_outer_pipe=in_outer_pipe)
+
+    def _run_in_background(self, pipeline: Pipeline, *, name: str | None = None) -> str:
+        """Spawn *pipeline* in a new background context; return the context name.
+
+        Used by the ``@bg`` decorator via the ``set_background_runner`` hook.
+        Refuses outer-pipeline composition: ``@bg`` returns immediately, so a
+        downstream ``| next`` stage would have nothing to read.
+        """
+        if getattr(_in_pipeline, "flag", False):
+            raise ValueError(
+                "@bg cannot be used as a stage of an outer pipeline "
+                "(the decorator returns immediately, so downstream stages would block)"
+            )
+        existing = self.context_manager.contexts
+        if name is None:
+            i = 1
+            while f"bg-{i}" in existing:
+                i += 1
+            name = f"bg-{i}"
+        else:
+            ctx = existing.get(name)
+            if ctx is not None and ctx.process_slot and ctx.process_slot.is_alive():
+                raise ValueError(
+                    f"context '{name}' already has a running process; "
+                    f"choose a different name or kill the existing one first"
+                )
+
+        display = " | ".join(s.text for s in pipeline.stages) or f"@bg {name}"
+        slot = PipelineSlot(pipeline, display)
+        slot.start()
+
+        if name in existing:
+            target = existing[name]
+            target.process_slot = slot
+        else:
+            inherited = dict(self.context_manager.current().variables) if self.context_manager.current() else {}
+            target = self.context_manager.create(name, variables=inherited)
+            target.process_slot = slot
+        return name
 
     def _execute_pipeline(
         self,
