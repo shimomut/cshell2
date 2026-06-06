@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -32,6 +33,14 @@ _CLEAR_SCREEN = "\x1b[2J"
 _CURSOR_HOME = "\x1b[H"
 _REVERSE_VIDEO = "\x1b[7m"
 _RESET = "\x1b[0m"
+# Disable / enable line wrap.  Drawing the last cell of the bottom-right
+# corner of the terminal otherwise advances the cursor off-screen and
+# triggers an upward scroll on most terminals (DEC margin-overflow
+# behaviour).  We turn wrap off for the duration of a frame and back on
+# during the inter-frame idle so other writers (e.g. shell prompts after
+# the loop exits) behave normally.
+_WRAP_OFF = "\x1b[?7l"
+_WRAP_ON = "\x1b[?7h"
 
 
 # Quit keys (POSIX watch(1) uses 'q'; Ctrl+C is the universal abort).
@@ -269,13 +278,54 @@ def _render_scrollbar(
     return bar
 
 
-def _split_to_lines(text: str) -> list[str]:
-    """Split *text* on \\n while expanding tabs (rough, fixed 8-col tabstops).
+# Escape-sequence stripper.  Tries to cover the common forms of ANSI
+# escape sequences a CLI may emit even when stdout is redirected to a
+# file (TTY-autodetection in the wild is unreliable):
+#
+#   * CSI:  ESC [ <params> <intermediate>* <final 0x40..0x7e>
+#   * 8-bit CSI: a single 0x9b byte playing the same role
+#   * OSC:  ESC ] ... terminated by BEL (\x07) or ST (ESC \)
+#   * DCS:  ESC P ... ESC \
+#   * Generic two-/three-byte ESC sequences (ESC + intermediate* + final)
+#
+# Order matters: CSI is matched before the generic ESC rule so the
+# full parameter list is consumed in one shot rather than just `ESC [`.
+_ANSI_RE = re.compile(
+    r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]"
+    r"|\x9b[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]"
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1bP[^\x1b]*\x1b\\"
+    r"|\x1b[\x20-\x2f]*[\x30-\x7e]"
+)
 
-    Tab expansion is approximate but matches what most terminals would do
-    for the unstyled command output we re-render.
+# Stray C0/C1 control bytes that survive the escape strip (e.g. BS, BEL,
+# DEL emitted mid-line for crude over-print effects).  Drop them so they
+# don't inflate ``len(line)`` in the column-count display.
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _split_to_lines(text: str) -> list[str]:
+    """Split *text* into displayable rows.
+
+    Real-world command output isn't always pure text — tools that
+    autodetect a TTY can still emit colour, cursor-position, or
+    bracketed-paste escape sequences when their stdout is redirected to
+    a file.  Those would otherwise:
+
+      * inflate ``len(line)`` so the footer reports an absurd
+        ``col 1/14488``;
+      * occasionally make a row render in the wrong colour (if a
+        non-resetting SGR runs to end-of-line);
+      * hide the start of a row if a ``\\r`` appears mid-line.
+
+    Strip ANSI / OSC sequences, normalise CRLF and bare CR to LF, then
+    expand tabs.
     """
-    return [line.expandtabs(8) for line in text.splitlines()]
+    # Normalise line endings before splitting.
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = _ANSI_RE.sub("", cleaned)
+    cleaned = _CTRL_RE.sub("", cleaned)
+    return [line.expandtabs(8) for line in cleaned.splitlines()]
 
 
 def register() -> None:
@@ -290,7 +340,17 @@ def register() -> None:
         ],
     )
     def watch(pipeline, *, interval: float, no_clear: bool) -> None:
-        is_tty = sys.stdout.isatty()
+        # Capture the *real* terminal stdout up front.  When ``@watch``
+        # wraps a registered Python command (e.g. ``awsut hyperpod
+        # describe``), the shell's redirect path rebinds ``sys.stdout``
+        # process-wide to the temp file we use to capture each
+        # iteration's output — so writes via ``sys.stdout`` from this
+        # function would land in that file, not on screen, and the
+        # captured "command output" would be polluted with our own UI
+        # bytes.  ``sys.__stdout__`` is Python's untouched original
+        # stream and stays bound to the terminal regardless.
+        out = sys.__stdout__
+        is_tty = out.isatty()
         use_alt_screen = is_tty and not no_clear
         cmd_text = _pipeline_text(pipeline)
 
@@ -321,8 +381,15 @@ def register() -> None:
             except Exception:
                 saved_mode = None
 
-        sys.stdout.write(_ALT_SCREEN_ENTER + _HIDE_CURSOR + _CLEAR_SCREEN + _CURSOR_HOME)
-        sys.stdout.flush()
+        # Reset SGR *before* clearing — \x1b[2J clears the screen with the
+        # current background colour, so a leftover reverse-video state
+        # (or any non-default background) would leave the entire alt
+        # screen painted with the wrong colour.
+        out.write(
+            _ALT_SCREEN_ENTER + _HIDE_CURSOR + _WRAP_OFF + _RESET
+            + _CLEAR_SCREEN + _CURSOR_HOME
+        )
+        out.flush()
 
         scroll_y = 0     # preserved across iterations — see the redraw loop
         scroll_x = 0
@@ -355,6 +422,16 @@ def register() -> None:
                             raw = f.read()
                     except OSError:
                         raw = b""
+                    # Optional debug aid: when CSHELL2_WATCH_DEBUG is set,
+                    # mirror the captured raw bytes to /tmp so the user
+                    # can inspect what the wrapped command actually emits
+                    # (helps diagnose ANSI / line-count surprises).
+                    if os.environ.get("CSHELL2_WATCH_DEBUG"):
+                        try:
+                            with open("/tmp/cshell2-watch-last.raw", "wb") as df:
+                                df.write(raw)
+                        except OSError:
+                            pass
                     lines = _split_to_lines(raw.decode(errors="replace"))
                 except BaseException as e:
                     err = e
@@ -383,12 +460,26 @@ def register() -> None:
             body_rows = max(0, rows - 2)
             total = len(body_lines)
             max_line_len = max((len(l) for l in body_lines), default=0)
+            # Reserve the right edge for the scrollbar only when we
+            # actually need one — otherwise let the body use the full
+            # width.  (Showing a scrollbar against content that fits
+            # would just steal a column for nothing.)
+            need_v_scroll = total > body_rows
+            scroll_col_w = 1 if need_v_scroll else 0
+            body_cols = max(0, cols - scroll_col_w)
             # Clamp scroll if the current content can't accommodate it.
             sy = min(scroll_y, max(0, total - body_rows))
-            sx = min(scroll_x, max(0, max_line_len - max(1, cols - 1)))
+            sx = min(scroll_x, max(0, max_line_len - max(1, body_cols)))
             header = _format_header(cmd_text, interval, cols)
+            # Footer renders one cell short of the full width.  Writing
+            # the bottom-right cell would advance the cursor past the
+            # margin and trigger a scroll on some terminals (xterm.js /
+            # VS Code) even with wrap disabled.  Build the footer at
+            # ``cols - 1`` so the right-edge hint ("q quit") isn't
+            # truncated by a post-hoc pad-or-trunc.
+            footer_w = max(0, cols - 1)
             footer = _format_footer(
-                cols,
+                footer_w,
                 scroll_y=sy,
                 total_lines=total,
                 visible_rows=body_rows,
@@ -403,20 +494,39 @@ def register() -> None:
                 scroll_y=sy,
                 scroll_x=sx,
                 body_rows=body_rows,
-                body_cols=max(0, cols - 1),
+                body_cols=body_cols,
             )
-            bar = _render_scrollbar(
-                body_rows=body_rows, scroll_y=sy, total_lines=total,
+            bar = (
+                _render_scrollbar(body_rows=body_rows, scroll_y=sy, total_lines=total)
+                if need_v_scroll else []
             )
-            parts: list[str] = [_CURSOR_HOME, _REVERSE_VIDEO, _pad_or_trunc(header, cols), _RESET]
-            body_cols = max(0, cols - 1)
+            # Build the whole frame.  We always stop one short of the
+            # bottom-right cell — writing it would advance the cursor
+            # past the margin, and on some terminals (xterm.js / VS
+            # Code) that triggers a scroll even with wrap disabled.
+            # The body and header rows are safe to fill edge-to-edge
+            # because the cursor is repositioned absolutely on the next
+            # row before it can wrap.
+            footer_padded = footer  # already exactly cols - 1 wide
+            parts: list[str] = [
+                _RESET,
+                "\x1b[1;1H",
+                "\x1b[K",
+                _REVERSE_VIDEO,
+                _pad_or_trunc(header, cols),
+                _RESET,
+            ]
             for i in range(body_rows):
                 line = visible[i] if i < len(visible) else ""
-                scroll_char = bar[i] if i < len(bar) else " "
-                parts.append(f"\r\n\x1b[2K{_pad_or_trunc(line, body_cols)}{scroll_char}")
-            parts.append(f"\r\n{_REVERSE_VIDEO}{_pad_or_trunc(footer, cols)}{_RESET}")
-            sys.stdout.write("".join(parts))
-            sys.stdout.flush()
+                row = _pad_or_trunc(line, body_cols)
+                if need_v_scroll:
+                    row += bar[i] if i < len(bar) else " "
+                parts.append(f"\x1b[{i + 2};1H{_RESET}\x1b[K{row}")
+            parts.append(
+                f"\x1b[{rows};1H{_RESET}\x1b[K{_REVERSE_VIDEO}{footer_padded}{_RESET}"
+            )
+            out.write("".join(parts))
+            out.flush()
 
         def _consume_finished_run() -> bool:
             """Pick up worker results.  Returns True if a BrokenPipeError
@@ -433,8 +543,10 @@ def register() -> None:
             cols, rows = terminal.terminal_size()
             body_rows = max(0, rows - 2)
             max_line_len = max((len(l) for l in body_lines), default=0)
+            need_v_scroll = len(body_lines) > body_rows
+            body_cols = max(0, cols - (1 if need_v_scroll else 0))
             scroll_y = min(scroll_y, max(0, len(body_lines) - body_rows))
-            scroll_x = min(scroll_x, max(0, max_line_len - max(1, cols - 1)))
+            scroll_x = min(scroll_x, max(0, max_line_len - max(1, body_cols)))
             return False
 
         def _handle_keys(burst: bytes) -> bool:
@@ -446,7 +558,8 @@ def register() -> None:
                 paused = not paused
             cols, rows = terminal.terminal_size()
             body_rows = max(0, rows - 2)
-            body_cols = max(0, cols - 1)
+            need_v_scroll = len(body_lines) > body_rows
+            body_cols = max(0, cols - (1 if need_v_scroll else 0))
             max_line_len = max((len(l) for l in body_lines), default=0)
             for k in (
                 _KEY_UP, _KEY_DOWN, _KEY_PAGE_UP, _KEY_PAGE_DOWN,
@@ -530,8 +643,8 @@ def register() -> None:
         except KeyboardInterrupt:
             return
         finally:
-            sys.stdout.write(_SHOW_CURSOR + _ALT_SCREEN_EXIT)
-            sys.stdout.flush()
+            out.write(_WRAP_ON + _SHOW_CURSOR + _ALT_SCREEN_EXIT)
+            out.flush()
             if saved_mode is not None and stdin_fd >= 0:
                 try:
                     terminal.restore_mode(stdin_fd, saved_mode)

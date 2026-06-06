@@ -407,6 +407,27 @@ def test_stdout_isatty_visible_to_decorator_body():
     assert proxy.isatty() == _sys.__stdout__.isatty()
 
 
+def test_watch_split_to_lines_strips_ansi_and_normalises_endings():
+    """Real CLI output often includes ANSI colour / cursor-control codes
+    even when stdout is redirected (TTY-autodetection is not reliable).
+    ``_split_to_lines`` must strip them so footer line counts are real
+    and lines never render in a leftover SGR state."""
+    from cshell2.decorators.watch import _split_to_lines
+
+    # SGR colour around content — both ends should be removed, and the
+    # visible width should be only the content itself.
+    out = _split_to_lines("\x1b[31mred\x1b[0m\nplain\n")
+    assert out == ["red", "plain"]
+
+    # CRLF and bare CR are both treated as line terminators.
+    assert _split_to_lines("a\r\nb\rc\n") == ["a", "b", "c"]
+
+    # OSC sequences (xterm title etc.) are stripped — and don't inflate
+    # the visible line length.
+    out = _split_to_lines("\x1b]0;title\x07hello\n")
+    assert out == ["hello"]
+
+
 def test_watch_apply_scroll_key_clamps_to_range():
     """Scroll deltas must clamp to ``[0, max]`` so the user can't navigate
     past the start or end of the buffered output."""
