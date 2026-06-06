@@ -16,6 +16,14 @@ from cshell2.commands import registry
 from cshell2.shell import Shell, _in_pipeline, passthrough_input, passthrough_run
 
 
+# All tests in this module exercise the in-process pipeline whose worker
+# threads route ``print()`` through a thread-local override on
+# ``sys.stdout``.  Pytest's per-test stdio capture replaces ``sys.stdout``
+# during the call phase, breaking that routing.  The marker (defined in
+# tests/conftest.py) keeps capture suspended for the duration of each call.
+pytestmark = pytest.mark.requires_real_stdio
+
+
 @pytest.fixture(autouse=True)
 def _cleanup_test_commands():
     """Remove any commands registered during a test from the registry."""

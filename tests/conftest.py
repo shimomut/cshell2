@@ -1,0 +1,71 @@
+"""Test-suite-wide pytest hooks.
+
+Provides the ``requires_real_stdio`` marker for tests that exercise
+cshell2's in-process pipeline (``_start_python_stage_thread``).  Those
+workers route a Python stage's ``print()`` through a thread-local
+override on ``sys.stdout``; pytest's per-test stdio capture replaces
+``sys.stdout`` with its own ``EncodedFile`` between the ``shell``
+fixture's ``Shell()`` call and the test body, breaking the routing.
+
+When a test is marked, this plugin suspends global stdio capture for
+the duration of the *call* phase (after setup, before teardown), so
+``sys.stdout`` stays at the real ``TextIOWrapper`` that ``Shell.__init__``
+wraps with ``_ThreadLocalStdout``.  Output from the test still appears
+on the terminal, but the routing keeps working.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "requires_real_stdio: keep pytest's stdio capture suspended during "
+        "the test body so the in-process pipeline's thread-local stdout "
+        "router stays bound to the real terminal stream",
+    )
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_pyfunc_call(pyfuncitem):
+    """Suspend global stdio capture and reinstall the thread-local stdio
+    routers around the actual function call of a marked item.
+
+    Using ``pytest_pyfunc_call`` (not ``pytest_runtest_call``) ensures
+    our hookwrapper nests *inside* CaptureManager's ``item_capture``
+    context manager, so when CaptureManager restores ``sys.stdout`` to
+    its capture stream at the start of the call phase, we then suspend
+    capture *again* and reinstall the thread-local routers — and that
+    state is what the test body sees.
+
+    Without the reinstall, the in-process pipeline's worker threads
+    reach ``sys.stdout.set_override`` and find pytest's ``EncodedFile``
+    capture stream there, which has no ``set_override`` method, so the
+    producer's ``print()`` goes to pytest's capture buffer instead of
+    the inter-stage pipe.
+    """
+    if pyfuncitem.get_closest_marker("requires_real_stdio") is None:
+        yield
+        return
+    capman = pyfuncitem.config.pluginmanager.getplugin("capturemanager")
+    if capman is None:
+        yield
+        return
+    import sys
+    from cshell2.shell import _ThreadLocalStdin, _ThreadLocalStdout, _ThreadLocalStderr
+
+    capman.suspend_global_capture(in_=True)
+    saved = (sys.stdin, sys.stdout, sys.stderr)
+    if not isinstance(sys.stdout, _ThreadLocalStdout):
+        sys.stdout = _ThreadLocalStdout(sys.stdout)
+    if not isinstance(sys.stdin, _ThreadLocalStdin):
+        sys.stdin = _ThreadLocalStdin(sys.stdin)
+    if not isinstance(sys.stderr, _ThreadLocalStderr):
+        sys.stderr = _ThreadLocalStderr(sys.stderr)
+    try:
+        yield
+    finally:
+        sys.stdin, sys.stdout, sys.stderr = saved
+        capman.resume_global_capture()
