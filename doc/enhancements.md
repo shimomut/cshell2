@@ -153,3 +153,63 @@ first two together — `slots.py` + `dispatch.py` — collapses
 `shell.py` to roughly the REPL-and-built-ins module its name
 implies (~600 lines), which is also what the architecture diagrams
 in CLAUDE.md and architecture.md already promise.
+
+## UX brainstorming — closing the CUI/GUI gap
+
+Exploratory ideas for narrowing the gap between CUI and GUI interaction
+models. None of these are designed yet — the entries below capture the
+problem framing and brainstormed directions so a future design pass can
+pick them up without re-deriving the motivation.
+
+- **Object-first interaction (verb→object vs object→verb).** CUI forces
+  "decide the command, then name the target" (`rm file.txt`); GUIs let
+  you select a target first and get a context-sensitive action menu.
+  TAB completion assumes the command is typed first, so this gap is
+  untouched. Idea: a UI entry point that starts from target selection,
+  with a dynamic action menu keyed on the target's type (file, process,
+  git branch, …).
+
+- **Preview before execution / pipeline dry-run.** Pipelines are opaque
+  until run — `find . -name "*.log" | xargs rm` gives no chance to see
+  what would be deleted; `grep ERROR app.log | wc -l` hides the
+  intermediate `grep` output. Idea: a live per-stage preview while
+  typing, executing for real on Enter — a two-phase interaction. Open
+  question: refresh cadence (every keystroke vs. after a pause).
+  Overlaps with the pipe-learning-curve idea below.
+
+- **Mixing filter-based and manual selection.** GUIs let you narrow a
+  list by filter and then individually check/uncheck items; CUI tools
+  (`find`, `grep`, `ps | grep python`, `git add -p`) don't compose this
+  way. Idea: extend `OptionsCompleter`'s checkbox UI (`InlineMultiPicker`)
+  toward "type to filter, Space to toggle individual items," with the
+  non-trivial question of whether toggled selections survive a filter
+  change.
+
+- **Viewing two places at once.** `cp`/`mv`/`git diff` and side-by-side
+  context comparison all want simultaneous views of two locations or
+  states; cshell2's context stack supports *switching* but not *viewing
+  side by side*, and tmux-style splits are disconnected from the shell.
+  Open question: should the shell own a split-view mode, or is
+  "remember one side" good enough for most cases?
+
+- **Structured-data filtering and sorting.** `ps aux`, `ls -la`,
+  `git log` are tabular but treated as plain text — sorting/filtering by
+  column means reaching for `awk`/`sort`/`grep`, and header rows cause
+  off-by-one bugs in `wc -l`. Idea: a built-in viewer that recognizes
+  tabular output and supports column sort/filter, opt-in via something
+  like a `--view` flag or `@table` decorator (heuristic parsing of known
+  command output, à la a lightweight Nushell — fragile but maybe
+  practical without sacrificing compatibility).
+
+- **Lowering the pipe learning curve.** The "data flowing through a
+  pipeline" mental model is hard to build without visual feedback;
+  stderr silently not flowing through pipes, and the `xargs`-or-not
+  distinction, are common beginner traps. Idea: build-and-verify pipeline
+  UI (overlaps with the preview idea above), more visible/explicit stderr
+  handling, and detecting when `xargs` is needed and suggesting it.
+
+Cross-cutting: these are fundamentally TUI design problems bounded by
+fixed-width text and cursor control; richer UI trades off against the
+"simple shell" ideal, and serving both experienced Bash users and
+beginners well may need different modes or progressive disclosure.
+Keybinding layout will make or break any of these.
