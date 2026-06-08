@@ -161,14 +161,6 @@ models. None of these are designed yet — the entries below capture the
 problem framing and brainstormed directions so a future design pass can
 pick them up without re-deriving the motivation.
 
-- **Object-first interaction (verb→object vs object→verb).** CUI forces
-  "decide the command, then name the target" (`rm file.txt`); GUIs let
-  you select a target first and get a context-sensitive action menu.
-  TAB completion assumes the command is typed first, so this gap is
-  untouched. Idea: a UI entry point that starts from target selection,
-  with a dynamic action menu keyed on the target's type (file, process,
-  git branch, …).
-
 - **Preview before execution / pipeline dry-run.** Pipelines are opaque
   until run — `find . -name "*.log" | xargs rm` gives no chance to see
   what would be deleted; `grep ERROR app.log | wc -l` hides the
@@ -177,13 +169,40 @@ pick them up without re-deriving the motivation.
   question: refresh cadence (every keystroke vs. after a pause).
   Overlaps with the pipe-learning-curve idea below.
 
-- **Mixing filter-based and manual selection.** GUIs let you narrow a
-  list by filter and then individually check/uncheck items; CUI tools
-  (`find`, `grep`, `ps | grep python`, `git add -p`) don't compose this
-  way. Idea: extend `OptionsCompleter`'s checkbox UI (`InlineMultiPicker`)
-  toward "type to filter, Space to toggle individual items," with the
-  non-trivial question of whether toggled selections survive a filter
-  change.
+- **Mixing filter-based and manual selection — and folding "object-first"
+  into it.** GUIs let you narrow a list by filter and then individually
+  check/uncheck items; CUI tools (`find`, `grep`, `ps | grep python`,
+  `git add -p`) don't compose this way. Idea: extend `OptionsCompleter`'s
+  checkbox UI (`InlineMultiPicker`) toward "type to filter, Space to
+  toggle individual items," with the non-trivial question of whether
+  toggled selections survive a filter change.
+
+  This turns out to be the key that unlocks "object-first interaction"
+  (verb→object vs. object→verb) too — previously framed as its own
+  entry needing a dedicated target-selection entry point and a dynamic
+  action menu. The simpler framing that emerged from a brainstorming
+  session: CUI forces "decide the command, then name the target"
+  (`rm file.txt`) only because TAB completion assumes the verb is typed
+  first and inserts one value at a time. If TAB completion *is* a good
+  enough picker — search/filter/sort/multi-select, anchored at any
+  argument position via the existing per-position completer binding
+  (`CompletionContext.arg_index`, `FileCompleter` vs. `DirCompleter`
+  etc.) — and the caret can move freely (`Ctrl+A/E`, already supported),
+  then object-first selection falls out of verb-first typing for free:
+  type `mv `, TAB to multi-select source files, jump to end-of-line,
+  TAB again to pick the destination directory. Source and destination
+  end up using the *exact same* picker UX (just different completers),
+  which also resolves the "two different UX in one command" inconsistency
+  that a `$sel`/clipboard-variable approach would otherwise have. No new
+  commands, no implicit selection variables, no dual-pane mode-shift —
+  "object-first" becomes "fill in arguments out of order using a picker
+  good enough to trust." The one genuinely new piece this requires:
+  **multi-select insertion** — TAB on a multi-select picker must insert
+  N items as a single properly-quoted, space-separated token group at
+  the cursor, rather than one completion replacing one prefix (today's
+  `Completion`/`InlinePicker` path assumes the latter). Get filter+manual
+  selection and multi-select insertion right here, and the standalone
+  "object-first" entry point mostly stops being necessary.
 
 - **Viewing two places at once.** `cp`/`mv`/`git diff` and side-by-side
   context comparison all want simultaneous views of two locations or
