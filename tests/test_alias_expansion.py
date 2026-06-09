@@ -70,3 +70,72 @@ def test_alias_listed_in_command_name_completion():
     assert len(aliases) == 1
     assert "alias" in aliases[0].description
     assert "awsut hyperpod" in aliases[0].description
+
+
+# ---------------------------------------------------------------------------
+# Status-bar help message (Shell._get_arg_info) for aliases — issue #8.
+#
+# The status bar should resolve aliases the same way completion does so the
+# user gets meaningful help when they type, e.g., `hp create <TAB>` where
+# `hp` is `alias hp='awsut hyperpod'`.
+# ---------------------------------------------------------------------------
+
+def test_arg_info_on_alias_command_name_shows_expansion():
+    """Caret on the alias name itself shows its expansion."""
+    from cshell2.commands import arg
+    sh = Shell()
+    sh.registry.alias("_t_hp", "_t_awsut hyperpod")
+
+    # Register a fake target so the description is populated.
+    sh.registry.command(
+        "_t_awsut",
+        help="awsut: Amazon Web Services User Tool",
+        params=[arg("subcommand", choices=["hyperpod"])],
+    )
+    try:
+        info = sh._get_arg_info("_t_hp", cursor=len("_t_hp"))
+        assert info is not None
+        assert "_t_hp" in info
+        assert "_t_awsut hyperpod" in info
+    finally:
+        sh.registry.unalias("_t_hp")
+        if "_t_awsut" in sh.registry._commands:
+            del sh.registry._commands["_t_awsut"]
+
+
+def test_arg_info_after_alias_resolves_to_expansion_target():
+    """Caret on a positional after `hp` should describe the expanded
+    command's positional, not return None."""
+    from cshell2.commands import arg
+    sh = Shell()
+    sh.registry.alias("_t_hp", "_t_awsut hyperpod")
+    sh.registry.command(
+        "_t_awsut",
+        help="awsut: helper",
+        params=[arg("subcommand", choices=["hyperpod"]),
+                arg("action", help="action to take")],
+    )
+    try:
+        # User typed `_t_hp <action>`; caret on the action token.
+        buf = "_t_hp create"
+        info = sh._get_arg_info(buf, cursor=len(buf))
+        # Should yield the action positional's label rather than None.
+        assert info is not None
+    finally:
+        sh.registry.unalias("_t_hp")
+        if "_t_awsut" in sh.registry._commands:
+            del sh.registry._commands["_t_awsut"]
+
+
+def test_arg_info_on_alias_falls_back_when_target_missing():
+    """If the alias's expansion target isn't registered, still surface
+    the alias→expansion mapping so the user sees what it expands to."""
+    sh = Shell()
+    sh.registry.alias("_t_hp", "no_such_cmd")
+    try:
+        info = sh._get_arg_info("_t_hp", cursor=len("_t_hp"))
+        assert info is not None
+        assert "_t_hp" in info
+        assert "no_such_cmd" in info
+    finally:
+        sh.registry.unalias("_t_hp")

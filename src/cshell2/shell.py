@@ -1522,10 +1522,30 @@ class Shell:
             cmd = self.registry.get(token)
             if cmd is not None and cmd.description:
                 return f"{token}: {cmd.description}"
+            # If the token is an alias, fall back to the alias's expansion
+            # (and the description of whatever it resolves to).
+            expansion = self.registry.get_alias(token)
+            if expansion is not None:
+                expansion_tokens = tokenize(expansion)
+                if expansion_tokens:
+                    target = self.registry.get(expansion_tokens[0])
+                    if target is not None and target.description:
+                        return f"{token} → {expansion}: {target.description}"
+                return f"{token} → {expansion}"
             return None
 
         command_name = tokens_before[0]
         preceding_args = tokens_before[1:]
+
+        # Expand the leading token if it is an alias, so the status bar for
+        # `hp <args>` resolves against the alias's expansion (e.g.
+        # `awsut hyperpod`).  Mirrors the alias handling in _get_completions.
+        expansion = self.registry.get_alias(command_name)
+        if expansion is not None:
+            expansion_tokens = tokenize(expansion)
+            if expansion_tokens:
+                command_name = expansion_tokens[0]
+                preceding_args = expansion_tokens[1:] + preceding_args
 
         cmd = self.registry.get(command_name)
         if cmd is None:
