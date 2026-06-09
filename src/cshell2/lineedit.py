@@ -396,13 +396,13 @@ class LineEditor:
             self._cursor = 0
             return None
 
-        # Ctrl+A / Home
-        if key in (b"\x01", b"\x1b[H", b"\x1b[1~"):
+        # Ctrl+A / Home (CSI and SS3 forms — Terminal.app sends SS3 in app cursor mode)
+        if key in (b"\x01", b"\x1b[H", b"\x1b[1~", b"\x1bOH"):
             self._cursor = 0
             return None
 
         # Ctrl+E / End
-        if key in (b"\x05", b"\x1b[F", b"\x1b[4~"):
+        if key in (b"\x05", b"\x1b[F", b"\x1b[4~", b"\x1bOF"):
             self._cursor = len(self._buf)
             return None
 
@@ -412,13 +412,13 @@ class LineEditor:
             return None
 
         # Ctrl+B / Left arrow
-        if key in (b"\x02", b"\x1b[D"):
+        if key in (b"\x02", b"\x1b[D", b"\x1bOD"):
             if self._cursor > 0:
                 self._cursor -= 1
             return None
 
         # Ctrl+F / Right arrow
-        if key in (b"\x06", b"\x1b[C"):
+        if key in (b"\x06", b"\x1b[C", b"\x1bOC"):
             if self._cursor < len(self._buf):
                 self._cursor += 1
             return None
@@ -449,13 +449,14 @@ class LineEditor:
             self._history_search(fd)
             return None
 
-        # Up arrow — history back
-        if key in (b"\x1b[A", b"\x10"):
+        # Up arrow — history back (CSI and SS3 forms; SS3 is what Terminal.app
+        # sends when the keypad/cursor is in application mode — DECCKM)
+        if key in (b"\x1b[A", b"\x1bOA", b"\x10"):
             self._hist_back()
             return None
 
         # Down arrow — history forward
-        if key in (b"\x1b[B", b"\x0e"):
+        if key in (b"\x1b[B", b"\x1bOB", b"\x0e"):
             self._hist_fwd()
             return None
 
