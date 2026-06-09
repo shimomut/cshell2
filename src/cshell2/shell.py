@@ -2264,26 +2264,37 @@ class Shell:
             # Resolve explicit redirects (override the pipe ends).
             stdin_file = stdout_file = None
             stderr_dst: object | None = None
+            redirect_error = False
             for redir in stage.redirects:
-                if redir.kind == "<":
-                    stdin_file = open(redir.target, "rb")
-                elif redir.kind == ">":
-                    stdout_file = open(redir.target, "wb")
-                elif redir.kind == ">>":
-                    stdout_file = open(redir.target, "ab")
-                elif redir.kind == "2>":
-                    stderr_dst = open(redir.target, "wb")
-                elif redir.kind == "2>>":
-                    stderr_dst = open(redir.target, "ab")
-                elif redir.kind == "2>&1":
-                    stderr_dst = subprocess.STDOUT
+                try:
+                    if redir.kind == "<":
+                        stdin_file = open(redir.target, "rb")
+                    elif redir.kind == ">":
+                        stdout_file = open(redir.target, "wb")
+                    elif redir.kind == ">>":
+                        stdout_file = open(redir.target, "ab")
+                    elif redir.kind == "2>":
+                        stderr_dst = open(redir.target, "wb")
+                    elif redir.kind == "2>>":
+                        stderr_dst = open(redir.target, "ab")
+                    elif redir.kind == "2>&1":
+                        stderr_dst = subprocess.STDOUT
+                except OSError as e:
+                    print(
+                        f"cshell2: {redir.target}: {e.strerror or e}",
+                        file=sys.stderr,
+                    )
+                    redirect_error = True
+                    break
 
             stdin_pipe_used = stdin_fd_pipe is not None and stdin_file is None
             stdout_pipe_used = stdout_fd_pipe is not None and stdout_file is None
             is_py_stage = cmd is not None
 
             worker = None
-            if is_py_stage:
+            if redirect_error:
+                pass  # leave worker=None; cleanup below closes any open files/pipes
+            elif is_py_stage:
                 worker = self._start_python_stage_thread(
                     cmd=cmd,
                     args=tokens[1:],
@@ -2652,19 +2663,37 @@ class Shell:
 
         # Resolve redirections
         stdin_override = stdout_override = stderr_override = None
-        for redir in stage.redirects:
-            if redir.kind == "<":
-                stdin_override = open(redir.target, "rb")
-            elif redir.kind == ">":
-                stdout_override = open(redir.target, "wb")
-            elif redir.kind == ">>":
-                stdout_override = open(redir.target, "ab")
-            elif redir.kind == "2>":
-                stderr_override = open(redir.target, "wb")
-            elif redir.kind == "2>>":
-                stderr_override = open(redir.target, "ab")
-            elif redir.kind == "2>&1":
-                stderr_override = "stdout"
+        try:
+            for redir in stage.redirects:
+                if redir.kind == "<":
+                    stdin_override = open(redir.target, "rb")
+                elif redir.kind == ">":
+                    stdout_override = open(redir.target, "wb")
+                elif redir.kind == ">>":
+                    stdout_override = open(redir.target, "ab")
+                elif redir.kind == "2>":
+                    stderr_override = open(redir.target, "wb")
+                elif redir.kind == "2>>":
+                    stderr_override = open(redir.target, "ab")
+                elif redir.kind == "2>&1":
+                    stderr_override = "stdout"
+        except OSError as e:
+            print(
+                f"cshell2: {redir.target}: {e.strerror or e}",
+                file=sys.stderr,
+            )
+            for f in (stdin_override, stdout_override):
+                if f is not None:
+                    try:
+                        f.close()
+                    except Exception:
+                        pass
+            if stderr_override and stderr_override != "stdout":
+                try:
+                    stderr_override.close()
+                except Exception:
+                    pass
+            return 1
 
         has_redirects = any([stdin_override, stdout_override, stderr_override])
 
