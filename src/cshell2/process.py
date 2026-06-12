@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import collections
 import os
+import re
 import struct
 import sys
 import threading
@@ -35,6 +36,11 @@ class OutputBuffer:
             chunks = list(self._buf)
             self._buf.clear()
             return chunks
+
+    def peek(self) -> bytes:
+        """Return all currently buffered bytes (concatenated) without draining."""
+        with self._lock:
+            return b"".join(self._buf)
 
 
 # mode_num -> (name, default_action)
@@ -338,3 +344,34 @@ class ProcessSlot:
                 os.kill(self.pid, sig.SIGTERM)
             except ProcessLookupError:
                 pass
+
+    def tail_lines(self, n: int) -> list[str]:
+        """Return up to *n* most recent output lines from the buffer (non-destructive)."""
+        return _tail_lines_from_bytes(self.buffer.peek(), n)
+
+
+def _tail_lines_from_bytes(data: bytes, n: int) -> list[str]:
+    """Decode *data* and return the last *n* non-empty lines, with ANSI escape sequences stripped."""
+    if not data or n <= 0:
+        return []
+    try:
+        text = data.decode("utf-8", errors="replace")
+    except Exception:
+        return []
+    text = _strip_ansi(text)
+    # Normalize CRLF and bare CR (cursor returns) to LF before splitting.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    return lines[-n:]
+
+
+# CSI (ESC [ ...), OSC (ESC ] ... BEL or ST), and single-char ESC sequences.
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b[@-Z\\-_]"
+)
+
+
+def _strip_ansi(s: str) -> str:
+    return _ANSI_RE.sub("", s)

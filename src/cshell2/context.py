@@ -113,6 +113,22 @@ class ContextManager:
             else:
                 os.chdir(self._initial_cwd)
 
+    def rename(self, old: str, new: str) -> None:
+        """Rename a context. Raises KeyError if *old* is missing or ValueError if *new* exists."""
+        if old not in self.contexts:
+            raise KeyError(f"No context named '{old}'")
+        if new == old:
+            return
+        if new in self.contexts:
+            raise ValueError(f"Context '{new}' already exists")
+        ctx = self.contexts.pop(old)
+        ctx.name = new
+        self.contexts[new] = ctx
+        self._display_order = [new if n == old else n for n in self._display_order]
+        self.stack = [new if n == old else n for n in self.stack]
+        if self.current_name == old:
+            self.current_name = new
+
     def set_variable(self, key: str, value: str) -> None:
         ctx = self.current()
         if ctx is None:

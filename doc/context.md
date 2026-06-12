@@ -113,7 +113,17 @@ Selecting a context:
 - If it has a live process: the shell enters forwarding mode immediately, resuming that process
 - If idle: the shell switches to that context and shows its prompt
 
-Selecting `+ new context` prompts for a name and creates a new context inheriting the current context's variables.
+The picker also shows a small **preview pane** below the list — the last few buffered output lines from the focused context's process slot. This makes it possible to recognise contexts at a glance when they have similar names but are running different commands.
+
+While the picker is open, three action keys mutate the context list in place and re-open the picker:
+
+- `Ctrl+N` — create a new context. Opens an inline prompt for the name and creates the context inheriting the current context's variables (same effect as the old `+ new context` row).
+- `Ctrl+D` — delete the highlighted context (including the current one — when the current context is deleted the manager promotes the next-stacked or first-remaining context to current). Refused when the highlighted context has a live process or is the only remaining context.
+- `Ctrl+R` — rename the highlighted context. Opens an inline prompt pre-filled with the current name.
+
+`Ctrl+N` overrides the picker's default Ctrl+N → "down" alias for the duration of the context-switch picker; the down arrow still works for navigation.
+
+After any action the picker reopens with the updated list. `Esc` cancels and (if `Ctrl+D` removed the current context) the shell falls through to its normal resume path for the new current context.
 
 ## Environment Variable Management
 

@@ -108,6 +108,10 @@ class InlinePicker(Generic[T]):
         min_width: int = 0,
         hide_cursor: bool = False,
         status_label: str = "",
+        status_hints: str = "",
+        preview_fn: Callable[[T], list[str]] | None = None,
+        preview_height: int = 0,
+        key_actions: dict[bytes, str] | None = None,
     ):
         self._items = items
         self._display_fn = display_fn
@@ -123,9 +127,14 @@ class InlinePicker(Generic[T]):
         self._min_width = min_width
         self._hide_cursor = hide_cursor
         self._status_label = status_label
+        self._status_hints = status_hints
+        self._preview_fn = preview_fn
+        self._preview_height = max(0, preview_height) if preview_fn is not None else 0
+        self._key_actions = dict(key_actions or {})
         self._typed = ""
         self.reopen = False          # set True when tab-complete typed chars; caller should reopen
         self.apply_backspace = False  # set True when backspace pressed with no typed chars
+        self.action: str | None = None  # set when run() exits via a key in key_actions
 
         self._selected = 0
         self._offset = 0
@@ -153,7 +162,12 @@ class InlinePicker(Generic[T]):
             self._render()
 
             while True:
-                action = self._dispatch(self._read_key())
+                key_bytes = self._read_key()
+                if key_bytes in self._key_actions:
+                    self.action = self._key_actions[key_bytes]
+                    result = self._items[self._selected] if self._items else None
+                    break
+                action = self._dispatch(key_bytes)
                 if action == "accept":
                     result = self._items[self._selected] if self._items else None
                     break
@@ -189,16 +203,20 @@ class InlinePicker(Generic[T]):
         sz = os.get_terminal_size()
         self._cols = sz.columns
         self._lines = sz.lines
-        self._height = min(self._max_height, len(self._items), max(1, sz.lines - 4))
+        # Preview area is rendered below the picker rows; reserve space for it
+        # so the list stays visible alongside the focused item's preview.
+        reserve = 4 + self._preview_height
+        self._height = min(self._max_height, len(self._items), max(1, sz.lines - reserve))
 
     # ── drawing ─────────────────────────────────────────────────────────────
 
     def _reserve(self) -> None:
         """Create blank lines below cursor and save the top position with DECSC."""
-        sys.stdout.write("\n" * self._height)
+        total = self._height + self._preview_height
+        sys.stdout.write("\n" * total)
         # CHA jumps to the target column atomically; \r + cursor-forward
         # would briefly render the caret at col 0 before moving right.
-        sys.stdout.write(_csi(f"{self._height}A") + f"\033[{self._col + 1}G\0337")
+        sys.stdout.write(_csi(f"{total}A") + f"\033[{self._col + 1}G\0337")
         sys.stdout.flush()
 
     def _render(self) -> None:
@@ -221,6 +239,10 @@ class InlinePicker(Generic[T]):
             if i < len(visible) - 1:
                 out.append("\n")
 
+        # Preview pane below the list, if configured.
+        if self._preview_height > 0:
+            out.append(self._format_preview(panel_w))
+
         # Re-save anchor, then move cursor to prompt caret position.
         # CHA (\033[{N}G) sets the column atomically — `\r` + cursor-forward
         # flickers because the terminal briefly renders the caret at col 0.
@@ -232,7 +254,7 @@ class InlinePicker(Generic[T]):
 
         # Draw status bar at the bottom line, then return to caret via anchor.
         out.append(f"\033[{self._lines};1H")
-        out.append(_statusbar(self._status_label, "", self._cols))
+        out.append(_statusbar(self._status_label, self._status_hints, self._cols))
         out.append("\0338")
         if self._rows_above > 0:
             out.append(f"\033[{self._rows_above}A")
@@ -240,6 +262,32 @@ class InlinePicker(Generic[T]):
 
         sys.stdout.write("".join(out))
         sys.stdout.flush()
+
+    def _format_preview(self, panel_w: int) -> str:
+        """Render the preview pane: ``preview_height`` lines below the list."""
+        s = get_color_scheme()
+        lines: list[str] = []
+        if self._items and self._preview_fn is not None:
+            try:
+                raw = self._preview_fn(self._items[self._selected])
+            except Exception:
+                raw = []
+            lines = [str(line) for line in raw][-self._preview_height:]
+        # Pad to preview_height so the area's footprint stays stable.
+        lines = lines + [""] * max(0, self._preview_height - len(lines))
+        avail = max(1, self._cols - self._col)
+        col_move = f"\033[{self._col}C" if self._col > 0 else ""
+        out = []
+        # The picker rows leave the cursor at the end of the last row;
+        # advance to the line below before drawing preview.
+        for line in lines:
+            text = _wcs_clip(line, avail)
+            text_disp = _wcs_ljust(text, avail)
+            # Dim/grey body so the preview reads as secondary info.
+            out.append(
+                f"\n\r{col_move}\033[2m{text_disp}\033[22m"
+            )
+        return "".join(out)
 
     def _scrollbar_char(self, row_index: int) -> str:
         s = get_color_scheme()
@@ -446,11 +494,11 @@ class InlineArgPrompt:
     command line) before calling run() and moving the cursor back afterward.
     """
 
-    def __init__(self, label: str, description: str = "", status_label: str = ""):
+    def __init__(self, label: str, description: str = "", status_label: str = "", initial: str = ""):
         self._label = label
         self._description = description
         self._status_label = status_label
-        self._buf = ""
+        self._buf = initial
         self._cancelled = False
         try:
             sz = os.get_terminal_size()

@@ -680,6 +680,18 @@ class PythonCommandSlot:
             except (OSError, ProcessLookupError):
                 pass
 
+    def tail_lines(self, n: int) -> list[str]:
+        """Return up to *n* most recent buffered output lines for preview."""
+        from .process import _tail_lines_from_bytes
+        text_data = b""
+        if self._proxy is not None:
+            with self._proxy._lock:
+                text = self._proxy._buf.getvalue()
+            if text:
+                text_data = text.encode("utf-8", errors="replace")
+        pty_data = self._pty_buffer.peek()
+        return _tail_lines_from_bytes(text_data + pty_data, n)
+
     # --- passthrough_run() implementation -----------------------------------
 
     def _run_in_pty(self, argv: list[str], popen_kwargs: dict) -> int:
@@ -1161,6 +1173,11 @@ class PipelineSlot(PythonCommandSlot):
             sys.stdout.buffer.flush()
         except OSError:
             pass
+
+    def tail_lines(self, n: int) -> list[str]:
+        """Return up to *n* most recent buffered output lines for preview."""
+        from .process import _tail_lines_from_bytes
+        return _tail_lines_from_bytes(self._out_buffer.peek(), n)
 
 
 class Shell:
@@ -3061,62 +3078,140 @@ class Shell:
             signal.signal(signal.SIGINT, old_sigint)
             signal.signal(signal.SIGWINCH, old_sigwinch)
 
-    _NEW_CTX_SENTINEL = "\x00new"
+    _PREVIEW_HEIGHT = 3
+    # Action key bindings:  (key bytes, action name, hint label).
+    # Ctrl+N overrides the picker's default "down" alias for the duration of
+    # the context-switch picker; users can still navigate with the arrow keys
+    # (down arrow + Ctrl+P up).
+    _SWITCH_KEY_ACTIONS: tuple[tuple[bytes, str, str], ...] = (
+        (b"\x0e",  "new",    "^N new"),
+        (b"\x04",  "delete", "^D delete"),
+        (b"\x12",  "rename", "^R rename"),
+    )
 
     def _show_switch_menu(self) -> tuple[str, bool] | None:
-        """Show TUI context picker. Returns (name, is_new) or None on cancel."""
-        contexts = self.context_manager.list_contexts()
-        items = contexts + [self._NEW_CTX_SENTINEL]
+        """Show TUI context picker.
 
-        current = self.context_manager.current_name
-
+        Returns ``(name, is_new)`` when the user picks a context (or creates one),
+        ``None`` on cancel.  Action keys (new / delete / rename) mutate the
+        context manager in place and re-open the picker until the user picks a
+        context or cancels.
+        """
         from .tui import InlineArgPrompt, InlinePicker
 
         def display_fn(name: str) -> str:
-            if name == self._NEW_CTX_SENTINEL:
-                return "+ new context"
-            return ("* " if name == current else "  ") + name
+            cur = self.context_manager.current_name
+            return ("* " if name == cur else "  ") + name
 
         def meta_fn(name: str) -> str:
-            if name == self._NEW_CTX_SENTINEL:
+            ctx = self.context_manager.contexts.get(name)
+            if ctx is None:
                 return ""
-            ctx = self.context_manager.contexts[name]
             slot = ctx.process_slot
             if slot and slot.is_alive() and slot.argv:
                 parts = [os.path.basename(slot.argv[0])] + slot.argv[1:2]
                 return " ".join(parts)
             return ""
 
-        picker = InlinePicker(
-            items,
-            display_fn=display_fn,
-            meta_fn=meta_fn,
-            max_height=10,
-            min_width=32,
-            hide_cursor=True,
-        )
-        if current in contexts:
-            picker._selected = contexts.index(current)
+        def preview_fn(name: str) -> list[str]:
+            ctx = self.context_manager.contexts.get(name)
+            if ctx is None or ctx.process_slot is None:
+                return []
+            slot = ctx.process_slot
+            if hasattr(slot, "tail_lines"):
+                try:
+                    return slot.tail_lines(self._PREVIEW_HEIGHT)
+                except Exception:
+                    return []
+            return []
 
-        selected = picker.run()
+        key_actions = {kb: name for kb, name, _ in self._SWITCH_KEY_ACTIONS}
+        hints = "  ".join(label for _, _, label in self._SWITCH_KEY_ACTIONS)
 
-        if selected is None:
-            return None
+        # Selection persists across re-openings (after delete/rename).
+        selected_name: str | None = self.context_manager.current_name
 
-        if selected == self._NEW_CTX_SENTINEL:
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-            arg_prompt = InlineArgPrompt(label="new context name")
-            name = arg_prompt.run()
-            sys.stdout.write("\033[1A")
-            sys.stdout.flush()
-            if not name or name in self.context_manager.contexts:
+        while True:
+            contexts = self.context_manager.list_contexts()
+
+            picker = InlinePicker(
+                contexts,
+                display_fn=display_fn,
+                meta_fn=meta_fn,
+                max_height=10,
+                min_width=32,
+                hide_cursor=True,
+                status_hints=hints,
+                preview_fn=preview_fn,
+                preview_height=self._PREVIEW_HEIGHT,
+                key_actions=key_actions,
+            )
+            if selected_name in contexts:
+                picker._selected = contexts.index(selected_name)
+
+            selected = picker.run()
+
+            if selected is None:
                 return None
-            return (name, True)
 
-        if selected == current:
-            return None
-        return (selected, False)
+            action = picker.action
+            if action == "new":
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                arg_prompt = InlineArgPrompt(label="new context name")
+                name = arg_prompt.run()
+                sys.stdout.write("\033[1A")
+                sys.stdout.flush()
+                if not name or name in self.context_manager.contexts:
+                    selected_name = self.context_manager.current_name
+                    continue
+                return (name, True)
+
+            if action == "delete":
+                if len(self.context_manager.list_contexts()) <= 1:
+                    continue
+                ctx = self.context_manager.contexts.get(selected)
+                if ctx is None:
+                    continue
+                if ctx.process_slot and ctx.process_slot.is_alive():
+                    # Don't delete a running context silently.
+                    continue
+                # Pick a sensible next selection before removing.
+                remaining = [n for n in contexts if n != selected]
+                idx = contexts.index(selected)
+                next_sel = remaining[min(idx, len(remaining) - 1)] if remaining else None
+                self.context_manager.remove(selected)
+                # If we deleted the current context, remove() switched the
+                # pointer for us; align selection with the new current so the
+                # picker reopens with that highlighted.
+                selected_name = self.context_manager.current_name or next_sel
+                continue
+
+            if action == "rename":
+                old = selected
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                arg_prompt = InlineArgPrompt(
+                    label=f"rename '{old}' to",
+                    initial=old,
+                )
+                new = arg_prompt.run()
+                sys.stdout.write("\033[1A")
+                sys.stdout.flush()
+                if new and new != old and new not in self.context_manager.contexts:
+                    try:
+                        self.context_manager.rename(old, new)
+                        selected_name = new
+                    except (KeyError, ValueError):
+                        selected_name = old
+                else:
+                    selected_name = old
+                continue
+
+            # No action key — user pressed Enter to accept the selection.
+            if selected == self.context_manager.current_name:
+                return None
+            return (selected, False)
 
     def _resume_pty_slot(self, slot: ProcessSlot) -> None:
         """Restore terminal modes and re-activate a backgrounded PTY slot.
@@ -3169,16 +3264,25 @@ class Shell:
         the target context (no process_slot at all).
         """
         ctx = self.context_manager.current()
+        original_name = ctx.name if ctx else None
         if ctx and ctx.process_slot:
             ctx.process_slot.deactivate()
 
         result = self._show_switch_menu()
 
         if result is None:
-            # User cancelled.  Re-activate PTY slots so their reader thread can
-            # stream output again.  PythonCommandSlots stay deactivated: their
-            # buffered output will be replayed correctly (with raw_mode=True) the
-            # next time _enter_python_forwarding_mode is called from run().
+            # User cancelled.  If a menu action (pop) changed the current
+            # context, behave as if the user had switched: let run()'s resume
+            # path do the right thing for the new context's slot.  Otherwise
+            # re-activate PTY slots so their reader thread can stream output
+            # again.  PythonCommandSlots stay deactivated: their buffered
+            # output will be replayed correctly (with raw_mode=True) the next
+            # time _enter_python_forwarding_mode is called from run().
+            new_ctx = self.context_manager.current()
+            if new_ctx is None or (new_ctx.name != original_name):
+                if new_ctx and new_ctx.process_slot:
+                    return True
+                return False
             if ctx and ctx.process_slot and ctx.process_slot.is_alive():
                 slot = ctx.process_slot
                 if not isinstance(slot, PythonCommandSlot):
