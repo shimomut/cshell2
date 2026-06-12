@@ -474,6 +474,7 @@ class PythonCommandSlot:
         self.argv: list[str] = [cmd.name] + raw_args
         self._thread: threading.Thread | None = None
         self._proxy: _StdoutProxy | None = None
+        self._err_proxy: _StdoutProxy | None = None
         self._exit_exception: BaseException | None = None
         self._finished = threading.Event()
         # Stub attributes expected by the run() loop
@@ -513,6 +514,8 @@ class PythonCommandSlot:
         """Spawn the command thread.  stdout starts buffered (inactive)."""
         real = getattr(sys.stdout, "_real", sys.stdout)
         self._proxy = _StdoutProxy(real)
+        real_err = getattr(sys.stderr, "_real", sys.stderr)
+        self._err_proxy = _StdoutProxy(real_err)
         self._thread = threading.Thread(
             target=self._run,
             name=f"pycmd-{self._cmd.name}",
@@ -523,6 +526,8 @@ class PythonCommandSlot:
     def _run(self) -> None:
         if hasattr(sys.stdout, "set_override"):
             sys.stdout.set_override(self._proxy)
+        if hasattr(sys.stderr, "set_override"):
+            sys.stderr.set_override(self._err_proxy)
         _current_slot.slot = self
         try:
             self._cmd.invoke(self._raw_args)
@@ -536,6 +541,8 @@ class PythonCommandSlot:
             _current_slot.slot = None
             if hasattr(sys.stdout, "clear_override"):
                 sys.stdout.clear_override()
+            if hasattr(sys.stderr, "clear_override"):
+                sys.stderr.clear_override()
             self.exit_code = self._compute_exit_code()
             self._finished.set()
 
@@ -558,6 +565,8 @@ class PythonCommandSlot:
     def activate(self, raw_mode: bool = False) -> None:
         if self._proxy:
             self._proxy.activate(raw_mode=raw_mode)
+        if self._err_proxy:
+            self._err_proxy.activate(raw_mode=raw_mode)
         # Drain any PTY output that arrived while inactive, then resume
         # live forwarding from the reader thread.
         with self._pty_lock:
@@ -577,6 +586,8 @@ class PythonCommandSlot:
     def deactivate(self) -> None:
         if self._proxy:
             self._proxy.deactivate()
+        if self._err_proxy:
+            self._err_proxy.deactivate()
         with self._pty_lock:
             if self._pty_master_fd >= 0:
                 self._pty_active = False
@@ -584,6 +595,8 @@ class PythonCommandSlot:
     def replay_buffer(self) -> None:
         if self._proxy:
             self._proxy.replay()
+        if self._err_proxy:
+            self._err_proxy.replay()
         with self._pty_lock:
             if self._pty_master_fd >= 0:
                 chunks = self._pty_buffer.drain()
@@ -707,6 +720,8 @@ class PythonCommandSlot:
         # output is written to the slot's PTY master and copied to stdout
         # by a reader thread.
         self._proxy.deactivate()
+        if self._err_proxy:
+            self._err_proxy.deactivate()
         master_fd, slave_fd = pty.openpty()
         try:
             rows, cols = ProcessSlot._get_real_terminal_size()
@@ -765,6 +780,8 @@ class PythonCommandSlot:
             # Re-enable the buffering proxy in raw mode for any remaining
             # prints from the Python command after the subprocess returns.
             self._proxy.activate(raw_mode=True)
+            if self._err_proxy:
+                self._err_proxy.activate(raw_mode=True)
 
         return proc.returncode if proc.returncode is not None else 1
 
@@ -816,6 +833,9 @@ class PythonCommandSlot:
         # Drain pending output so the prompt isn't preceded by buffered text.
         self._proxy.deactivate()
         self._proxy.replay()
+        if self._err_proxy:
+            self._err_proxy.deactivate()
+            self._err_proxy.replay()
         self._input_interrupted.clear()
         self._input_resume.clear()
         self._input_released.clear()
@@ -853,6 +873,8 @@ class PythonCommandSlot:
             self._input_request.clear()
             self._input_resume.set()
             self._proxy.activate(raw_mode=True)
+            if self._err_proxy:
+                self._err_proxy.activate(raw_mode=True)
 
 
 _DEFAULT_CONFIG_PATH = Path(__file__).parent / "_config.py"
