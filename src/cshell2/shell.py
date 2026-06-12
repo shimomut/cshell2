@@ -3130,6 +3130,9 @@ class Shell:
 
         # Selection persists across re-openings (after delete/rename).
         selected_name: str | None = self.context_manager.current_name
+        # One-shot status message shown in the next picker iteration — used to
+        # explain why an action was refused (e.g. running process, last context).
+        warning: str = ""
 
         while True:
             contexts = self.context_manager.list_contexts()
@@ -3141,11 +3144,14 @@ class Shell:
                 max_height=10,
                 min_width=32,
                 hide_cursor=True,
+                status_label=warning,
                 status_hints=hints,
+                transient_status=True,
                 preview_fn=preview_fn,
                 preview_height=self._PREVIEW_HEIGHT,
                 key_actions=key_actions,
             )
+            warning = ""  # one-shot — clear after attaching to the picker
             if selected_name in contexts:
                 picker._selected = contexts.index(selected_name)
 
@@ -3162,19 +3168,27 @@ class Shell:
                 name = arg_prompt.run()
                 sys.stdout.write("\033[1A")
                 sys.stdout.flush()
-                if not name or name in self.context_manager.contexts:
+                if not name:
+                    selected_name = self.context_manager.current_name
+                    continue
+                if name in self.context_manager.contexts:
+                    warning = f"context '{name}' already exists"
                     selected_name = self.context_manager.current_name
                     continue
                 return (name, True)
 
             if action == "delete":
                 if len(self.context_manager.list_contexts()) <= 1:
+                    warning = "cannot delete: only one context remaining"
                     continue
                 ctx = self.context_manager.contexts.get(selected)
                 if ctx is None:
                     continue
                 if ctx.process_slot and ctx.process_slot.is_alive():
-                    # Don't delete a running context silently.
+                    warning = (
+                        f"cannot delete '{selected}': process still running "
+                        f"(use 'context kill {selected}' first)"
+                    )
                     continue
                 # Pick a sensible next selection before removing.
                 remaining = [n for n in contexts if n != selected]
@@ -3198,12 +3212,17 @@ class Shell:
                 new = arg_prompt.run()
                 sys.stdout.write("\033[1A")
                 sys.stdout.flush()
-                if new and new != old and new not in self.context_manager.contexts:
-                    try:
-                        self.context_manager.rename(old, new)
-                        selected_name = new
-                    except (KeyError, ValueError):
+                if new and new != old:
+                    if new in self.context_manager.contexts:
+                        warning = f"context '{new}' already exists"
                         selected_name = old
+                    else:
+                        try:
+                            self.context_manager.rename(old, new)
+                            selected_name = new
+                        except (KeyError, ValueError) as e:
+                            warning = str(e)
+                            selected_name = old
                 else:
                     selected_name = old
                 continue

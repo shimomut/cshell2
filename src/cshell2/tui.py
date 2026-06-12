@@ -109,6 +109,7 @@ class InlinePicker(Generic[T]):
         hide_cursor: bool = False,
         status_label: str = "",
         status_hints: str = "",
+        transient_status: bool = False,
         preview_fn: Callable[[T], list[str]] | None = None,
         preview_height: int = 0,
         key_actions: dict[bytes, str] | None = None,
@@ -128,6 +129,7 @@ class InlinePicker(Generic[T]):
         self._hide_cursor = hide_cursor
         self._status_label = status_label
         self._status_hints = status_hints
+        self._transient_status = transient_status
         self._preview_fn = preview_fn
         self._preview_height = max(0, preview_height) if preview_fn is not None else 0
         self._key_actions = dict(key_actions or {})
@@ -163,6 +165,11 @@ class InlinePicker(Generic[T]):
 
             while True:
                 key_bytes = self._read_key()
+                # A transient status message (e.g. a one-shot warning from the
+                # caller) is cleared on the next user input so it doesn't
+                # linger past the action that produced it.
+                if self._transient_status and self._status_label:
+                    self._status_label = ""
                 if key_bytes in self._key_actions:
                     self.action = self._key_actions[key_bytes]
                     result = self._items[self._selected] if self._items else None
@@ -253,8 +260,12 @@ class InlinePicker(Generic[T]):
         out.append(f"\033[{caret_col_now + 1}G")
 
         # Draw status bar at the bottom line, then return to caret via anchor.
+        # When a status label is set it takes the whole bar — hints are
+        # secondary and reading two strings simultaneously fights for the
+        # user's attention.
         out.append(f"\033[{self._lines};1H")
-        out.append(_statusbar(self._status_label, self._status_hints, self._cols))
+        hints = "" if self._status_label else self._status_hints
+        out.append(_statusbar(self._status_label, hints, self._cols))
         out.append("\0338")
         if self._rows_above > 0:
             out.append(f"\033[{self._rows_above}A")
