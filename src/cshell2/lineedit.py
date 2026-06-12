@@ -61,10 +61,15 @@ def _display_col_offset(prefix: str, completions: list[Completion]) -> int:
     the candidate text aligns with the already-typed partial token.
     E.g. prefix="doc/co", displays=["completion.md","context.md"] → 2 ("co").
     Wide chars in the prefix count as 2 columns each.
+
+    Match case-insensitively so completers that fold case (e.g. ``FileCompleter``
+    treating ``cd p`` as matching ``Pictures/``) still align the picker under
+    the typed ``p`` instead of falling back to the caret position.
     """
     for start in range(len(prefix) + 1):
         suffix = prefix[start:]
-        if all(c.display.startswith(suffix) for c in completions):
+        suffix_lower = suffix.lower()
+        if all(c.display.lower().startswith(suffix_lower) for c in completions):
             return _wcswidth(suffix)
     return 0
 
