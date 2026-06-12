@@ -1356,8 +1356,8 @@ def _register_hyperpod(awsut) -> None:
         nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
 
         if raw:
-            print(json.dumps({"cluster": cluster, "nodes": nodes},
-                             indent=2, default=str))
+            print(json.dumps(cluster, indent=2, default=str))
+            print(json.dumps(nodes, indent=2, default=str))
             return
 
         hostnames = _HyperpodHostnames.instance()
