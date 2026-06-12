@@ -175,6 +175,13 @@ Once completions are returned to the line editor:
 | All `multi_select` | Open `InlineMultiPicker` |
 | Mixed | Open `InlinePicker` (narrows as user types more characters) |
 
+Auto-apply on a single completion only fires on the **initial** TAB press.
+If the user is narrowing inside an open picker and the candidate count
+drops to one, the picker stays open on that lone item — the user can't
+see the count cross the threshold mid-typing, so a sudden close + insert
+would feel like the shell is finishing the word for them out of nowhere.
+Press Enter to apply, or TAB to extend the common prefix explicitly.
+
 The **fallback to `FileCompleter`** only triggers when **no completer** is registered for that position. If a completer is registered but returns empty results, no fallback occurs — commands can explicitly declare "no completions here" by registering a completer that returns `[]`.
 
 ## Per-Argument Binding

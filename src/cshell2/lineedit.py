@@ -541,6 +541,13 @@ class LineEditor:
         from .tui import InlinePicker
 
         buf_changed = False
+        # True when the current loop iteration is a re-entry triggered by the
+        # picker reopening (TAB-extend or display-col shift while the user was
+        # narrowing). On a re-entry, narrowing to a single completion must NOT
+        # auto-apply — the user would have no way to know the candidate count
+        # crossed the threshold. Keep the picker open on the lone item so they
+        # press Enter (apply) or TAB (extend common prefix) explicitly.
+        from_reopen = False
         while True:
             # Redraw if a previous iteration modified the buffer (e.g. auto-applied a
             # flag), so the prompt reflects the new content before the next picker opens.
@@ -569,12 +576,13 @@ class LineEditor:
             # value_completer is registered) or set self._hint (is_arg_hint).
             if (len(completions) == 1
                     and completions[0].multi_select
-                    and completions[0].arg_hint):
+                    and completions[0].arg_hint
+                    and not from_reopen):
                 self._apply(completions[0], prefix)
                 buf_changed = True
                 continue
 
-            if len(completions) == 1:
+            if len(completions) == 1 and not from_reopen:
                 self._apply(completions[0], prefix)
                 if completions[0].arg_hint:
                     self._prompt_for_arg(completions[0])
@@ -641,6 +649,7 @@ class LineEditor:
                 typed = picker._typed
                 self._buf = self._buf[: self._cursor] + typed + self._buf[self._cursor :]
                 self._cursor += len(typed)
+                from_reopen = True
                 continue
 
             if picker.apply_backspace:
@@ -960,8 +969,14 @@ class LineEditor:
             sys.stdout.write(f"\033[{rows_above}A")
 
             if picker.reopen:
-                # TAB was pressed inside the picker: extend the typed chars into
-                # the buffer and reopen with a refreshed completion list.
+                # TAB was pressed inside the picker (or the display column
+                # shifted while narrowing): extend the typed chars into the
+                # buffer and reopen with a refreshed completion list. Even if
+                # narrowing leaves only one completion, do NOT auto-apply —
+                # the user can't see the count cross the threshold mid-typing,
+                # so a sudden close + insert would be surprising. Keep the
+                # picker open on the lone item; the user presses Enter to apply
+                # or TAB to extend the common prefix explicitly.
                 typed = picker._typed
                 self._buf = self._buf[: self._cursor] + typed + self._buf[self._cursor :]
                 self._cursor += len(typed)
@@ -969,9 +984,6 @@ class LineEditor:
                 completions = [c for c in completions if not c.multi_select]
                 if not completions:
                     return True  # typed chars committed; no further completions
-                if len(completions) == 1:
-                    self._apply(completions[0], prefix)
-                    return True  # single completion; close like _complete() does
                 continue
 
             if picker.apply_backspace:
