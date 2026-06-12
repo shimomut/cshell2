@@ -187,6 +187,16 @@ class InlinePicker(Generic[T]):
                     self._move(1)
                     self._render()
                 elif action == "tab_complete":
+                    # TAB on a single remaining candidate accepts it — the
+                    # caller's _apply() then replaces the whole token with
+                    # the candidate's canonical value, so any case mismatch
+                    # in what the user typed (e.g. "p" vs "Pictures/") is
+                    # corrected. Common-prefix extension only writes the
+                    # suffix past what was typed, which preserves the wrong
+                    # case in the prefix region.
+                    if len(self._items) == 1:
+                        result = self._items[self._selected]
+                        break
                     if self._handle_tab_complete():
                         break
                 elif action == "backspace":
