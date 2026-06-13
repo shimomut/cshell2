@@ -63,18 +63,19 @@ def _statusbar(label: str, hints: str, cols: int) -> str:
 
     Sized to fit the text plus a small margin, NOT the full row width.
     A full-width bar (any row whose cells are all "filled" up to ``cols``)
-    forces the terminal to reflow that row when the user shrinks the
-    terminal width — which scrolls the entire screen up by one or more
-    rows to make room for the wrapped continuation. After the scroll,
-    the prompt has visually drifted up and we have no robust way to
-    detect by how much, so a stranded copy of the prompt is left behind
-    above the resize-driven redraw.
+    forces some terminals (Terminal.app, xterm.js / VSCode integrated) to
+    reflow that row when the user shrinks the width — which scrolls the
+    entire screen up. During a drag-resize the terminal can scroll
+    multiple times between SIGWINCH deliveries, leaving stranded copies
+    of the prompt above our resize-redraw that we have no way to detect
+    after the fact. iTerm2 trims trailing styled cells before reflow and
+    doesn't show this symptom, but the narrow-bar form is correct on all
+    terminals we target.
 
-    By keeping the bar's footprint close to its text width and clearing
-    the rest of the row with ``\\033[K``, the row's content is short and
-    the terminal won't try to reflow it on a width shrink (unless the
-    user shrinks the terminal *below* the text width, which is visually
-    obvious and rare).
+    By keeping the bar's footprint to its text width and clearing the
+    rest of the row with ``\\033[K``, the row's content is short and the
+    terminal won't reflow it on a width shrink (unless the shrink goes
+    *below* the text width — visually obvious and rare).
     """
     s = get_color_scheme()
     # Status bar is a single row — collapse any embedded newlines (a help
