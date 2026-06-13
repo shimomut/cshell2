@@ -59,7 +59,23 @@ def _wcs_ljust(s: str, width: int) -> str:
 
 
 def _statusbar(label: str, hints: str, cols: int) -> str:
-    """Render a full-width status-bar string for the bottom line of the terminal."""
+    """Render the status-bar string for the bottom line of the terminal.
+
+    Sized to fit the text plus a small margin, NOT the full row width.
+    A full-width bar (any row whose cells are all "filled" up to ``cols``)
+    forces the terminal to reflow that row when the user shrinks the
+    terminal width — which scrolls the entire screen up by one or more
+    rows to make room for the wrapped continuation. After the scroll,
+    the prompt has visually drifted up and we have no robust way to
+    detect by how much, so a stranded copy of the prompt is left behind
+    above the resize-driven redraw.
+
+    By keeping the bar's footprint close to its text width and clearing
+    the rest of the row with ``\\033[K``, the row's content is short and
+    the terminal won't try to reflow it on a width shrink (unless the
+    user shrinks the terminal *below* the text width, which is visually
+    obvious and rare).
+    """
     s = get_color_scheme()
     # Status bar is a single row — collapse any embedded newlines (a help
     # text's first line is the summary; the rest is detail meant for `help`).
@@ -67,8 +83,19 @@ def _statusbar(label: str, hints: str, cols: int) -> str:
     hints = hints.split("\n", 1)[0].rstrip() if hints else hints
     parts = [p for p in (label, hints) if p]
     text = "   ".join(parts)
-    padded = _wcs_ljust(_wcs_clip(f"  {text}  " if text else "", cols), cols)
-    return f"{_bg(*s.statusbar_bg)}{_fg(*s.statusbar_fg)}{padded}\033[0m"
+    if not text:
+        # No content to show — emit just an erase-line so any leftover
+        # bar from a prior render disappears.
+        return "\033[2K"
+    inner = f"  {text}  "
+    # Cap to cols-1 so even pathologically long labels don't fill the row.
+    inner = _wcs_clip(inner, max(1, cols - 1))
+    # Bar = colored text block + ``\033[K`` (erase to end of row) so the
+    # cells past the bar are default/empty — terminals don't reflow empty
+    # cells on width shrink.
+    return (
+        f"{_bg(*s.statusbar_bg)}{_fg(*s.statusbar_fg)}{inner}\033[0m\033[K"
+    )
 
 
 def _common_prefix(strings: list[str]) -> str:
