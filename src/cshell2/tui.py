@@ -426,8 +426,23 @@ class InlinePicker(Generic[T]):
         wrote from ``self._col`` onwards (each row uses ``\\r{col_move}{...}``
         within the same buffered render), so the area to the left of the
         anchor on the anchor row was never touched and doesn't need clearing.
+
+        On a resize-induced cancel (``self._cancelled``), hide the cursor
+        first: the DECSC anchor was saved in the *old* geometry, so
+        ``\\0338`` lands at an unexpected post-reflow position and the
+        caret would visibly flash there before the caller's redraw moves
+        it back. The next ``_redraw()`` re-shows the cursor at the prompt
+        caret.
+
+        On a non-resize close (Esc, selection, or a narrow-into-reopen),
+        the anchor is still correct, so leave the cursor visible —
+        otherwise a picker reopen-flow would close one picker (hiding
+        the cursor) and open the next without the line editor's
+        ``_redraw()`` running between them, leaving the caret invisible
+        until the picker chain finally exits.
         """
-        sys.stdout.write("\0338\033[J")
+        prefix = "\x1b[?25l" if self._cancelled else ""
+        sys.stdout.write(f"{prefix}\0338\033[J")
 
     # ── char input ──────────────────────────────────────────────────────────
 
@@ -618,7 +633,13 @@ class InlineArgPrompt:
         sys.stdout.flush()
 
     def _cleanup(self) -> None:
-        sys.stdout.write("\0338\r\033[J")
+        # On resize-cancel, hide the cursor: the DECSC anchor was saved in
+        # the old geometry, so \0338 lands at an unexpected post-reflow
+        # position and the caret would flash there before the next redraw
+        # moves it. The caller's _redraw() restores visibility. Non-resize
+        # closes leave the cursor visible — the anchor is still correct.
+        prefix = "\x1b[?25l" if self._cancelled else ""
+        sys.stdout.write(f"{prefix}\0338\r\033[J")
         sys.stdout.flush()
 
     def _read_key(self) -> bytes:
@@ -823,7 +844,13 @@ class InlineMultiPicker(Generic[T]):
         return row
 
     def _cleanup(self) -> None:
-        sys.stdout.write("\0338\r\033[J")
+        # On resize-cancel, hide the cursor: the DECSC anchor was saved in
+        # the old geometry, so \0338 lands at an unexpected post-reflow
+        # position and the caret would flash there before the next redraw
+        # moves it. The caller's _redraw() restores visibility. Non-resize
+        # closes leave the cursor visible — the anchor is still correct.
+        prefix = "\x1b[?25l" if self._cancelled else ""
+        sys.stdout.write(f"{prefix}\0338\r\033[J")
         sys.stdout.flush()
 
     # ── input ───────────────────────────────────────────────────────────────
