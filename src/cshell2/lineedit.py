@@ -390,6 +390,15 @@ class LineEditor:
         cursor_char = self._prompt_len + _wcswidth(self._buf[:self._cursor])
         total_char = self._prompt_len + _wcswidth(self._buf)
 
+        # Synchronized output (DECSET 2026): the terminal buffers everything
+        # written between BSU (\x1b[?2026h) and ESU (\x1b[?2026l) and presents
+        # it as a single atomic frame. iTerm2 supports it; terminals that
+        # don't simply ignore the private modes. Without this, iTerm2 paints
+        # the intermediate state of \r\033[J — a blank line — before the
+        # rewritten prompt+buffer arrives, which reads as flicker.
+        # DECTCEM cursor-hide on top suppresses caret flashes at col 0.
+        sys.stdout.write("\x1b[?2026h\x1b[?25l")
+
         # Go up to the render top, then clear to end of screen.
         if self._cursor_row > 0:
             sys.stdout.write(f"\033[{self._cursor_row}A")
@@ -445,6 +454,7 @@ class LineEditor:
             sys.stdout.write("\0338")
             self._status_bar_visible = False
 
+        sys.stdout.write("\x1b[?25h\x1b[?2026l")
         sys.stdout.flush()
 
     def _clear_status_bar(self) -> None:
