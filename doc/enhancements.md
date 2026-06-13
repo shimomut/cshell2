@@ -153,3 +153,82 @@ first two together — `slots.py` + `dispatch.py` — collapses
 `shell.py` to roughly the REPL-and-built-ins module its name
 implies (~600 lines), which is also what the architecture diagrams
 in CLAUDE.md and architecture.md already promise.
+
+## UX brainstorming — closing the CUI/GUI gap
+
+Exploratory ideas for narrowing the gap between CUI and GUI interaction
+models. None of these are designed yet — the entries below capture the
+problem framing and brainstormed directions so a future design pass can
+pick them up without re-deriving the motivation.
+
+- **Preview before execution / pipeline dry-run.** Pipelines are opaque
+  until run — `find . -name "*.log" | xargs rm` gives no chance to see
+  what would be deleted; `grep ERROR app.log | wc -l` hides the
+  intermediate `grep` output. Idea: a live per-stage preview while
+  typing, executing for real on Enter — a two-phase interaction. Open
+  question: refresh cadence (every keystroke vs. after a pause).
+  Overlaps with the pipe-learning-curve idea below.
+
+- **Mixing filter-based and manual selection — and folding "object-first"
+  into it.** GUIs let you narrow a list by filter and then individually
+  check/uncheck items; CUI tools (`find`, `grep`, `ps | grep python`,
+  `git add -p`) don't compose this way. Idea: extend `OptionsCompleter`'s
+  checkbox UI (`InlineMultiPicker`) toward "type to filter, Space to
+  toggle individual items," with the non-trivial question of whether
+  toggled selections survive a filter change.
+
+  This turns out to be the key that unlocks "object-first interaction"
+  (verb→object vs. object→verb) too — previously framed as its own
+  entry needing a dedicated target-selection entry point and a dynamic
+  action menu. The simpler framing that emerged from a brainstorming
+  session: CUI forces "decide the command, then name the target"
+  (`rm file.txt`) only because TAB completion assumes the verb is typed
+  first and inserts one value at a time. If TAB completion *is* a good
+  enough picker — search/filter/sort/multi-select, anchored at any
+  argument position via the existing per-position completer binding
+  (`CompletionContext.arg_index`, `FileCompleter` vs. `DirCompleter`
+  etc.) — and the caret can move freely (`Ctrl+A/E`, already supported),
+  then object-first selection falls out of verb-first typing for free:
+  type `mv `, TAB to multi-select source files, jump to end-of-line,
+  TAB again to pick the destination directory. Source and destination
+  end up using the *exact same* picker UX (just different completers),
+  which also resolves the "two different UX in one command" inconsistency
+  that a `$sel`/clipboard-variable approach would otherwise have. No new
+  commands, no implicit selection variables, no dual-pane mode-shift —
+  "object-first" becomes "fill in arguments out of order using a picker
+  good enough to trust." The one genuinely new piece this requires:
+  **multi-select insertion** — TAB on a multi-select picker must insert
+  N items as a single properly-quoted, space-separated token group at
+  the cursor, rather than one completion replacing one prefix (today's
+  `Completion`/`InlinePicker` path assumes the latter). Get filter+manual
+  selection and multi-select insertion right here, and the standalone
+  "object-first" entry point mostly stops being necessary.
+
+- **Viewing two places at once.** `cp`/`mv`/`git diff` and side-by-side
+  context comparison all want simultaneous views of two locations or
+  states; cshell2's context stack supports *switching* but not *viewing
+  side by side*, and tmux-style splits are disconnected from the shell.
+  Open question: should the shell own a split-view mode, or is
+  "remember one side" good enough for most cases?
+
+- **Structured-data filtering and sorting.** `ps aux`, `ls -la`,
+  `git log` are tabular but treated as plain text — sorting/filtering by
+  column means reaching for `awk`/`sort`/`grep`, and header rows cause
+  off-by-one bugs in `wc -l`. Idea: a built-in viewer that recognizes
+  tabular output and supports column sort/filter, opt-in via something
+  like a `--view` flag or `@table` decorator (heuristic parsing of known
+  command output, à la a lightweight Nushell — fragile but maybe
+  practical without sacrificing compatibility).
+
+- **Lowering the pipe learning curve.** The "data flowing through a
+  pipeline" mental model is hard to build without visual feedback;
+  stderr silently not flowing through pipes, and the `xargs`-or-not
+  distinction, are common beginner traps. Idea: build-and-verify pipeline
+  UI (overlaps with the preview idea above), more visible/explicit stderr
+  handling, and detecting when `xargs` is needed and suggesting it.
+
+Cross-cutting: these are fundamentally TUI design problems bounded by
+fixed-width text and cursor control; richer UI trades off against the
+"simple shell" ideal, and serving both experienced Bash users and
+beginners well may need different modes or progressive disclosure.
+Keybinding layout will make or break any of these.
