@@ -12,15 +12,18 @@ Provides the ``awsut`` command tree:
   ssh install-key|run|search-capacity|kubeconfig|events``
 
 Profile and region switching live in the ``aws`` recipe as ``Var`` entries
-(``var aws_profile=...``, ``var aws_region=...``).
+(``var aws_profile=...``, ``var aws_region=...``).  The SageMaker endpoint
+and SageMaker service name are also exposed as ``Var`` entries — set them
+at the prompt with ``var sagemaker_endpoint=...`` /
+``var sagemaker_service_name=...`` (or ``var sagemaker_endpoint=`` to
+unset).  These two are stored in module-level Python variables (not
+``os.environ``), so they don't leak into subprocesses.
 
 User-customisable defaults (read from ``~/.cshell2/config.py`` if set):
 
     from cshell2.recipes import awsut
     awsut.console_pages = {"home": "https://...", ...}
     awsut.console_url_modifier_func = lambda account, role, url: ...
-    awsut.hyperpod_endpoint = "https://..."
-    awsut.sagemaker_service_name = "sagemaker"
     awsut.awscli = ["aws"]
 """
 
@@ -49,6 +52,7 @@ from ..completion import (
     FileCompleter,
 )
 from ..shell import passthrough_input, passthrough_run
+from ..variables import Var, registry as var_registry
 
 
 # ─── User-customisable module-level config ──────────────────────────────────
@@ -58,7 +62,6 @@ from ..shell import passthrough_input, passthrough_run
 #     from cshell2.recipes import awsut
 #     awsut.console_pages = {...}
 #     awsut.console_url_modifier_func = lambda account, role, url: ...
-#     awsut.hyperpod_endpoint = "https://..."
 
 console_pages: dict[str, str] = {
     "home":     "https://console.aws.amazon.com/console/home",
@@ -71,9 +74,13 @@ console_pages: dict[str, str] = {
 
 console_url_modifier_func: Callable[[str, str, str], str] | None = None
 
-hyperpod_endpoint: str = os.environ.get("HYPERPOD_ENDPOINT", "")
-sagemaker_service_name: str = "sagemaker"
 awscli: list[str] = ["aws"]
+
+# Set via ``var sagemaker_endpoint=...`` / ``var sagemaker_service_name=...``
+# at the prompt.  Module-level Python state (not env vars) so they don't
+# leak into subprocesses.
+sagemaker_endpoint: str = ""
+sagemaker_service_name: str = "sagemaker"
 
 _hyperpod_regions = [
     "us-east-1", "us-east-2", "us-west-1", "us-west-2",
@@ -100,7 +107,7 @@ def _get_boto3_client(service_name: str):
 
 
 def _get_sagemaker_client(region_name: str | None = None):
-    endpoint_url = hyperpod_endpoint or None
+    endpoint_url = sagemaker_endpoint or None
     if region_name is None:
         region_name = os.environ.get("AWS_REGION")
     return boto3.client(
@@ -584,6 +591,40 @@ class _HyperpodNodeIdCompleter(Completer):
                 for c in unique if c.startswith(ctx.prefix)]
 
 
+# ─── module-level Python-backed Vars ────────────────────────────────────────
+
+class _SagemakerEndpointVar(Var):
+    name = "sagemaker_endpoint"
+    description = "SageMaker endpoint URL (blank = AWS default)"
+
+    def get(self) -> str | None:
+        return sagemaker_endpoint or None
+
+    def set(self, value: str) -> None:
+        global sagemaker_endpoint
+        sagemaker_endpoint = value
+
+    def unset(self) -> None:
+        global sagemaker_endpoint
+        sagemaker_endpoint = ""
+
+
+class _SagemakerServiceNameVar(Var):
+    name = "sagemaker_service_name"
+    description = "boto3 service name for SageMaker client (default: sagemaker)"
+
+    def get(self) -> str | None:
+        return sagemaker_service_name
+
+    def set(self, value: str) -> None:
+        global sagemaker_service_name
+        sagemaker_service_name = value or "sagemaker"
+
+    def unset(self) -> None:
+        global sagemaker_service_name
+        sagemaker_service_name = "sagemaker"
+
+
 # ─── tree definition ────────────────────────────────────────────────────────
 
 def register() -> None:
@@ -595,6 +636,9 @@ def register() -> None:
     _register_logs(awsut)
     _register_cf(awsut)
     _register_hyperpod(awsut)
+
+    var_registry.register(_SagemakerEndpointVar())
+    var_registry.register(_SagemakerServiceNameVar())
 
 
 def _register_console(awsut) -> None:
@@ -1356,8 +1400,8 @@ def _register_hyperpod(awsut) -> None:
         nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
 
         if raw:
-            print(json.dumps({"cluster": cluster, "nodes": nodes},
-                             indent=2, default=str))
+            print(json.dumps(cluster, indent=2, default=str))
+            print(json.dumps(nodes, indent=2, default=str))
             return
 
         hostnames = _HyperpodHostnames.instance()

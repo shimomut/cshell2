@@ -100,7 +100,7 @@ Entry point. Reads input, parses lines, dispatches commands.
 
 **Built-in commands:** `cd`, `exit`, `reload`, `var`, `unset`, `help`, `context`
 
-**Ctrl+] context switching:** The user can press `Ctrl+]` at the shell prompt (or during a running process) to open a TUI picker listing all contexts. Selecting a context with a live process resumes it immediately. Selecting `+ new context` prompts for a name and creates a new context inheriting the current context's variables. The shell tracks processes across context switches via `ProcessSlot` (see `process.py`).
+**Ctrl+] context switching:** The user can press `Ctrl+]` at the shell prompt (or during a running process) to open a TUI picker listing all contexts. Selecting a context with a live process resumes it immediately. While the picker is open, the focused context's last few lines of buffered output are previewed below the list, and the following action keys mutate the context list in place: `Ctrl+N` creates a new context (inheriting the current context's variables), `Ctrl+D` deletes the focused context (including the current one — the manager picks the next current automatically), `Ctrl+R` renames the focused context. Action keys refuse to delete a context with a live process or to leave fewer than one context. The shell tracks processes across context switches via `ProcessSlot` (see `process.py`).
 
 ### commands.py — Command Registry
 

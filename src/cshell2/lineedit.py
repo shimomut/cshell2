@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import sys
@@ -61,10 +62,15 @@ def _display_col_offset(prefix: str, completions: list[Completion]) -> int:
     the candidate text aligns with the already-typed partial token.
     E.g. prefix="doc/co", displays=["completion.md","context.md"] → 2 ("co").
     Wide chars in the prefix count as 2 columns each.
+
+    Match case-insensitively so completers that fold case (e.g. ``FileCompleter``
+    treating ``cd p`` as matching ``Pictures/``) still align the picker under
+    the typed ``p`` instead of falling back to the caret position.
     """
     for start in range(len(prefix) + 1):
         suffix = prefix[start:]
-        if all(c.display.startswith(suffix) for c in completions):
+        suffix_lower = suffix.lower()
+        if all(c.display.lower().startswith(suffix_lower) for c in completions):
             return _wcswidth(suffix)
     return 0
 
@@ -90,6 +96,27 @@ def _pending_wrap_col(char_count: int, cols: int) -> int:
         return 0
     rem = char_count % cols
     return rem if rem != 0 else cols - 1
+
+
+# ── Debug logging (opt-in via CSHELL2_RESIZE_DEBUG=/path/to/log) ──────────────
+
+
+_RESIZE_DEBUG_PATH = os.environ.get("CSHELL2_RESIZE_DEBUG")
+
+
+def _resize_debug(msg: str) -> None:
+    """Append *msg* to ``$CSHELL2_RESIZE_DEBUG`` if set; otherwise no-op.
+
+    Used to instrument SIGWINCH handling in the wild without polluting
+    stdout (which would corrupt the line editor's render).
+    """
+    if not _RESIZE_DEBUG_PATH:
+        return
+    try:
+        with open(_RESIZE_DEBUG_PATH, "a") as f:
+            f.write(msg + "\n")
+    except OSError:
+        pass
 
 
 # ── History ──────────────────────────────────────────────────────────────────
@@ -173,10 +200,48 @@ class LineEditor:
         self._terminal_reflows = os.environ.get("TERM_PROGRAM", "") != "vscode"
         self._hint: str = ""  # transient hint shown after TAB; cleared on next keypress
         self._status_bar_visible: bool = False  # whether the status bar is currently showing something
+        self._suppress_statusbar: bool = False  # set by _on_resize, cleared on next keypress
+        # While a TUI picker is up the cursor isn't where the line editor
+        # thinks it is. SIGWINCH must NOT trigger our _redraw in that case
+        # (it would clobber the picker's panel and confuse the picker's
+        # cleanup). Pickers poll terminal_size() between key reads and
+        # cancel themselves on resize; the next _redraw after _picker_session
+        # exits then runs cleanly with the new geometry.
+        self._picker_active: bool = False
 
     def add_to_history(self, line: str) -> None:
         """Add *line* to history from outside the editor (e.g. after joining continuation lines)."""
         self._history.add(line)
+
+    @contextlib.contextmanager
+    def _picker_session(self):
+        """Suppress the line editor's SIGWINCH redraw while a TUI picker is active.
+
+        TUI widgets paint their own status bar on the bottom row and run
+        their own resize-detection (poll ``terminal_size()`` between key
+        reads, cancel on change). After the picker returns we mark the
+        status bar visible so the next ``_redraw`` explicitly wipes the
+        bottom row, since the picker may have left a bar there.
+
+        If the terminal was resized while the picker was up, run our own
+        resize-recovery path on exit (DSR + clear) so the line editor
+        recovers cleanly rather than relying on stale row tracking.
+        """
+        prev = self._picker_active
+        self._picker_active = True
+        cols_before, lines_before = self._cols, self._lines
+        try:
+            yield
+        finally:
+            self._picker_active = prev
+            self._update_cols()
+            self._status_bar_visible = True
+            if cols_before != self._cols or lines_before != self._lines:
+                # Synthesise the SIGWINCH path: rewind _cols/_lines so
+                # _on_resize sees the change, then call it directly. The
+                # _picker_active guard is already cleared at this point.
+                self._cols, self._lines = cols_before, lines_before
+                self._on_resize(None, None)
 
     def prompt(self, prompt_str: str | None = None, add_to_history: bool = True) -> str:
         """Read one line.
@@ -238,22 +303,84 @@ class LineEditor:
             self._lines = 24
 
     def _on_resize(self, _sig, _frame) -> None:
+        # While a TUI picker is up the cursor isn't where the line editor
+        # thinks. Redrawing now would paint over the picker's panel and
+        # break its cleanup. The picker polls terminal_size() between key
+        # reads and cancels itself on resize; the next _redraw (after
+        # _picker_session exits) handles the new geometry cleanly.
+        if self._picker_active:
+            self._update_cols()
+            return
         old_cursor_row = self._cursor_row
+        old_cols = self._cols
         self._update_cols()
-        cursor_char = self._prompt_len + _wcswidth(self._buf[:self._cursor])
-        if self._terminal_reflows:
-            # Terminal reflows content and moves the cursor to the correct
-            # position in the new geometry; just update our tracking.
-            self._cursor_row = _pending_wrap_row(cursor_char, self._cols)
-        else:
-            # Terminal doesn't reflow (e.g. VSCode). The cursor stays on the
-            # same row (clamped to the new width), so go up old_cursor_row to
-            # reach render-top, then clear and redraw.
-            if old_cursor_row > 0:
-                sys.stdout.write(f"\033[{old_cursor_row}A")
-            sys.stdout.write("\r\033[J")
+
+        # Suppress status-bar drawing for this resize-driven redraw. Drag-
+        # resize delivers many SIGWINCHes and repainting the bar on each one
+        # is jarring (and on terminals that reflow at width-change boundaries
+        # the old bar's row would not be cleared by the new draw, leaving
+        # ghosts). The next keypress clears the flag and the bar comes
+        # back immediately.
+        self._suppress_statusbar = True
+
+        # Ask the terminal where the caret is now. Whether the terminal
+        # reflowed (Terminal.app, iTerm2, VSCode at width changes) or not
+        # (some VSCode resize cases, certain emulators), DSR reports the
+        # caret's *current* absolute row, which is all we need to compute
+        # the prompt's render-top and clear from there.
+        fd = sys.stdin.fileno()
+        pos = terminal.query_cursor_position(fd)
+        _resize_debug(
+            f"DSR={pos} old_cursor_row={old_cursor_row} "
+            f"cols={old_cols}->{self._cols} lines={self._lines}"
+        )
+        if pos is not None:
+            caret_row, _ = pos
+            # Render-top = caret_row - cursor_row_offset_within_prompt.
+            #
+            # On width changes, every terminal we target (Terminal.app,
+            # iTerm2, VSCode integrated) reflows: the cursor moves with
+            # the logical content to its new wrapped row, so the cursor's
+            # row offset under the NEW geometry (``new_cursor_row``) is
+            # the right value.
+            #
+            # On height-only changes (no width change), content layout is
+            # unchanged, so the cursor's row offset matches what we
+            # tracked before the resize (``old_cursor_row``). Picking
+            # ``min`` of both estimates would over-clear by one row when
+            # reflow shrank the prompt back to a single row, erasing
+            # prior output above the prompt — so we pick deliberately.
+            cursor_char = self._prompt_len + _wcswidth(self._buf[:self._cursor])
+            new_cursor_row = _pending_wrap_row(cursor_char, self._cols)
+            if old_cols == self._cols:
+                cursor_row_offset = old_cursor_row
+            else:
+                cursor_row_offset = new_cursor_row
+            top = max(1, caret_row - cursor_row_offset)
+            top = min(top, self._lines)
+            _resize_debug(
+                f"  → top={top} offset={cursor_row_offset} "
+                f"(no_reflow={caret_row - old_cursor_row}, "
+                f"reflow={caret_row - new_cursor_row}, caret={caret_row})"
+            )
+            sys.stdout.write(f"\033[{top};1H\033[J")
             self._cursor_row = 0
             self._redraw()
+        else:
+            # DSR unsupported: fall back to the legacy reflow / relative
+            # clear paths. Status-bar suppression still applies, so a
+            # stranded bar is at least one-shot rather than refreshed each
+            # SIGWINCH.
+            _resize_debug("  → DSR unsupported, using legacy fallback")
+            cursor_char = self._prompt_len + _wcswidth(self._buf[:self._cursor])
+            if self._terminal_reflows:
+                self._cursor_row = _pending_wrap_row(cursor_char, self._cols)
+            else:
+                if old_cursor_row > 0:
+                    sys.stdout.write(f"\033[{old_cursor_row}A")
+                sys.stdout.write("\r\033[J")
+                self._cursor_row = 0
+                self._redraw()
 
     # ── rendering ────────────────────────────────────────────────────────────
 
@@ -263,16 +390,29 @@ class LineEditor:
         cursor_char = self._prompt_len + _wcswidth(self._buf[:self._cursor])
         total_char = self._prompt_len + _wcswidth(self._buf)
 
+        # Synchronized output (DECSET 2026): the terminal buffers everything
+        # written between BSU (\x1b[?2026h) and ESU (\x1b[?2026l) and presents
+        # it as a single atomic frame. iTerm2 supports it; terminals that
+        # don't simply ignore the private modes. Without this, iTerm2 paints
+        # the intermediate state of \r\033[J — a blank line — before the
+        # rewritten prompt+buffer arrives, which reads as flicker.
+        # DECTCEM cursor-hide on top suppresses caret flashes at col 0.
+        sys.stdout.write("\x1b[?2026h\x1b[?25l")
+
         # Go up to the render top, then clear to end of screen.
         if self._cursor_row > 0:
             sys.stdout.write(f"\033[{self._cursor_row}A")
         sys.stdout.write("\r\033[J")
         sys.stdout.write(self._prompt_str + self._buf)
 
-        # Decide whether the status bar needs to render.
+        # Decide whether the status bar needs to render. ``_suppress_statusbar``
+        # is set by ``_on_resize`` so a drag-resize doesn't repaint the bar
+        # on every SIGWINCH; the flag is cleared on the next keypress.
         from .tui import _statusbar
         statusbar_str: str | None = None
-        if self._hint:
+        if self._suppress_statusbar:
+            pass
+        elif self._hint:
             statusbar_str = _statusbar(self._hint, "", self._cols)
         elif self._get_arg_info is not None:
             info = self._get_arg_info(self._buf, self._cursor)
@@ -314,6 +454,7 @@ class LineEditor:
             sys.stdout.write("\0338")
             self._status_bar_visible = False
 
+        sys.stdout.write("\x1b[?25h\x1b[?2026l")
         sys.stdout.flush()
 
     def _clear_status_bar(self) -> None:
@@ -335,6 +476,7 @@ class LineEditor:
     def _handle_key(self, key: bytes, fd: int) -> str | None:
         """Return a result string to finish, or None to keep editing."""
         self._hint = ""  # any keypress dismisses the hint; TAB may re-set it
+        self._suppress_statusbar = False  # bring the bar back on user activity
 
         # Enter
         if key in (b"\r", b"\n"):
@@ -396,13 +538,13 @@ class LineEditor:
             self._cursor = 0
             return None
 
-        # Ctrl+A / Home
-        if key in (b"\x01", b"\x1b[H", b"\x1b[1~"):
+        # Ctrl+A / Home (CSI and SS3 forms — Terminal.app sends SS3 in app cursor mode)
+        if key in (b"\x01", b"\x1b[H", b"\x1b[1~", b"\x1bOH"):
             self._cursor = 0
             return None
 
         # Ctrl+E / End
-        if key in (b"\x05", b"\x1b[F", b"\x1b[4~"):
+        if key in (b"\x05", b"\x1b[F", b"\x1b[4~", b"\x1bOF"):
             self._cursor = len(self._buf)
             return None
 
@@ -412,13 +554,13 @@ class LineEditor:
             return None
 
         # Ctrl+B / Left arrow
-        if key in (b"\x02", b"\x1b[D"):
+        if key in (b"\x02", b"\x1b[D", b"\x1bOD"):
             if self._cursor > 0:
                 self._cursor -= 1
             return None
 
         # Ctrl+F / Right arrow
-        if key in (b"\x06", b"\x1b[C"):
+        if key in (b"\x06", b"\x1b[C", b"\x1bOC"):
             if self._cursor < len(self._buf):
                 self._cursor += 1
             return None
@@ -449,13 +591,14 @@ class LineEditor:
             self._history_search(fd)
             return None
 
-        # Up arrow — history back
-        if key in (b"\x1b[A", b"\x10"):
+        # Up arrow — history back (CSI and SS3 forms; SS3 is what Terminal.app
+        # sends when the keypad/cursor is in application mode — DECCKM)
+        if key in (b"\x1b[A", b"\x1bOA", b"\x10"):
             self._hist_back()
             return None
 
         # Down arrow — history forward
-        if key in (b"\x1b[B", b"\x0e"):
+        if key in (b"\x1b[B", b"\x1bOB", b"\x0e"):
             self._hist_fwd()
             return None
 
@@ -519,7 +662,8 @@ class LineEditor:
         sys.stdout.flush()
 
         assert self._switch_fn is not None
-        needs_forward = self._switch_fn()
+        with self._picker_session():
+            needs_forward = self._switch_fn()
 
         # Picker cleanup left cursor at the anchor (col 0 of the blank line).
         # Move back up to the caret row so _redraw() can take over from there.
@@ -540,6 +684,13 @@ class LineEditor:
         from .tui import InlinePicker
 
         buf_changed = False
+        # True when the current loop iteration is a re-entry triggered by the
+        # picker reopening (TAB-extend or display-col shift while the user was
+        # narrowing). On a re-entry, narrowing to a single completion must NOT
+        # auto-apply — the user would have no way to know the candidate count
+        # crossed the threshold. Keep the picker open on the lone item so they
+        # press Enter (apply) or TAB (extend common prefix) explicitly.
+        from_reopen = False
         while True:
             # Redraw if a previous iteration modified the buffer (e.g. auto-applied a
             # flag), so the prompt reflects the new content before the next picker opens.
@@ -568,12 +719,13 @@ class LineEditor:
             # value_completer is registered) or set self._hint (is_arg_hint).
             if (len(completions) == 1
                     and completions[0].multi_select
-                    and completions[0].arg_hint):
+                    and completions[0].arg_hint
+                    and not from_reopen):
                 self._apply(completions[0], prefix)
                 buf_changed = True
                 continue
 
-            if len(completions) == 1:
+            if len(completions) == 1 and not from_reopen:
                 self._apply(completions[0], prefix)
                 if completions[0].arg_hint:
                     self._prompt_for_arg(completions[0])
@@ -625,7 +777,8 @@ class LineEditor:
                 reopen_when=lambda items: bool(items) and all(c.multi_select for c in items),
                 status_label=status_label,
             )
-            selected = picker.run()
+            with self._picker_session():
+                selected = picker.run()
 
             # Picker cleanup leaves cursor at the anchor (col `picker._col` of
             # the first blank row) WITHOUT flushing. Move up to the caret row
@@ -640,6 +793,7 @@ class LineEditor:
                 typed = picker._typed
                 self._buf = self._buf[: self._cursor] + typed + self._buf[self._cursor :]
                 self._cursor += len(typed)
+                from_reopen = True
                 continue
 
             if picker.apply_backspace:
@@ -678,7 +832,8 @@ class LineEditor:
             caret_col=caret_col,
             status_label=status_label,
         )
-        selected = picker.run()
+        with self._picker_session():
+            selected = picker.run()
 
         # No flush — let these bytes batch with the next _redraw so the caret
         # doesn't briefly land at the picker's anchor column on the prompt row.
@@ -778,7 +933,8 @@ class LineEditor:
             value_fn=None,  # disable tab-complete inside the search picker
             status_label="history search",
         )
-        selected = picker.run()
+        with self._picker_session():
+            selected = picker.run()
 
         # No flush — let the up-move batch with _redraw on return.
         sys.stdout.write("\033[1A")
@@ -892,7 +1048,8 @@ class LineEditor:
                 description=opt.description,
                 status_label=_flag_label,
             )
-            value = arg_prompt.run()
+            with self._picker_session():
+                value = arg_prompt.run()
 
             # InlineArgPrompt._cleanup() left the cursor at anchor (col 0 of the
             # prompt line, end_row + 1 below render-top). Move back to caret_row
@@ -950,7 +1107,8 @@ class LineEditor:
                 completion_prefix=prefix,
                 status_label=_flag_label,
             )
-            selected = picker.run()
+            with self._picker_session():
+                selected = picker.run()
 
             # Picker cleanup left cursor at col `picker._col` of (end_row + 1).
             # Go back up to the caret row, but don't flush — let these bytes
@@ -959,8 +1117,14 @@ class LineEditor:
             sys.stdout.write(f"\033[{rows_above}A")
 
             if picker.reopen:
-                # TAB was pressed inside the picker: extend the typed chars into
-                # the buffer and reopen with a refreshed completion list.
+                # TAB was pressed inside the picker (or the display column
+                # shifted while narrowing): extend the typed chars into the
+                # buffer and reopen with a refreshed completion list. Even if
+                # narrowing leaves only one completion, do NOT auto-apply —
+                # the user can't see the count cross the threshold mid-typing,
+                # so a sudden close + insert would be surprising. Keep the
+                # picker open on the lone item; the user presses Enter to apply
+                # or TAB to extend the common prefix explicitly.
                 typed = picker._typed
                 self._buf = self._buf[: self._cursor] + typed + self._buf[self._cursor :]
                 self._cursor += len(typed)
@@ -968,9 +1132,6 @@ class LineEditor:
                 completions = [c for c in completions if not c.multi_select]
                 if not completions:
                     return True  # typed chars committed; no further completions
-                if len(completions) == 1:
-                    self._apply(completions[0], prefix)
-                    return True  # single completion; close like _complete() does
                 continue
 
             if picker.apply_backspace:

@@ -18,11 +18,18 @@ polling :func:`os.get_terminal_size` between key reads.
 from __future__ import annotations
 
 import os
+import re
 import signal
 import sys
 import time
 
 IS_WINDOWS = os.name == "nt"
+
+# Bytes that arrived on stdin but haven't been delivered to a caller yet.
+# Populated by :func:`query_cursor_position` when the DSR reply arrives
+# interleaved with user keystrokes — those keystrokes are pushed here so
+# the next :func:`read_key` consumes them before touching ``os.read``.
+_pending_input: bytes = b""
 
 # True when the platform delivers a signal on terminal resize.  Callers use
 # this to decide between signal-driven reflow (POSIX) and poll-based resize
@@ -166,6 +173,8 @@ if IS_WINDOWS:
 
 def wait_readable(fd: int, timeout: float) -> bool:
     """Return True if a key is available within *timeout* seconds."""
+    if _pending_input:
+        return True
     if IS_WINDOWS:
         deadline = time.monotonic() + timeout
         while True:
@@ -179,6 +188,23 @@ def wait_readable(fd: int, timeout: float) -> bool:
     return bool(r)
 
 
+def _read_one_byte(fd: int) -> bytes:
+    """Read one byte, taking from the pending-input buffer first."""
+    global _pending_input
+    if _pending_input:
+        b, _pending_input = _pending_input[:1], _pending_input[1:]
+        return b
+    return os.read(fd, 1)
+
+
+def _select_or_pending(fd: int, timeout: float) -> bool:
+    """select-equivalent that also returns True when pending input is buffered."""
+    if _pending_input:
+        return True
+    r, _, _ = select.select([fd], [], [], timeout)
+    return bool(r)
+
+
 def read_key(fd: int) -> bytes:
     """Block until one logical key is available and return it as bytes.
 
@@ -186,29 +212,155 @@ def read_key(fd: int) -> bytes:
     character (all continuation bytes included), or a complete escape sequence
     (e.g. ``b"\\x1b[A"`` for the up arrow).  This lets callers compare against
     fixed byte patterns without re-reading the stream themselves.
+
+    Bytes parked in ``_pending_input`` (typically by :func:`query_cursor_position`
+    after a DSR exchange) are consumed before any new ``os.read``. To avoid
+    re-ordering when SIGWINCH parks bytes *while* this function is blocked
+    in ``os.read`` (Python retries via PEP 475 and the retry returns a
+    byte read AFTER the parked bytes), we re-check ``_pending_input``
+    after the initial read and prepend any parked bytes — those came from
+    earlier in the input stream and must be returned first.
     """
+    global _pending_input
     if IS_WINDOWS:
+        if _pending_input:
+            byte = _pending_input[:1]
+            _pending_input = _pending_input[1:]
+            return byte
         while not msvcrt.kbhit():
             time.sleep(0.005)
         return _win_read_key()
 
-    data = os.read(fd, 1)
+    had_pending_before = bool(_pending_input)
+    data = _read_one_byte(fd)
     if not data:
         return data  # EOF
+    # If SIGWINCH parked bytes *during* the blocking read above (i.e.,
+    # ``_pending_input`` was empty before but is now populated), those
+    # parked bytes are older than ``data`` — push ``data`` back and
+    # return the parked head so the caller sees the input in arrival
+    # order. We only do this when the buffer was empty before the read,
+    # so we don't disrupt a multi-byte sequence we're already mid-way
+    # through consuming from the buffer.
+    if not had_pending_before and _pending_input:
+        _pending_input = _pending_input + data
+        data = _pending_input[:1]
+        _pending_input = _pending_input[1:]
     first = data[0]
     if first == 0x1B:  # ESC — may begin an escape sequence
-        r, _, _ = select.select([fd], [], [], 0.05)
-        if r:
-            data += os.read(fd, 8)
+        # Read enough bytes to assemble exactly one escape sequence and
+        # stop at its final byte. Without this, a queued second sequence
+        # (e.g. two DSR replies arriving back-to-back as
+        # ``ESC[13;25RESC[14;25R``) bleeds into the first read, and the
+        # remainder leaks out as plain printable bytes that get inserted
+        # into the buffer.
+        #
+        # Sequence shapes we care about:
+        #   * CSI:  ESC [ <0..n params> <final-byte 0x40..0x7E>
+        #   * SS3:  ESC O <single byte>
+        #   * Plain ESC alone (no following byte within the timeout)
+        #   * ESC <one byte> for Alt-keys (e.g. ESC b for Alt+B)
+        if _select_or_pending(fd, 0.05):
+            second = _read_one_byte(fd)
+            if not second:
+                return data
+            data += second
+            if second == b"[":
+                # CSI: read until we see a final byte 0x40..0x7E.
+                # Bound the read to a reasonable max (most CSI replies
+                # are under 16 bytes; DSR is typically 8–10).
+                for _ in range(64):
+                    if not _select_or_pending(fd, 0.05):
+                        break
+                    more = _read_one_byte(fd)
+                    if not more:
+                        break
+                    data += more
+                    b = more[0]
+                    if 0x40 <= b <= 0x7E:
+                        break
+            elif second == b"O":
+                # SS3: exactly one more byte (e.g. ESC O A for up arrow
+                # in application cursor mode).
+                if _select_or_pending(fd, 0.05):
+                    more = _read_one_byte(fd)
+                    if more:
+                        data += more
+            # Else: ESC + one byte (Alt-key) — already captured.
         return data
     if first >= 0xC0:  # UTF-8 lead byte — pull in continuation bytes
         extra = 1 if first < 0xE0 else 2 if first < 0xF0 else 3
         for _ in range(extra):
-            r, _, _ = select.select([fd], [], [], 0.05)
-            if not r:
+            if not _select_or_pending(fd, 0.05):
                 break
-            data += os.read(fd, 1)
+            more = _read_one_byte(fd)
+            if not more:
+                break
+            data += more
     return data
+
+
+# DSR (Device Status Report) reply format: ESC [ row ; col R
+_DSR_REPLY_RE = re.compile(rb"\x1b\[(\d+);(\d+)R")
+
+
+def query_cursor_position(fd: int, timeout: float = 0.2) -> tuple[int, int] | None:
+    """Synchronously query the terminal for the cursor's absolute (row, col).
+
+    Sends DSR (``ESC [ 6 n``) and waits for the reply ``ESC [ row ; col R``.
+    Returns 1-indexed ``(row, col)``, or ``None`` if no reply arrives within
+    *timeout* seconds (e.g. on a non-tty stdin or a terminal that doesn't
+    speak DSR — such as our Windows path).
+
+    Caller MUST hold the terminal in raw mode and own stdin so the reply
+    isn't intercepted by another reader.
+
+    Bytes that arrive *before* the reply (e.g. user keystrokes typed in
+    the gap, or other escape sequences emitted by the terminal) are
+    preserved by appending them to the module's pending-input buffer, so
+    the next :func:`read_key` returns them in order. POSIX-only — the
+    Windows console answers cursor-position queries through a different
+    API that we don't need yet.
+    """
+    global _pending_input
+    if IS_WINDOWS:
+        return None
+    sys.stdout.write("\033[6n")
+    sys.stdout.flush()
+
+    buf = b""
+    deadline = time.monotonic() + timeout
+    while True:
+        match = _DSR_REPLY_RE.search(buf)
+        if match:
+            row, col = int(match.group(1)), int(match.group(2))
+            # Preserve bytes around the reply (keystrokes, OSC chunks, …).
+            leftover = buf[: match.start()] + buf[match.end():]
+            if leftover:
+                _pending_input += leftover
+            return row, col
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # No reply — preserve whatever we received so it isn't lost.
+            if buf:
+                _pending_input += buf
+            return None
+        r, _, _ = select.select([fd], [], [], remaining)
+        if not r:
+            if buf:
+                _pending_input += buf
+            return None
+        try:
+            chunk = os.read(fd, 64)
+        except OSError:
+            if buf:
+                _pending_input += buf
+            return None
+        if not chunk:
+            if buf:
+                _pending_input += buf
+            return None
+        buf += chunk
 
 
 # ── resize handling ─────────────────────────────────────────────────────────

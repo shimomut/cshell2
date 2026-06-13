@@ -73,6 +73,61 @@ def test_remove_current():
     assert cm.current_name == "prod"
 
 
+def test_rename():
+    cm = ContextManager()
+    cm.create("prod")
+    cm.create("staging")
+    cm.rename("staging", "stg")
+    assert "stg" in cm.list_contexts()
+    assert "staging" not in cm.list_contexts()
+    assert cm.contexts["stg"].name == "stg"
+
+
+def test_rename_current_updates_pointer():
+    cm = ContextManager()
+    cm.create("prod")
+    cm.rename("prod", "production")
+    assert cm.current_name == "production"
+    assert cm.current().name == "production"
+
+
+def test_rename_updates_stack():
+    cm = ContextManager()
+    cm.create("a")
+    cm.create("b")
+    cm.create("c")
+    cm.switch("a")
+    cm.push("b")
+    cm.push("c")
+    # stack: [a, b]; current: c
+    cm.rename("b", "B")
+    assert cm.stack == ["a", "B"]
+    cm.pop()  # → B
+    assert cm.current_name == "B"
+
+
+def test_rename_to_existing_raises():
+    cm = ContextManager()
+    cm.create("a")
+    cm.create("b")
+    with pytest.raises(ValueError):
+        cm.rename("a", "b")
+
+
+def test_rename_missing_raises():
+    cm = ContextManager()
+    cm.create("a")
+    with pytest.raises(KeyError):
+        cm.rename("nope", "x")
+
+
+def test_rename_to_same_is_noop():
+    cm = ContextManager()
+    cm.create("a")
+    cm.rename("a", "a")
+    assert cm.list_contexts() == ["a"]
+
+
 def test_set_get_variable():
     cm = ContextManager()
     cm.create("prod")

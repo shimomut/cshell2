@@ -139,9 +139,16 @@ class CommandNameCompleter(Completer):
         prefix = ctx.prefix
         results = []
         seen: set[str] = set()
+        recipe_names: set[str] = set()
 
         for name in sorted(self._registry.list_commands()):
             if name.startswith(prefix):
+                cmd = self._registry.get(name)
+                if cmd is not None and not cmd.has_any_handler():
+                    # Handler-less command — a completion recipe for an external
+                    # system command.  Classify as "system" rather than "command".
+                    recipe_names.add(name)
+                    continue
                 results.append(Completion(value=name, description="command"))
                 seen.add(name)
 
@@ -157,6 +164,15 @@ class CommandNameCompleter(Completer):
             if cmd in seen:
                 continue
             results.append(Completion(value=cmd, description="system"))
+            seen.add(cmd)
+
+        # Recipes that don't shadow a real PATH entry still get listed as
+        # "system" so the user sees them — uncommon but possible (e.g. recipe
+        # for a tool not installed on this host).
+        for name in sorted(recipe_names):
+            if name not in seen:
+                results.append(Completion(value=name, description="system"))
+                seen.add(name)
 
         return results
 

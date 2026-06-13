@@ -474,6 +474,7 @@ class PythonCommandSlot:
         self.argv: list[str] = [cmd.name] + raw_args
         self._thread: threading.Thread | None = None
         self._proxy: _StdoutProxy | None = None
+        self._err_proxy: _StdoutProxy | None = None
         self._exit_exception: BaseException | None = None
         self._finished = threading.Event()
         # Stub attributes expected by the run() loop
@@ -513,6 +514,8 @@ class PythonCommandSlot:
         """Spawn the command thread.  stdout starts buffered (inactive)."""
         real = getattr(sys.stdout, "_real", sys.stdout)
         self._proxy = _StdoutProxy(real)
+        real_err = getattr(sys.stderr, "_real", sys.stderr)
+        self._err_proxy = _StdoutProxy(real_err)
         self._thread = threading.Thread(
             target=self._run,
             name=f"pycmd-{self._cmd.name}",
@@ -523,6 +526,8 @@ class PythonCommandSlot:
     def _run(self) -> None:
         if hasattr(sys.stdout, "set_override"):
             sys.stdout.set_override(self._proxy)
+        if hasattr(sys.stderr, "set_override"):
+            sys.stderr.set_override(self._err_proxy)
         _current_slot.slot = self
         try:
             self._cmd.invoke(self._raw_args)
@@ -536,6 +541,8 @@ class PythonCommandSlot:
             _current_slot.slot = None
             if hasattr(sys.stdout, "clear_override"):
                 sys.stdout.clear_override()
+            if hasattr(sys.stderr, "clear_override"):
+                sys.stderr.clear_override()
             self.exit_code = self._compute_exit_code()
             self._finished.set()
 
@@ -558,6 +565,8 @@ class PythonCommandSlot:
     def activate(self, raw_mode: bool = False) -> None:
         if self._proxy:
             self._proxy.activate(raw_mode=raw_mode)
+        if self._err_proxy:
+            self._err_proxy.activate(raw_mode=raw_mode)
         # Drain any PTY output that arrived while inactive, then resume
         # live forwarding from the reader thread.
         with self._pty_lock:
@@ -577,6 +586,8 @@ class PythonCommandSlot:
     def deactivate(self) -> None:
         if self._proxy:
             self._proxy.deactivate()
+        if self._err_proxy:
+            self._err_proxy.deactivate()
         with self._pty_lock:
             if self._pty_master_fd >= 0:
                 self._pty_active = False
@@ -584,6 +595,8 @@ class PythonCommandSlot:
     def replay_buffer(self) -> None:
         if self._proxy:
             self._proxy.replay()
+        if self._err_proxy:
+            self._err_proxy.replay()
         with self._pty_lock:
             if self._pty_master_fd >= 0:
                 chunks = self._pty_buffer.drain()
@@ -680,6 +693,18 @@ class PythonCommandSlot:
             except (OSError, ProcessLookupError):
                 pass
 
+    def tail_lines(self, n: int) -> list[str]:
+        """Return up to *n* most recent buffered output lines for preview."""
+        from .process import _tail_lines_from_bytes
+        text_data = b""
+        if self._proxy is not None:
+            with self._proxy._lock:
+                text = self._proxy._buf.getvalue()
+            if text:
+                text_data = text.encode("utf-8", errors="replace")
+        pty_data = self._pty_buffer.peek()
+        return _tail_lines_from_bytes(text_data + pty_data, n)
+
     # --- passthrough_run() implementation -----------------------------------
 
     def _run_in_pty(self, argv: list[str], popen_kwargs: dict) -> int:
@@ -695,6 +720,8 @@ class PythonCommandSlot:
         # output is written to the slot's PTY master and copied to stdout
         # by a reader thread.
         self._proxy.deactivate()
+        if self._err_proxy:
+            self._err_proxy.deactivate()
         master_fd, slave_fd = pty.openpty()
         try:
             rows, cols = ProcessSlot._get_real_terminal_size()
@@ -753,6 +780,8 @@ class PythonCommandSlot:
             # Re-enable the buffering proxy in raw mode for any remaining
             # prints from the Python command after the subprocess returns.
             self._proxy.activate(raw_mode=True)
+            if self._err_proxy:
+                self._err_proxy.activate(raw_mode=True)
 
         return proc.returncode if proc.returncode is not None else 1
 
@@ -804,6 +833,9 @@ class PythonCommandSlot:
         # Drain pending output so the prompt isn't preceded by buffered text.
         self._proxy.deactivate()
         self._proxy.replay()
+        if self._err_proxy:
+            self._err_proxy.deactivate()
+            self._err_proxy.replay()
         self._input_interrupted.clear()
         self._input_resume.clear()
         self._input_released.clear()
@@ -841,6 +873,8 @@ class PythonCommandSlot:
             self._input_request.clear()
             self._input_resume.set()
             self._proxy.activate(raw_mode=True)
+            if self._err_proxy:
+                self._err_proxy.activate(raw_mode=True)
 
 
 _DEFAULT_CONFIG_PATH = Path(__file__).parent / "_config.py"
@@ -1161,6 +1195,11 @@ class PipelineSlot(PythonCommandSlot):
             sys.stdout.buffer.flush()
         except OSError:
             pass
+
+    def tail_lines(self, n: int) -> list[str]:
+        """Return up to *n* most recent buffered output lines for preview."""
+        from .process import _tail_lines_from_bytes
+        return _tail_lines_from_bytes(self._out_buffer.peek(), n)
 
 
 class Shell:
@@ -1522,10 +1561,30 @@ class Shell:
             cmd = self.registry.get(token)
             if cmd is not None and cmd.description:
                 return f"{token}: {cmd.description}"
+            # If the token is an alias, fall back to the alias's expansion
+            # (and the description of whatever it resolves to).
+            expansion = self.registry.get_alias(token)
+            if expansion is not None:
+                expansion_tokens = tokenize(expansion)
+                if expansion_tokens:
+                    target = self.registry.get(expansion_tokens[0])
+                    if target is not None and target.description:
+                        return f"{token} → {expansion}: {target.description}"
+                return f"{token} → {expansion}"
             return None
 
         command_name = tokens_before[0]
         preceding_args = tokens_before[1:]
+
+        # Expand the leading token if it is an alias, so the status bar for
+        # `hp <args>` resolves against the alias's expansion (e.g.
+        # `awsut hyperpod`).  Mirrors the alias handling in _get_completions.
+        expansion = self.registry.get_alias(command_name)
+        if expansion is not None:
+            expansion_tokens = tokenize(expansion)
+            if expansion_tokens:
+                command_name = expansion_tokens[0]
+                preceding_args = expansion_tokens[1:] + preceding_args
 
         cmd = self.registry.get(command_name)
         if cmd is None:
@@ -2264,26 +2323,37 @@ class Shell:
             # Resolve explicit redirects (override the pipe ends).
             stdin_file = stdout_file = None
             stderr_dst: object | None = None
+            redirect_error = False
             for redir in stage.redirects:
-                if redir.kind == "<":
-                    stdin_file = open(redir.target, "rb")
-                elif redir.kind == ">":
-                    stdout_file = open(redir.target, "wb")
-                elif redir.kind == ">>":
-                    stdout_file = open(redir.target, "ab")
-                elif redir.kind == "2>":
-                    stderr_dst = open(redir.target, "wb")
-                elif redir.kind == "2>>":
-                    stderr_dst = open(redir.target, "ab")
-                elif redir.kind == "2>&1":
-                    stderr_dst = subprocess.STDOUT
+                try:
+                    if redir.kind == "<":
+                        stdin_file = open(redir.target, "rb")
+                    elif redir.kind == ">":
+                        stdout_file = open(redir.target, "wb")
+                    elif redir.kind == ">>":
+                        stdout_file = open(redir.target, "ab")
+                    elif redir.kind == "2>":
+                        stderr_dst = open(redir.target, "wb")
+                    elif redir.kind == "2>>":
+                        stderr_dst = open(redir.target, "ab")
+                    elif redir.kind == "2>&1":
+                        stderr_dst = subprocess.STDOUT
+                except OSError as e:
+                    print(
+                        f"cshell2: {redir.target}: {e.strerror or e}",
+                        file=sys.stderr,
+                    )
+                    redirect_error = True
+                    break
 
             stdin_pipe_used = stdin_fd_pipe is not None and stdin_file is None
             stdout_pipe_used = stdout_fd_pipe is not None and stdout_file is None
             is_py_stage = cmd is not None
 
             worker = None
-            if is_py_stage:
+            if redirect_error:
+                pass  # leave worker=None; cleanup below closes any open files/pipes
+            elif is_py_stage:
                 worker = self._start_python_stage_thread(
                     cmd=cmd,
                     args=tokens[1:],
@@ -2652,19 +2722,37 @@ class Shell:
 
         # Resolve redirections
         stdin_override = stdout_override = stderr_override = None
-        for redir in stage.redirects:
-            if redir.kind == "<":
-                stdin_override = open(redir.target, "rb")
-            elif redir.kind == ">":
-                stdout_override = open(redir.target, "wb")
-            elif redir.kind == ">>":
-                stdout_override = open(redir.target, "ab")
-            elif redir.kind == "2>":
-                stderr_override = open(redir.target, "wb")
-            elif redir.kind == "2>>":
-                stderr_override = open(redir.target, "ab")
-            elif redir.kind == "2>&1":
-                stderr_override = "stdout"
+        try:
+            for redir in stage.redirects:
+                if redir.kind == "<":
+                    stdin_override = open(redir.target, "rb")
+                elif redir.kind == ">":
+                    stdout_override = open(redir.target, "wb")
+                elif redir.kind == ">>":
+                    stdout_override = open(redir.target, "ab")
+                elif redir.kind == "2>":
+                    stderr_override = open(redir.target, "wb")
+                elif redir.kind == "2>>":
+                    stderr_override = open(redir.target, "ab")
+                elif redir.kind == "2>&1":
+                    stderr_override = "stdout"
+        except OSError as e:
+            print(
+                f"cshell2: {redir.target}: {e.strerror or e}",
+                file=sys.stderr,
+            )
+            for f in (stdin_override, stdout_override):
+                if f is not None:
+                    try:
+                        f.close()
+                    except Exception:
+                        pass
+            if stderr_override and stderr_override != "stdout":
+                try:
+                    stderr_override.close()
+                except Exception:
+                    pass
+            return 1
 
         has_redirects = any([stdin_override, stdout_override, stderr_override])
 
@@ -3012,62 +3100,159 @@ class Shell:
             signal.signal(signal.SIGINT, old_sigint)
             signal.signal(signal.SIGWINCH, old_sigwinch)
 
-    _NEW_CTX_SENTINEL = "\x00new"
+    _PREVIEW_HEIGHT = 3
+    # Action key bindings:  (key bytes, action name, hint label).
+    # Ctrl+N overrides the picker's default "down" alias for the duration of
+    # the context-switch picker; users can still navigate with the arrow keys
+    # (down arrow + Ctrl+P up).
+    _SWITCH_KEY_ACTIONS: tuple[tuple[bytes, str, str], ...] = (
+        (b"\x0e",  "new",    "^N new"),
+        (b"\x04",  "delete", "^D delete"),
+        (b"\x12",  "rename", "^R rename"),
+    )
 
     def _show_switch_menu(self) -> tuple[str, bool] | None:
-        """Show TUI context picker. Returns (name, is_new) or None on cancel."""
-        contexts = self.context_manager.list_contexts()
-        items = contexts + [self._NEW_CTX_SENTINEL]
+        """Show TUI context picker.
 
-        current = self.context_manager.current_name
-
+        Returns ``(name, is_new)`` when the user picks a context (or creates one),
+        ``None`` on cancel.  Action keys (new / delete / rename) mutate the
+        context manager in place and re-open the picker until the user picks a
+        context or cancels.
+        """
         from .tui import InlineArgPrompt, InlinePicker
 
         def display_fn(name: str) -> str:
-            if name == self._NEW_CTX_SENTINEL:
-                return "+ new context"
-            return ("* " if name == current else "  ") + name
+            cur = self.context_manager.current_name
+            return ("* " if name == cur else "  ") + name
 
         def meta_fn(name: str) -> str:
-            if name == self._NEW_CTX_SENTINEL:
+            ctx = self.context_manager.contexts.get(name)
+            if ctx is None:
                 return ""
-            ctx = self.context_manager.contexts[name]
             slot = ctx.process_slot
             if slot and slot.is_alive() and slot.argv:
                 parts = [os.path.basename(slot.argv[0])] + slot.argv[1:2]
                 return " ".join(parts)
             return ""
 
-        picker = InlinePicker(
-            items,
-            display_fn=display_fn,
-            meta_fn=meta_fn,
-            max_height=10,
-            min_width=32,
-            hide_cursor=True,
-        )
-        if current in contexts:
-            picker._selected = contexts.index(current)
+        def preview_fn(name: str) -> list[str]:
+            ctx = self.context_manager.contexts.get(name)
+            if ctx is None or ctx.process_slot is None:
+                return []
+            slot = ctx.process_slot
+            if hasattr(slot, "tail_lines"):
+                try:
+                    return slot.tail_lines(self._PREVIEW_HEIGHT)
+                except Exception:
+                    return []
+            return []
 
-        selected = picker.run()
+        key_actions = {kb: name for kb, name, _ in self._SWITCH_KEY_ACTIONS}
+        hints = "  ".join(label for _, _, label in self._SWITCH_KEY_ACTIONS)
 
-        if selected is None:
-            return None
+        # Selection persists across re-openings (after delete/rename).
+        selected_name: str | None = self.context_manager.current_name
+        # One-shot status message shown in the next picker iteration — used to
+        # explain why an action was refused (e.g. running process, last context).
+        warning: str = ""
 
-        if selected == self._NEW_CTX_SENTINEL:
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-            arg_prompt = InlineArgPrompt(label="new context name")
-            name = arg_prompt.run()
-            sys.stdout.write("\033[1A")
-            sys.stdout.flush()
-            if not name or name in self.context_manager.contexts:
+        while True:
+            contexts = self.context_manager.list_contexts()
+
+            picker = InlinePicker(
+                contexts,
+                display_fn=display_fn,
+                meta_fn=meta_fn,
+                max_height=10,
+                min_width=32,
+                hide_cursor=True,
+                status_label=warning,
+                status_hints=hints,
+                transient_status=True,
+                preview_fn=preview_fn,
+                preview_height=self._PREVIEW_HEIGHT,
+                key_actions=key_actions,
+            )
+            warning = ""  # one-shot — clear after attaching to the picker
+            if selected_name in contexts:
+                picker._selected = contexts.index(selected_name)
+
+            selected = picker.run()
+
+            if selected is None:
                 return None
-            return (name, True)
 
-        if selected == current:
-            return None
-        return (selected, False)
+            action = picker.action
+            if action == "new":
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                arg_prompt = InlineArgPrompt(label="new context name")
+                name = arg_prompt.run()
+                sys.stdout.write("\033[1A")
+                sys.stdout.flush()
+                if not name:
+                    selected_name = self.context_manager.current_name
+                    continue
+                if name in self.context_manager.contexts:
+                    warning = f"context '{name}' already exists"
+                    selected_name = self.context_manager.current_name
+                    continue
+                return (name, True)
+
+            if action == "delete":
+                if len(self.context_manager.list_contexts()) <= 1:
+                    warning = "cannot delete: only one context remaining"
+                    continue
+                ctx = self.context_manager.contexts.get(selected)
+                if ctx is None:
+                    continue
+                if ctx.process_slot and ctx.process_slot.is_alive():
+                    warning = (
+                        f"cannot delete '{selected}': process still running "
+                        f"(use 'context kill {selected}' first)"
+                    )
+                    continue
+                # Pick a sensible next selection before removing.
+                remaining = [n for n in contexts if n != selected]
+                idx = contexts.index(selected)
+                next_sel = remaining[min(idx, len(remaining) - 1)] if remaining else None
+                self.context_manager.remove(selected)
+                # If we deleted the current context, remove() switched the
+                # pointer for us; align selection with the new current so the
+                # picker reopens with that highlighted.
+                selected_name = self.context_manager.current_name or next_sel
+                continue
+
+            if action == "rename":
+                old = selected
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                arg_prompt = InlineArgPrompt(
+                    label=f"rename '{old}' to",
+                    initial=old,
+                )
+                new = arg_prompt.run()
+                sys.stdout.write("\033[1A")
+                sys.stdout.flush()
+                if new and new != old:
+                    if new in self.context_manager.contexts:
+                        warning = f"context '{new}' already exists"
+                        selected_name = old
+                    else:
+                        try:
+                            self.context_manager.rename(old, new)
+                            selected_name = new
+                        except (KeyError, ValueError) as e:
+                            warning = str(e)
+                            selected_name = old
+                else:
+                    selected_name = old
+                continue
+
+            # No action key — user pressed Enter to accept the selection.
+            if selected == self.context_manager.current_name:
+                return None
+            return (selected, False)
 
     def _resume_pty_slot(self, slot: ProcessSlot) -> None:
         """Restore terminal modes and re-activate a backgrounded PTY slot.
@@ -3120,16 +3305,25 @@ class Shell:
         the target context (no process_slot at all).
         """
         ctx = self.context_manager.current()
+        original_name = ctx.name if ctx else None
         if ctx and ctx.process_slot:
             ctx.process_slot.deactivate()
 
         result = self._show_switch_menu()
 
         if result is None:
-            # User cancelled.  Re-activate PTY slots so their reader thread can
-            # stream output again.  PythonCommandSlots stay deactivated: their
-            # buffered output will be replayed correctly (with raw_mode=True) the
-            # next time _enter_python_forwarding_mode is called from run().
+            # User cancelled.  If a menu action (pop) changed the current
+            # context, behave as if the user had switched: let run()'s resume
+            # path do the right thing for the new context's slot.  Otherwise
+            # re-activate PTY slots so their reader thread can stream output
+            # again.  PythonCommandSlots stay deactivated: their buffered
+            # output will be replayed correctly (with raw_mode=True) the next
+            # time _enter_python_forwarding_mode is called from run().
+            new_ctx = self.context_manager.current()
+            if new_ctx is None or (new_ctx.name != original_name):
+                if new_ctx and new_ctx.process_slot:
+                    return True
+                return False
             if ctx and ctx.process_slot and ctx.process_slot.is_alive():
                 slot = ctx.process_slot
                 if not isinstance(slot, PythonCommandSlot):

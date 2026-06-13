@@ -59,7 +59,24 @@ def _wcs_ljust(s: str, width: int) -> str:
 
 
 def _statusbar(label: str, hints: str, cols: int) -> str:
-    """Render a full-width status-bar string for the bottom line of the terminal."""
+    """Render the status-bar string for the bottom line of the terminal.
+
+    Sized to fit the text plus a small margin, NOT the full row width.
+    A full-width bar (any row whose cells are all "filled" up to ``cols``)
+    forces some terminals (Terminal.app, xterm.js / VSCode integrated) to
+    reflow that row when the user shrinks the width — which scrolls the
+    entire screen up. During a drag-resize the terminal can scroll
+    multiple times between SIGWINCH deliveries, leaving stranded copies
+    of the prompt above our resize-redraw that we have no way to detect
+    after the fact. iTerm2 trims trailing styled cells before reflow and
+    doesn't show this symptom, but the narrow-bar form is correct on all
+    terminals we target.
+
+    By keeping the bar's footprint to its text width and clearing the
+    rest of the row with ``\\033[K``, the row's content is short and the
+    terminal won't reflow it on a width shrink (unless the shrink goes
+    *below* the text width — visually obvious and rare).
+    """
     s = get_color_scheme()
     # Status bar is a single row — collapse any embedded newlines (a help
     # text's first line is the summary; the rest is detail meant for `help`).
@@ -67,8 +84,19 @@ def _statusbar(label: str, hints: str, cols: int) -> str:
     hints = hints.split("\n", 1)[0].rstrip() if hints else hints
     parts = [p for p in (label, hints) if p]
     text = "   ".join(parts)
-    padded = _wcs_ljust(_wcs_clip(f"  {text}  " if text else "", cols), cols)
-    return f"{_bg(*s.statusbar_bg)}{_fg(*s.statusbar_fg)}{padded}\033[0m"
+    if not text:
+        # No content to show — emit just an erase-line so any leftover
+        # bar from a prior render disappears.
+        return "\033[2K"
+    inner = f"  {text}  "
+    # Cap to cols-1 so even pathologically long labels don't fill the row.
+    inner = _wcs_clip(inner, max(1, cols - 1))
+    # Bar = colored text block + ``\033[K`` (erase to end of row) so the
+    # cells past the bar are default/empty — terminals don't reflow empty
+    # cells on width shrink.
+    return (
+        f"{_bg(*s.statusbar_bg)}{_fg(*s.statusbar_fg)}{inner}\033[0m\033[K"
+    )
 
 
 def _common_prefix(strings: list[str]) -> str:
@@ -108,6 +136,11 @@ class InlinePicker(Generic[T]):
         min_width: int = 0,
         hide_cursor: bool = False,
         status_label: str = "",
+        status_hints: str = "",
+        transient_status: bool = False,
+        preview_fn: Callable[[T], list[str]] | None = None,
+        preview_height: int = 0,
+        key_actions: dict[bytes, str] | None = None,
     ):
         self._items = items
         self._display_fn = display_fn
@@ -123,9 +156,15 @@ class InlinePicker(Generic[T]):
         self._min_width = min_width
         self._hide_cursor = hide_cursor
         self._status_label = status_label
+        self._status_hints = status_hints
+        self._transient_status = transient_status
+        self._preview_fn = preview_fn
+        self._preview_height = max(0, preview_height) if preview_fn is not None else 0
+        self._key_actions = dict(key_actions or {})
         self._typed = ""
         self.reopen = False          # set True when tab-complete typed chars; caller should reopen
         self.apply_backspace = False  # set True when backspace pressed with no typed chars
+        self.action: str | None = None  # set when run() exits via a key in key_actions
 
         self._selected = 0
         self._offset = 0
@@ -153,7 +192,17 @@ class InlinePicker(Generic[T]):
             self._render()
 
             while True:
-                action = self._dispatch(self._read_key())
+                key_bytes = self._read_key()
+                # A transient status message (e.g. a one-shot warning from the
+                # caller) is cleared on the next user input so it doesn't
+                # linger past the action that produced it.
+                if self._transient_status and self._status_label:
+                    self._status_label = ""
+                if key_bytes in self._key_actions:
+                    self.action = self._key_actions[key_bytes]
+                    result = self._items[self._selected] if self._items else None
+                    break
+                action = self._dispatch(key_bytes)
                 if action == "accept":
                     result = self._items[self._selected] if self._items else None
                     break
@@ -166,6 +215,16 @@ class InlinePicker(Generic[T]):
                     self._move(1)
                     self._render()
                 elif action == "tab_complete":
+                    # TAB on a single remaining candidate accepts it — the
+                    # caller's _apply() then replaces the whole token with
+                    # the candidate's canonical value, so any case mismatch
+                    # in what the user typed (e.g. "p" vs "Pictures/") is
+                    # corrected. Common-prefix extension only writes the
+                    # suffix past what was typed, which preserves the wrong
+                    # case in the prefix region.
+                    if len(self._items) == 1:
+                        result = self._items[self._selected]
+                        break
                     if self._handle_tab_complete():
                         break
                 elif action == "backspace":
@@ -189,16 +248,20 @@ class InlinePicker(Generic[T]):
         sz = os.get_terminal_size()
         self._cols = sz.columns
         self._lines = sz.lines
-        self._height = min(self._max_height, len(self._items), max(1, sz.lines - 4))
+        # Preview area is rendered below the picker rows; reserve space for it
+        # so the list stays visible alongside the focused item's preview.
+        reserve = 4 + self._preview_height
+        self._height = min(self._max_height, len(self._items), max(1, sz.lines - reserve))
 
     # ── drawing ─────────────────────────────────────────────────────────────
 
     def _reserve(self) -> None:
         """Create blank lines below cursor and save the top position with DECSC."""
-        sys.stdout.write("\n" * self._height)
+        total = self._height + self._preview_height
+        sys.stdout.write("\n" * total)
         # CHA jumps to the target column atomically; \r + cursor-forward
         # would briefly render the caret at col 0 before moving right.
-        sys.stdout.write(_csi(f"{self._height}A") + f"\033[{self._col + 1}G\0337")
+        sys.stdout.write(_csi(f"{total}A") + f"\033[{self._col + 1}G\0337")
         sys.stdout.flush()
 
     def _render(self) -> None:
@@ -221,6 +284,10 @@ class InlinePicker(Generic[T]):
             if i < len(visible) - 1:
                 out.append("\n")
 
+        # Preview pane below the list, if configured.
+        if self._preview_height > 0:
+            out.append(self._format_preview(panel_w))
+
         # Re-save anchor, then move cursor to prompt caret position.
         # CHA (\033[{N}G) sets the column atomically — `\r` + cursor-forward
         # flickers because the terminal briefly renders the caret at col 0.
@@ -231,8 +298,12 @@ class InlinePicker(Generic[T]):
         out.append(f"\033[{caret_col_now + 1}G")
 
         # Draw status bar at the bottom line, then return to caret via anchor.
+        # When a status label is set it takes the whole bar — hints are
+        # secondary and reading two strings simultaneously fights for the
+        # user's attention.
         out.append(f"\033[{self._lines};1H")
-        out.append(_statusbar(self._status_label, "", self._cols))
+        hints = "" if self._status_label else self._status_hints
+        out.append(_statusbar(self._status_label, hints, self._cols))
         out.append("\0338")
         if self._rows_above > 0:
             out.append(f"\033[{self._rows_above}A")
@@ -240,6 +311,32 @@ class InlinePicker(Generic[T]):
 
         sys.stdout.write("".join(out))
         sys.stdout.flush()
+
+    def _format_preview(self, panel_w: int) -> str:
+        """Render the preview pane: ``preview_height`` lines below the list."""
+        s = get_color_scheme()
+        lines: list[str] = []
+        if self._items and self._preview_fn is not None:
+            try:
+                raw = self._preview_fn(self._items[self._selected])
+            except Exception:
+                raw = []
+            lines = [str(line) for line in raw][-self._preview_height:]
+        # Pad to preview_height so the area's footprint stays stable.
+        lines = lines + [""] * max(0, self._preview_height - len(lines))
+        avail = max(1, self._cols - self._col)
+        col_move = f"\033[{self._col}C" if self._col > 0 else ""
+        out = []
+        # The picker rows leave the cursor at the end of the last row;
+        # advance to the line below before drawing preview.
+        for line in lines:
+            text = _wcs_clip(line, avail)
+            text_disp = _wcs_ljust(text, avail)
+            # Dim/grey body so the preview reads as secondary info.
+            out.append(
+                f"\n\r{col_move}\033[2m{text_disp}\033[22m"
+            )
+        return "".join(out)
 
     def _scrollbar_char(self, row_index: int) -> str:
         s = get_color_scheme()
@@ -329,8 +426,23 @@ class InlinePicker(Generic[T]):
         wrote from ``self._col`` onwards (each row uses ``\\r{col_move}{...}``
         within the same buffered render), so the area to the left of the
         anchor on the anchor row was never touched and doesn't need clearing.
+
+        On a resize-induced cancel (``self._cancelled``), hide the cursor
+        first: the DECSC anchor was saved in the *old* geometry, so
+        ``\\0338`` lands at an unexpected post-reflow position and the
+        caret would visibly flash there before the caller's redraw moves
+        it back. The next ``_redraw()`` re-shows the cursor at the prompt
+        caret.
+
+        On a non-resize close (Esc, selection, or a narrow-into-reopen),
+        the anchor is still correct, so leave the cursor visible —
+        otherwise a picker reopen-flow would close one picker (hiding
+        the cursor) and open the next without the line editor's
+        ``_redraw()`` running between them, leaving the caret invisible
+        until the picker chain finally exits.
         """
-        sys.stdout.write("\0338\033[J")
+        prefix = "\x1b[?25l" if self._cancelled else ""
+        sys.stdout.write(f"{prefix}\0338\033[J")
 
     # ── char input ──────────────────────────────────────────────────────────
 
@@ -446,11 +558,11 @@ class InlineArgPrompt:
     command line) before calling run() and moving the cursor back afterward.
     """
 
-    def __init__(self, label: str, description: str = "", status_label: str = ""):
+    def __init__(self, label: str, description: str = "", status_label: str = "", initial: str = ""):
         self._label = label
         self._description = description
         self._status_label = status_label
-        self._buf = ""
+        self._buf = initial
         self._cancelled = False
         try:
             sz = os.get_terminal_size()
@@ -521,7 +633,13 @@ class InlineArgPrompt:
         sys.stdout.flush()
 
     def _cleanup(self) -> None:
-        sys.stdout.write("\0338\r\033[J")
+        # On resize-cancel, hide the cursor: the DECSC anchor was saved in
+        # the old geometry, so \0338 lands at an unexpected post-reflow
+        # position and the caret would flash there before the next redraw
+        # moves it. The caller's _redraw() restores visibility. Non-resize
+        # closes leave the cursor visible — the anchor is still correct.
+        prefix = "\x1b[?25l" if self._cancelled else ""
+        sys.stdout.write(f"{prefix}\0338\r\033[J")
         sys.stdout.flush()
 
     def _read_key(self) -> bytes:
@@ -726,7 +844,13 @@ class InlineMultiPicker(Generic[T]):
         return row
 
     def _cleanup(self) -> None:
-        sys.stdout.write("\0338\r\033[J")
+        # On resize-cancel, hide the cursor: the DECSC anchor was saved in
+        # the old geometry, so \0338 lands at an unexpected post-reflow
+        # position and the caret would flash there before the next redraw
+        # moves it. The caller's _redraw() restores visibility. Non-resize
+        # closes leave the cursor visible — the anchor is still correct.
+        prefix = "\x1b[?25l" if self._cancelled else ""
+        sys.stdout.write(f"{prefix}\0338\r\033[J")
         sys.stdout.flush()
 
     # ── input ───────────────────────────────────────────────────────────────
