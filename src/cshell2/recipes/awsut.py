@@ -7,10 +7,10 @@ Provides the ``awsut`` command tree:
 * ``awsut ec2 list|start|stop|reboot``
 * ``awsut logs list|monitor|export``
 * ``awsut cf list|wait|open``
-* ``awsut hyperpod create|update|scale|create-instance-group|
-  delete-instance-group|delete-nodes|reboot-nodes|replace-nodes|
-  update-software|delete|list|describe|wait|log|ssm|ssh|
-  run|search-capacity|kubeconfig|events``
+* ``awsut hyperpod create|update|scale|add-ig|remove-ig|
+  delete-nodes|reboot-nodes|replace-nodes|upgrade-ami|delete|
+  list|describe|wait|log|ssm|ssh|run|search-capacity|
+  kubeconfig|events``
 
 Profile and region switching live in the ``aws`` recipe as ``Var`` entries
 (``var aws_profile=...``, ``var aws_region=...``).  The SageMaker endpoint
@@ -1402,7 +1402,7 @@ def _register_hyperpod(awsut) -> None:
         print(f"Updating cluster started : {response['ClusterArn']}")
 
     @hyperpod.command(
-        "create-instance-group",
+        "add-ig",
         help="Create a new instance group based on an existing template",
         params=[
             arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
@@ -1515,7 +1515,7 @@ def _register_hyperpod(awsut) -> None:
               f"{response['ClusterArn']}")
 
     @hyperpod.command(
-        "delete-instance-group", help="Delete an instance group from a cluster",
+        "remove-ig", help="Delete an instance group from a cluster",
         params=[
             arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
             arg("instance_group_name", completer=_HyperpodInstanceGroupNameCompleter()),
@@ -1621,7 +1621,7 @@ def _register_hyperpod(awsut) -> None:
         )
 
     @hyperpod.command(
-        "update-software", help="Update the AMI of a cluster",
+        "upgrade-ami", help="Update the AMI of a cluster",
         params=[
             arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
             arg("--instance-group-name", metavar="NAME",
