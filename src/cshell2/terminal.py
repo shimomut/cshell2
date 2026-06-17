@@ -116,7 +116,13 @@ def get_mode(fd: int):
 
 
 def set_raw(fd: int) -> None:
-    """Put the terminal into raw mode for character-at-a-time editing."""
+    """Put the terminal into raw mode for character-at-a-time editing.
+
+    Both input and output are raw: bare ``\\n`` does NOT get a CR appended.
+    Renderers that paint at exact cursor positions (the line editor, TUI
+    pickers, the watch decorator's alt screen) want this — they emit
+    explicit ``\\r\\n`` and rely on the kernel staying out of the way.
+    """
     if IS_WINDOWS:
         _enable_vt_output()
         handle = _out_handle()
@@ -127,6 +133,52 @@ def set_raw(fd: int) -> None:
     # TCSADRAIN (not TCSAFLUSH) preserves bytes already queued in the kernel's
     # input buffer — e.g. the remainder of a pasted multi-line block.
     tty.setraw(fd, termios.TCSADRAIN)
+
+
+def set_raw_input_cooked_output(fd: int) -> None:
+    """Raw input, but keep ``\\n`` → ``\\r\\n`` translation on output (POSIX).
+
+    This is the right mode while a Python command's body is running:
+    keystrokes still arrive one at a time so the main loop can intercept
+    Ctrl+] / Ctrl+C, but anything the command writes — through ``print``,
+    raw byte writes via ``sys.stdout.buffer``, ``os.write``, captured
+    pexpect output, or a piped subprocess's direct fd-1 write — gets a
+    proper carriage return prepended to each LF, so multi-line text isn't
+    rendered as a staircase.
+
+    Equivalent to ``cfmakeraw`` followed by re-enabling ``OPOST | ONLCR``.
+    On Windows, console output is governed by leaving
+    ``DISABLE_NEWLINE_AUTO_RETURN`` cleared (so the platform path is the
+    same as :func:`restore_mode`'s output side); only the input side
+    differs from cooked, and msvcrt-based reads already return one key
+    at a time.
+    """
+    if IS_WINDOWS:
+        # Windows: rely on default ENABLE_PROCESSED_OUTPUT (set by init())
+        # for CRLF translation; raw INPUT is already the default for
+        # msvcrt key reads. Just make sure DISABLE_NEWLINE_AUTO_RETURN is
+        # NOT set, so a bare \n still carriage-returns to column 0.
+        _enable_vt_output()
+        handle = _out_handle()
+        mode = _get_console_mode(handle)
+        if mode is not None:
+            _set_console_mode(handle, mode & ~_DISABLE_NEWLINE_AUTO_RETURN)
+        return
+    attrs = termios.tcgetattr(fd)
+    # cfmakeraw equivalent — clear input, output, control, local flags
+    # except we re-enable OPOST (output post-processing, including ONLCR).
+    attrs[0] &= ~(termios.IGNBRK | termios.BRKINT | termios.PARMRK |
+                  termios.ISTRIP | termios.INLCR | termios.IGNCR |
+                  termios.ICRNL | termios.IXON)
+    attrs[1] &= ~termios.OPOST
+    attrs[1] |= termios.OPOST | termios.ONLCR  # re-enable CRLF translation
+    attrs[2] &= ~(termios.CSIZE | termios.PARENB)
+    attrs[2] |= termios.CS8
+    attrs[3] &= ~(termios.ECHO | termios.ECHONL | termios.ICANON |
+                  termios.ISIG | termios.IEXTEN)
+    attrs[6][termios.VMIN] = 1
+    attrs[6][termios.VTIME] = 0
+    termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
 
 
 def restore_mode(fd: int, saved) -> None:

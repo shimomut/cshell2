@@ -220,17 +220,22 @@ class _ThreadLocalStderr(io.TextIOBase):
 class _StdoutProxy(io.TextIOBase):
     """Per-command buffering proxy.
 
-    Starts inactive (buffering).  Call activate(raw_mode=True) once the
-    terminal is in raw mode: it replays the buffer (converting \\n → \\r\\n)
-    and then forwards subsequent writes directly.  deactivate() resumes
-    buffering (used when the user switches away).
+    Starts inactive (buffering); ``activate()`` replays the buffer to the
+    real stream and forwards subsequent writes directly.  ``deactivate()``
+    resumes buffering (used while the context is in the background).
+
+    No CRLF translation happens here: the main loop runs Python commands
+    under raw-input/cooked-output mode (see
+    :func:`terminal.set_raw_input_cooked_output`), so the kernel re-adds
+    carriage returns to bare LFs at the tty boundary.  The ``raw_mode``
+    flag on :meth:`activate` is accepted for API stability but has no
+    effect; callers may stop passing it.
     """
 
     def __init__(self, real: io.TextIOBase) -> None:
         self._real = real
         self._buf = io.StringIO()
         self._active = False
-        self._raw_mode = False
         self._lock = threading.Lock()
 
     @property
@@ -244,8 +249,6 @@ class _StdoutProxy(io.TextIOBase):
     def write(self, s: str) -> int:
         with self._lock:
             if self._active:
-                if self._raw_mode:
-                    s = s.replace("\n", "\r\n")
                 return self._real.write(s)
             return self._buf.write(s)
 
@@ -265,13 +268,14 @@ class _StdoutProxy(io.TextIOBase):
         return self._real.isatty()
 
     def activate(self, raw_mode: bool = False) -> None:
-        """Replay buffer to real stdout and start writing live."""
+        """Replay buffer to real stdout and start writing live.
+
+        ``raw_mode`` is ignored (kept for backward compatibility); CRLF
+        translation is done by the kernel via OPOST/ONLCR.
+        """
         with self._lock:
-            self._raw_mode = raw_mode
             content = self._buf.getvalue()
             if content:
-                if raw_mode:
-                    content = content.replace("\n", "\r\n")
                 self._real.write(content)
                 self._real.flush()
                 self._buf = io.StringIO()
@@ -280,7 +284,6 @@ class _StdoutProxy(io.TextIOBase):
     def deactivate(self) -> None:
         with self._lock:
             self._active = False
-            self._raw_mode = False
 
     def replay(self) -> None:
         """Drain buffer to real stdout (called on switch-back, cooked mode)."""
@@ -3052,7 +3055,12 @@ class Shell:
             slot._input_interrupted.set()
 
         try:
-            tty.setraw(fd)
+            # Raw INPUT (so the main loop sees Ctrl+] / Ctrl+C / etc one key
+            # at a time) but COOKED OUTPUT (kernel ONLCR re-adds CRs to bare
+            # LFs).  Anything the Python command writes — print(), pexpect's
+            # captured remote output, raw byte writes, piped subprocess
+            # output — gets proper line endings without per-call effort.
+            terminal.set_raw_input_cooked_output(fd)
             signal.signal(signal.SIGINT, signal.SIG_IGN)
             signal.signal(signal.SIGWINCH, on_resize)
             # Replay any output buffered before raw mode was set
@@ -3072,7 +3080,7 @@ class Shell:
                     signal.signal(signal.SIGINT, signal.SIG_IGN)
                     if not slot.is_alive():
                         break
-                    tty.setraw(fd)
+                    terminal.set_raw_input_cooked_output(fd)
                     continue
 
                 rlist, _, _ = select.select([fd], [], [], 0.1)
