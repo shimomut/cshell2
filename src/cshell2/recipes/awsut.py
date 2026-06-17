@@ -37,7 +37,6 @@ import fnmatch
 import json
 import os
 import re
-import signal
 import threading
 import time
 import urllib.parse
@@ -536,6 +535,110 @@ def _print_hyperpod_log(logs_client, log_group, stream):
     except BrokenPipeError:
         # Downstream consumer closed early (e.g. `... | head`).  Normal.
         pass
+
+
+# ─── shared SSM-pexpect helper ──────────────────────────────────────────────
+#
+# Both `awsut hyperpod run` and `awsut hyperpod ssh install-key` need to drive
+# a remote bash session over `aws ssm start-session`. The shape is identical:
+# spawn the SSM client under a real PTY (so the remote shell sees a tty and
+# prints prompts), wait for an initial prompt, send a single shell line, wait
+# for the command to finish, then close cleanly. `_ssm_run` is the single
+# place that touches pexpect; callers just describe the work as a shell line
+# and decide whether they want the captured output.
+
+# Initial-prompt patterns covering AL2 (`sh-4.2#`), AL2023 (`sh-5.2#`), and
+# generic `# ` / `$ `. The TIMEOUT sentinel at the end is a fallback the
+# caller can detect to nudge a prompt out of a terse SSM banner.
+_SSM_PROMPT_PATTERNS = [
+    r"sh-\d+\.\d+[#\$]\s*",
+    r"[#\$]\s+",
+]
+
+
+def _ssm_run(
+    ssm_target: str,
+    shell_line: str,
+    *,
+    capture: bool = True,
+    timeout: int = 30,
+) -> tuple[str | None, str | None]:
+    """Run a single shell line in an SSM session and return its output.
+
+    Returns ``(output, error)`` where exactly one is non-None on success
+    paths. ``output`` is the captured stdout/stderr of the shell line with
+    line endings normalized to ``\\n``; ``error`` is a short one-line
+    description of any pexpect-level failure (TIMEOUT, EOF, etc.). When
+    ``capture=False`` the function still waits for completion but returns
+    ``("", None)`` — useful for "fire and check" callers like install-key
+    that just need to know the command finished.
+
+    The end-of-output sentinel is built from two shell variables joined at
+    runtime (``$S$T``) so that pexpect's first match for the literal
+    sentinel string can only fire on the *resolved* echo line, not on the
+    echo of the input line itself.
+    """
+    import pexpect
+
+    sentinel = "__cshell2_ssm_done_aef36c__"
+    head = sentinel[: len(sentinel) // 2]
+    tail = sentinel[len(sentinel) // 2 :]
+    initial_patterns = [*_SSM_PROMPT_PATTERNS, pexpect.TIMEOUT]
+
+    p = None
+    try:
+        p = pexpect.spawn(
+            awscli[0],
+            args=[*awscli[1:], "ssm", "start-session", "--target", ssm_target],
+            timeout=timeout,
+            encoding="utf-8",
+        )
+        idx = p.expect(initial_patterns, timeout=timeout)
+        if idx == len(initial_patterns) - 1:
+            # SSM banner ended without a prompt — nudge with a bare newline.
+            p.sendline("")
+            p.expect(_SSM_PROMPT_PATTERNS, timeout=10)
+
+        p.sendline(f'S="{head}"; T="{tail}"; {shell_line}; echo "$S$T"')
+        p.expect(sentinel, timeout=timeout)
+
+        output = ""
+        if capture:
+            # Collapse PTY-doubled CRs ("\r\r\n") down to a single \n in one
+            # pass — a naive \r\n→\n then \r→\n turns "\r\r\n" into "\n\n".
+            raw = re.sub(r"\r+\n?", "\n", p.before or "")
+            # First newline-delimited chunk is the shell's echo of our
+            # sendline. Drop it; everything after, up to the sentinel, is
+            # the real output. Strip the trailing `echo "$S$T"` echo line
+            # bash emits just before the marker.
+            _, _, after_echo = raw.partition("\n")
+            output = re.sub(r'echo "\$S\$T"\s*\n?$', "", after_echo)
+
+        # Graceful close — let SSM tear down rather than killing it.
+        p.sendline("exit")
+        try:
+            p.expect(pexpect.EOF, timeout=5)
+        except pexpect.TIMEOUT:
+            pass
+        return output, None
+    except pexpect.TIMEOUT:
+        tail_bytes = (p.before[-200:] if p is not None and p.before else "")
+        return None, f"TIMEOUT (tail: {tail_bytes!r})" if tail_bytes else "TIMEOUT"
+    except pexpect.EOF:
+        tail_bytes = (p.before[-200:] if p is not None and p.before else "")
+        return (None,
+                f"EOF: SSM session ended before command completed "
+                f"(tail: {tail_bytes!r})" if tail_bytes else
+                "EOF: SSM session ended before command completed")
+    except Exception as e:
+        msg = str(e).splitlines()[0] if str(e) else ""
+        return None, f"{type(e).__name__}{': ' + msg if msg else ''}"
+    finally:
+        if p is not None and p.isalive():
+            try:
+                p.terminate(force=True)
+            except Exception:
+                pass
 
 
 # ─── HyperPod completers ────────────────────────────────────────────────────
@@ -1888,8 +1991,7 @@ def _register_hyperpod(awsut) -> None:
     )
     def _ssh_install_key(cluster_name, home_path, public_key_file):
         try:
-            import pexpect
-            import pexpect.popen_spawn
+            import pexpect  # noqa: F401  (helper imports it; surface the error here)
         except ImportError:
             print("pexpect is required for `awsut hyperpod ssh install-key`. "
                   "Install it: pip install pexpect")
@@ -1918,21 +2020,15 @@ def _register_hyperpod(awsut) -> None:
                 node_id = node["InstanceId"]
                 ssm_target = f"sagemaker-cluster:{cluster_id}_{ig_name}-{node_id}"
                 authorized_keys_path = os.path.join(home_path, ".ssh/authorized_keys")
-                prompt = ["sh-4.2#", "#"]
 
                 print(f"Installing ssh public key to {node_id} {authorized_keys_path}")
-                p = pexpect.popen_spawn.PopenSpawn(
-                    [*awscli, "ssm", "start-session", "--target", ssm_target]
+                shell_line = (
+                    f'if ! grep -q "{public_key}" {authorized_keys_path}; '
+                    f'then echo {public_key} >> {authorized_keys_path}; fi'
                 )
-                p.expect(prompt)
-                for line in (
-                    f'if ! grep -q "{public_key}" {authorized_keys_path}; then',
-                    f"  echo {public_key} >> {authorized_keys_path}",
-                    "fi",
-                ):
-                    p.sendline(line)
-                p.expect(prompt)
-                p.kill(signal.SIGINT)
+                _, error = _ssm_run(ssm_target, shell_line, capture=False)
+                if error:
+                    print(f"  [error on {node_id}: {error}]")
 
             for _ in pool.map(install, nodes):
                 pass
@@ -1971,7 +2067,7 @@ def _register_hyperpod(awsut) -> None:
             return
 
         try:
-            import pexpect
+            import pexpect  # noqa: F401  (helper imports it; surface the error here)
         except ImportError:
             print("pexpect is required for `awsut hyperpod run`. "
                   "Install it: pip install pexpect")
@@ -2011,106 +2107,13 @@ def _register_hyperpod(awsut) -> None:
             print("No nodes matched the given filters.")
             return
 
-        # Use pexpect.spawn (PTY-backed), NOT pexpect.popen_spawn.PopenSpawn
-        # (pipe-backed). The remote SSM-attached shell only delivers an
-        # interactive prompt when it sees a real tty; with bare pipes it
-        # goes non-interactive and never prints a prompt at all — that was
-        # the root cause of the earlier TIMEOUTs.
-        #
-        # `awsut hyperpod ssh install-key` happens to work on PopenSpawn
-        # only because its loose `expect(["sh-4.2#", "#"])` pattern matches
-        # the SSM banner (which contains "#") and the shell builtins it
-        # sends afterwards (if/echo/fi) execute regardless of prompt state.
-        # That's a coincidence worth knowing about, not a pattern to copy.
-        sentinel = "__cshell2_run_done_aef36c__"
-        # Initial-prompt patterns — accept the shapes seen across AL2,
-        # AL2023, and Ubuntu, and fall through to TIMEOUT if the SSM
-        # banner ends before any prompt is printed.
-        initial_prompt_patterns = [
-            r"sh-\d+\.\d+[#\$]\s*",  # AL2 / AL2023 default bash prompt
-            r"[#\$]\s+",              # generic "$ " / "# "
-            pexpect.TIMEOUT,
-        ]
         print_lock = threading.Lock()
 
         def run_on(node):
             ig_name = node["InstanceGroupName"]
             node_id = node["InstanceId"]
             ssm_target = f"sagemaker-cluster:{cluster_id}_{ig_name}-{node_id}"
-            output = ""
-            error = None
-            p = None
-            try:
-                p = pexpect.spawn(
-                    awscli[0],
-                    args=[*awscli[1:], "ssm", "start-session",
-                          "--target", ssm_target],
-                    timeout=30,
-                    encoding="utf-8",
-                )
-                idx = p.expect(initial_prompt_patterns, timeout=30)
-                if idx == len(initial_prompt_patterns) - 1:
-                    # Banner finished without a prompt — try to nudge one
-                    # out by sending a bare newline.
-                    p.sendline("")
-                    p.expect(initial_prompt_patterns[:-1], timeout=10)
-
-                # Bracket the command with a sentinel echo so "command
-                # done" is detectable independent of whatever PS1 the
-                # remote shell is using.
-                #
-                # Subtlety: pexpect.expect(SENTINEL) matches the FIRST
-                # literal occurrence in the stream — including the
-                # echoed command line. If we wrote `echo SENTINEL`
-                # verbatim, the match would fire on the echo, before any
-                # command output had arrived, and we'd capture nothing.
-                # Build the sentinel from two halves the shell joins at
-                # runtime so the echoed source line ("$S$T") doesn't
-                # contain the literal sentinel — only the resolved
-                # command output does.
-                head, tail = sentinel[: len(sentinel) // 2], sentinel[len(sentinel) // 2 :]
-                p.sendline(f'S="{head}"; T="{tail}"; {command}; echo "$S$T"')
-                p.expect(sentinel, timeout=30)
-
-                # The first newline-delimited chunk in p.before is the
-                # shell's echo of our `sendline`. Drop it; everything
-                # after that, up to the sentinel, is the real output.
-                #
-                # Normalize line endings in one pass: pexpect's PTY runs in
-                # cooked mode and applies ONLCR on top of the SSM client's
-                # already-CRLF output, so bytes commonly arrive as "\r\r\n".
-                # Collapse any run of \r optionally followed by \n down to
-                # a single \n. (A naive \r\n→\n then \r→\n turns "\r\r\n"
-                # into "\n\n" — the double-newline you saw.)
-                raw = re.sub(r"\r+\n?", "\n", p.before or "")
-                _, _, after_echo = raw.partition("\n")
-                # Drop a trailing "echo \"$S$T\"\n" line if present.
-                output = re.sub(r'echo "\$S\$T"\s*\n?$', "", after_echo)
-
-                # Graceful disconnect — give SSM a clean session close
-                # rather than killing it from underneath.
-                p.sendline("exit")
-                try:
-                    p.expect(pexpect.EOF, timeout=5)
-                except pexpect.TIMEOUT:
-                    pass
-            except pexpect.TIMEOUT:
-                error = "TIMEOUT"
-                if p is not None and p.before:
-                    error += f" (tail: {p.before[-200:]!r})"
-            except pexpect.EOF:
-                error = "EOF: SSM session ended before command completed"
-                if p is not None and p.before:
-                    error += f" (tail: {p.before[-200:]!r})"
-            except Exception as e:
-                msg = str(e).splitlines()[0] if str(e) else ""
-                error = f"{type(e).__name__}{': ' + msg if msg else ''}"
-            finally:
-                if p is not None and p.isalive():
-                    try:
-                        p.terminate(force=True)
-                    except Exception:
-                        pass
+            output, error = _ssm_run(ssm_target, command, capture=True)
 
             with print_lock:
                 print(f"--- {ig_name}/{node_id} ---")
