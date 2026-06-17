@@ -572,6 +572,67 @@ class _HyperpodInstanceGroupNameCompleter(Completer):
                 for c in choices if c.startswith(ctx.prefix)]
 
 
+class _HyperpodSubnetIdCompleter(Completer):
+    """Completes subnet IDs in the same VPC as the cluster.
+
+    Reads ``cluster_name`` from ``ctx.args[0]``.  Locates the VPC by looking at
+    a known subnet on the cluster (any IG's ``OverrideVpcConfig.Subnets`` or
+    the cluster-level ``VpcConfig.Subnets``), then lists every subnet in that
+    VPC.  Each completion is annotated with the subnet's Name tag and AZ.
+    """
+
+    def complete(self, ctx: CompletionContext) -> list[Completion]:
+        if not ctx.args:
+            return []
+        cluster_name = ctx.args[0]
+        try:
+            sm = _get_sagemaker_client()
+            cluster = sm.describe_cluster(ClusterName=cluster_name)
+        except Exception:
+            return []
+
+        seed_subnet = None
+        for ig in cluster.get("InstanceGroups", []) + cluster.get("RestrictedInstanceGroups", []):
+            ovc = ig.get("OverrideVpcConfig") or {}
+            subnets = ovc.get("Subnets") or []
+            if subnets:
+                seed_subnet = subnets[0]
+                break
+        if seed_subnet is None:
+            cluster_vpc = cluster.get("VpcConfig") or {}
+            subnets = cluster_vpc.get("Subnets") or []
+            if subnets:
+                seed_subnet = subnets[0]
+        if seed_subnet is None:
+            return []
+
+        try:
+            ec2 = _get_boto3_client("ec2")
+            seed_resp = ec2.describe_subnets(SubnetIds=[seed_subnet])
+            vpc_id = seed_resp["Subnets"][0]["VpcId"]
+            vpc_resp = ec2.describe_subnets(
+                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}],
+            )
+        except Exception:
+            return []
+
+        result: list[Completion] = []
+        for subnet in vpc_resp.get("Subnets", []):
+            sid = subnet["SubnetId"]
+            if not sid.startswith(ctx.prefix):
+                continue
+            name = ""
+            for tag in subnet.get("Tags", []) or []:
+                if tag.get("Key") == "Name":
+                    name = tag.get("Value", "")
+                    break
+            az_id = subnet.get("AvailabilityZoneId", "")
+            cidr = subnet.get("CidrBlock", "")
+            desc = " ".join(p for p in (az_id, cidr, name) if p)
+            result.append(Completion(value=sid, description=desc))
+        return result
+
+
 class _HyperpodNodeIdCompleter(Completer):
     """Completes node IDs (and IG/node_id, hostname). Reads cluster_name from preceding args."""
 
@@ -1248,9 +1309,11 @@ def _register_hyperpod(awsut) -> None:
             arg("--instance-type", metavar="TYPE",
                 completer=ChoiceCompleter(_instance_type_choices),
                 help="Override instance type (default: copy from template)"),
-            arg("--instance-count", type=int, metavar="N",
-                help="Override instance count (default: copy from template)"),
+            arg("--instance-count", type=int, default=0, metavar="N",
+                help="Initial instance count (default: 0; scale up later "
+                     "with `awsut hyperpod scale`)"),
             arg("--subnet-id", metavar="SUBNET",
+                completer=_HyperpodSubnetIdCompleter(),
                 help="Override subnet ID. Security groups are inherited from "
                      "the template's OverrideVpcConfig if present, otherwise "
                      "from the cluster's VpcConfig."),
@@ -1303,10 +1366,9 @@ def _register_hyperpod(awsut) -> None:
             _sanitize_instance_group(new_ig)
 
         new_ig["InstanceGroupName"] = instance_group_name
+        new_ig["InstanceCount"] = instance_count
         if instance_type is not None:
             new_ig["InstanceType"] = instance_type
-        if instance_count is not None:
-            new_ig["InstanceCount"] = instance_count
         if subnet_id is not None:
             existing_override = template_ig.get("OverrideVpcConfig") or {}
             sgs = existing_override.get("SecurityGroupIds")
