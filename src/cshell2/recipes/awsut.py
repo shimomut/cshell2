@@ -7,7 +7,8 @@ Provides the ``awsut`` command tree:
 * ``awsut ec2 list|start|stop|reboot``
 * ``awsut logs list|monitor|export``
 * ``awsut cf list|wait|open``
-* ``awsut hyperpod create|update|scale|delete-nodes|reboot-nodes|replace-nodes|
+* ``awsut hyperpod create|update|scale|create-instance-group|
+  delete-instance-group|delete-nodes|reboot-nodes|replace-nodes|
   update-software|delete|list|describe|wait|log|ssm|ssh print-config|
   ssh install-key|run|search-capacity|kubeconfig|events``
 
@@ -30,6 +31,7 @@ User-customisable defaults (read from ``~/.cshell2/config.py`` if set):
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import datetime
 import fnmatch
 import json
@@ -347,6 +349,45 @@ class _CfStackNameCompleter(Completer):
 
 
 # ─── HyperPod helpers ───────────────────────────────────────────────────────
+
+def _drop(d, key):
+    d.pop(key, None)
+
+
+def _rename(d, old, new):
+    if old in d:
+        d[new] = d.pop(old)
+
+
+def _sanitize_instance_group(ig: dict) -> dict:
+    """Strip read-only fields from a describe_cluster InstanceGroup so it can be
+    fed back into update_cluster.  Mutates and returns the same dict."""
+    _rename(ig, "TargetCount", "InstanceCount")
+    for k in ("CurrentCount", "TargetCount", "Status",
+              "SoftwareUpdateStatus", "TargetStateCount",
+              "ActiveOperations", "FailureMessages",
+              "TrainingPlanStatus", "CurrentImageId",
+              "ImageVersionStatus"):
+        _drop(ig, k)
+    _rename(ig, "DesiredImageId", "ImageId")
+    if "KubernetesConfig" in ig:
+        kc = ig["KubernetesConfig"]
+        _rename(kc, "DesiredLabels", "Labels")
+        _rename(kc, "DesiredTaints", "Taints")
+        _drop(kc, "CurrentLabels")
+        _drop(kc, "CurrentTaints")
+    return ig
+
+
+def _sanitize_restricted_instance_group(ig: dict) -> dict:
+    """Same as `_sanitize_instance_group` but for RestrictedInstanceGroups."""
+    _rename(ig, "TargetCount", "InstanceCount")
+    for k in ("CurrentCount", "Status", "TrainingPlanStatus"):
+        _drop(ig, k)
+    if "EnvironmentConfig" in ig:
+        _drop(ig["EnvironmentConfig"], "S3OutputPath")
+    return ig
+
 
 def _list_hyperpod_clusters_all(sagemaker_client) -> list[dict]:
     clusters: list[dict] = []
@@ -1176,30 +1217,10 @@ def _register_hyperpod(awsut) -> None:
         if "NodeRecovery" in cluster:
             params["NodeRecovery"] = cluster["NodeRecovery"]
 
-        def _drop(d, key):
-            d.pop(key, None)
-
-        def _rename(d, old, new):
-            if old in d:
-                d[new] = d.pop(old)
-
         if cluster.get("InstanceGroups"):
             params["InstanceGroups"] = []
         for ig in cluster.get("InstanceGroups", []):
-            _rename(ig, "TargetCount", "InstanceCount")
-            for k in ("CurrentCount", "TargetCount", "Status",
-                      "SoftwareUpdateStatus", "TargetStateCount",
-                      "ActiveOperations", "FailureMessages",
-                      "TrainingPlanStatus", "CurrentImageId",
-                      "ImageVersionStatus"):
-                _drop(ig, k)
-            _rename(ig, "DesiredImageId", "ImageId")
-            if "KubernetesConfig" in ig:
-                kc = ig["KubernetesConfig"]
-                _rename(kc, "DesiredLabels", "Labels")
-                _rename(kc, "DesiredTaints", "Taints")
-                _drop(kc, "CurrentLabels")
-                _drop(kc, "CurrentTaints")
+            _sanitize_instance_group(ig)
             if ig["InstanceGroupName"] == instance_group_name:
                 ig["InstanceCount"] = target_instance_count
             params["InstanceGroups"].append(ig)
@@ -1207,17 +1228,179 @@ def _register_hyperpod(awsut) -> None:
         if cluster.get("RestrictedInstanceGroups"):
             params["RestrictedInstanceGroups"] = []
         for ig in cluster.get("RestrictedInstanceGroups", []):
-            _rename(ig, "TargetCount", "InstanceCount")
-            for k in ("CurrentCount", "Status", "TrainingPlanStatus"):
-                _drop(ig, k)
-            if "EnvironmentConfig" in ig:
-                _drop(ig["EnvironmentConfig"], "S3OutputPath")
+            _sanitize_restricted_instance_group(ig)
             if ig["InstanceGroupName"] == instance_group_name:
                 ig["InstanceCount"] = target_instance_count
             params["RestrictedInstanceGroups"].append(ig)
 
         response = sm.update_cluster(**params)
         print(f"Updating cluster started : {response['ClusterArn']}")
+
+    @hyperpod.command(
+        "create-instance-group",
+        help="Create a new instance group based on an existing template",
+        params=[
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
+            arg("instance_group_name", help="Name of the new instance group"),
+            arg("--template", required=True, metavar="NAME",
+                completer=_HyperpodInstanceGroupNameCompleter(),
+                help="Existing instance group to copy as the template"),
+            arg("--instance-type", metavar="TYPE",
+                completer=ChoiceCompleter(_instance_type_choices),
+                help="Override instance type (default: copy from template)"),
+            arg("--instance-count", type=int, metavar="N",
+                help="Override instance count (default: copy from template)"),
+            arg("--subnet-id", metavar="SUBNET",
+                help="Override subnet ID. Security groups are inherited from "
+                     "the template's OverrideVpcConfig if present, otherwise "
+                     "from the cluster's VpcConfig."),
+        ],
+    )
+    def _create_instance_group(cluster_name, instance_group_name, template,
+                               instance_type, instance_count, subnet_id):
+        sm = _get_sagemaker_client()
+        try:
+            cluster = sm.describe_cluster(ClusterName=cluster_name)
+        except sm.exceptions.ResourceNotFound:
+            print(f"Cluster [{cluster_name}] not found.")
+            return
+
+        # Locate the template across both regular and restricted IGs.
+        template_ig = None
+        is_restricted = False
+        for ig in cluster.get("InstanceGroups", []):
+            if ig["InstanceGroupName"] == template:
+                template_ig = ig
+                break
+        if template_ig is None:
+            for ig in cluster.get("RestrictedInstanceGroups", []):
+                if ig["InstanceGroupName"] == template:
+                    template_ig = ig
+                    is_restricted = True
+                    break
+        if template_ig is None:
+            print(f"Template instance group [{template}] not found in cluster "
+                  f"[{cluster_name}].")
+            return
+
+        existing_names = {ig["InstanceGroupName"]
+                          for ig in cluster.get("InstanceGroups", [])}
+        existing_names |= {ig["InstanceGroupName"]
+                           for ig in cluster.get("RestrictedInstanceGroups", [])}
+        if instance_group_name in existing_names:
+            print(f"Instance group [{instance_group_name}] already exists in "
+                  f"cluster [{cluster_name}].")
+            return
+
+        # Sanitize first (strips read-only fields and renames TargetCount →
+        # InstanceCount), THEN apply overrides — otherwise the rename would
+        # clobber a user-supplied --instance-count with the template's
+        # TargetCount.
+        new_ig = copy.deepcopy(template_ig)
+        if is_restricted:
+            _sanitize_restricted_instance_group(new_ig)
+        else:
+            _sanitize_instance_group(new_ig)
+
+        new_ig["InstanceGroupName"] = instance_group_name
+        if instance_type is not None:
+            new_ig["InstanceType"] = instance_type
+        if instance_count is not None:
+            new_ig["InstanceCount"] = instance_count
+        if subnet_id is not None:
+            existing_override = template_ig.get("OverrideVpcConfig") or {}
+            sgs = existing_override.get("SecurityGroupIds")
+            if not sgs:
+                cluster_vpc = cluster.get("VpcConfig") or {}
+                sgs = cluster_vpc.get("SecurityGroupIds")
+            if not sgs:
+                print("Could not infer SecurityGroupIds for the new instance "
+                      "group: neither the template's OverrideVpcConfig nor the "
+                      "cluster's VpcConfig has them.")
+                return
+            new_ig["OverrideVpcConfig"] = {
+                "Subnets": [subnet_id],
+                "SecurityGroupIds": list(sgs),
+            }
+
+        # Build update_cluster params: keep all existing IGs untouched
+        # (after sanitizing) and append the new one.
+        params = {"ClusterName": cluster_name}
+        if "NodeRecovery" in cluster:
+            params["NodeRecovery"] = cluster["NodeRecovery"]
+
+        regular = [_sanitize_instance_group(ig)
+                   for ig in cluster.get("InstanceGroups", [])]
+        restricted = [_sanitize_restricted_instance_group(ig)
+                      for ig in cluster.get("RestrictedInstanceGroups", [])]
+
+        if is_restricted:
+            restricted.append(new_ig)
+        else:
+            regular.append(new_ig)
+
+        if regular:
+            params["InstanceGroups"] = regular
+        if restricted:
+            params["RestrictedInstanceGroups"] = restricted
+
+        response = sm.update_cluster(**params)
+        print(f"Creating instance group [{instance_group_name}] started : "
+              f"{response['ClusterArn']}")
+
+    @hyperpod.command(
+        "delete-instance-group", help="Delete an instance group from a cluster",
+        params=[
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
+            arg("instance_group_name", completer=_HyperpodInstanceGroupNameCompleter()),
+            arg("-y", "--yes", action="store_true", help="Skip confirmation"),
+        ],
+    )
+    def _delete_instance_group(cluster_name, instance_group_name, yes):
+        sm = _get_sagemaker_client()
+        try:
+            cluster = sm.describe_cluster(ClusterName=cluster_name)
+        except sm.exceptions.ResourceNotFound:
+            print(f"Cluster [{cluster_name}] not found.")
+            return
+
+        regular_names = [ig["InstanceGroupName"]
+                         for ig in cluster.get("InstanceGroups", [])]
+        restricted_names = [ig["InstanceGroupName"]
+                            for ig in cluster.get("RestrictedInstanceGroups", [])]
+        if (instance_group_name not in regular_names
+                and instance_group_name not in restricted_names):
+            print(f"Instance group [{instance_group_name}] not found in cluster "
+                  f"[{cluster_name}].")
+            return
+
+        if not yes:
+            answer = passthrough_input(
+                f"Are you sure deleting instance group [{instance_group_name}] "
+                f"from cluster [{cluster_name}]? [y/N] : "
+            )
+            if answer.lower() not in ("y", "yes"):
+                return
+
+        params = {"ClusterName": cluster_name}
+        if "NodeRecovery" in cluster:
+            params["NodeRecovery"] = cluster["NodeRecovery"]
+
+        regular = [_sanitize_instance_group(ig)
+                   for ig in cluster.get("InstanceGroups", [])
+                   if ig["InstanceGroupName"] != instance_group_name]
+        restricted = [_sanitize_restricted_instance_group(ig)
+                      for ig in cluster.get("RestrictedInstanceGroups", [])
+                      if ig["InstanceGroupName"] != instance_group_name]
+
+        if regular:
+            params["InstanceGroups"] = regular
+        if restricted:
+            params["RestrictedInstanceGroups"] = restricted
+
+        response = sm.update_cluster(**params)
+        print(f"Deleting instance group [{instance_group_name}] started : "
+              f"{response['ClusterArn']}")
 
     def _batch_node_operation(operation_name, api, cluster_name, node_ids):
         sm = _get_sagemaker_client()
