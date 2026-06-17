@@ -9,8 +9,8 @@ Provides the ``awsut`` command tree:
 * ``awsut cf list|wait|open``
 * ``awsut hyperpod create|update|scale|create-instance-group|
   delete-instance-group|delete-nodes|reboot-nodes|replace-nodes|
-  update-software|delete|list|describe|wait|log|ssm|ssh print-config|
-  ssh install-key|run|search-capacity|kubeconfig|events``
+  update-software|delete|list|describe|wait|log|ssm|ssh|
+  run|search-capacity|kubeconfig|events``
 
 Profile and region switching live in the ``aws`` recipe as ``Var`` entries
 (``var aws_profile=...``, ``var aws_region=...``).  The SageMaker endpoint
@@ -539,7 +539,7 @@ def _print_hyperpod_log(logs_client, log_group, stream):
 
 # ─── shared SSM-pexpect helper ──────────────────────────────────────────────
 #
-# Both `awsut hyperpod run` and `awsut hyperpod ssh install-key` need to drive
+# Both `awsut hyperpod run` and `awsut hyperpod ssh` need to drive
 # a remote bash session over `aws ssm start-session`. The shape is identical:
 # spawn the SSM client under a real PTY (so the remote shell sees a tty and
 # prints prompts), wait for an initial prompt, send a single shell line, wait
@@ -1937,63 +1937,31 @@ def _register_hyperpod(awsut) -> None:
         ssm_target = f"sagemaker-cluster:{cluster_id}_{ig_name}-{node_id}"
         passthrough_run(["aws", "ssm", "start-session", "--target", ssm_target])
 
-    ssh = hyperpod.command("ssh", help="Set up SSH access to all cluster nodes")
-
-    @ssh.command(
-        "print-config", help="Print SSH config for cluster nodes",
+    @hyperpod.command(
+        "ssh",
+        help="Install SSH public key on cluster nodes and add Host entries to "
+             "~/.ssh/config",
         params=[
             arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
-            arg("user", choices=["ubuntu", "ec2-user"]),
-        ],
-    )
-    def _ssh_print_config(cluster_name, user):
-        sm = _get_sagemaker_client()
-        try:
-            cluster = sm.describe_cluster(ClusterName=cluster_name)
-        except sm.exceptions.ResourceNotFound:
-            print(f"Cluster [{cluster_name}] not found.")
-            return
-
-        nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
-        cluster_id = cluster["ClusterArn"].split("/")[-1]
-        profile = _get_profile()
-        region = _get_region() or ""
-
-        for ig in cluster["InstanceGroups"] + cluster["RestrictedInstanceGroups"]:
-            node_index = 0
-            for node in nodes:
-                if node["InstanceGroupName"] != ig["InstanceGroupName"]:
-                    continue
-                ig_name = node["InstanceGroupName"]
-                node_id = node["InstanceId"]
-                print()
-                print(
-                    f"Host {cluster_name}-{ig_name}-{node_index}\n"
-                    f"    HostName sagemaker-cluster:{cluster_id}_{ig_name}-{node_id}\n"
-                    f"    User {user}\n"
-                    f"    IdentityFile ~/keys/842413447717-ec2.pem\n"
-                    f"    ProxyCommand aws --profile {profile} --region {region} "
-                    f"ssm start-session --target %h --document-name AWS-StartSSHSession "
-                    f"--parameters portNumber=%p"
-                )
-                node_index += 1
-        print()
-
-    @ssh.command(
-        "install-key", help="Install SSH public key to all cluster nodes",
-        params=[
-            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
-            arg("home_path",
-                help="Path to home directory on the cluster (e.g. /fsx/ubuntu)"),
             arg("public_key_file", completer=FileCompleter(),
-                help="SSH public key file"),
+                help="SSH public key file (e.g. ~/.ssh/id_rsa.pub)"),
+            arg("user", nargs="?",
+                choices=["ubuntu", "ec2-user"],
+                help="Login user. Default: 'ubuntu' for Slurm clusters, "
+                     "'ec2-user' for EKS clusters."),
+            arg("--instance-group-name", metavar="NAME",
+                completer=_HyperpodInstanceGroupNameCompleter(),
+                help="Restrict to nodes in this instance group"),
+            arg("--node-id", nargs="+", default=[], metavar="NODE",
+                completer=_HyperpodNodeIdCompleter(with_cwlog=False),
+                help="Restrict to these specific nodes"),
         ],
     )
-    def _ssh_install_key(cluster_name, home_path, public_key_file):
+    def _ssh(cluster_name, public_key_file, user, instance_group_name, node_id):
         try:
             import pexpect  # noqa: F401  (helper imports it; surface the error here)
         except ImportError:
-            print("pexpect is required for `awsut hyperpod ssh install-key`. "
+            print("pexpect is required for `awsut hyperpod ssh`. "
                   "Install it: pip install pexpect")
             return
 
@@ -2004,34 +1972,149 @@ def _register_hyperpod(awsut) -> None:
             print(f"Cluster [{cluster_name}] not found.")
             return
 
-        nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
-        cluster_id = cluster["ClusterArn"].split("/")[-1]
+        if user is None:
+            is_eks = bool(cluster.get("Orchestrator", {}).get("Eks"))
+            user = "ec2-user" if is_eks else "ubuntu"
 
         with open(os.path.expanduser(public_key_file)) as fd:
             public_key = fd.read().strip()
-
         if len(public_key.splitlines()) > 1:
             print("Public key contains multiple lines unexpectedly.")
             return
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
-            def install(node):
-                ig_name = node["InstanceGroupName"]
-                node_id = node["InstanceId"]
-                ssm_target = f"sagemaker-cluster:{cluster_id}_{ig_name}-{node_id}"
-                authorized_keys_path = os.path.join(home_path, ".ssh/authorized_keys")
+        all_nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
+        cluster_id = cluster["ClusterArn"].split("/")[-1]
 
-                print(f"Installing ssh public key to {node_id} {authorized_keys_path}")
-                shell_line = (
-                    f'if ! grep -q "{public_key}" {authorized_keys_path}; '
-                    f'then echo {public_key} >> {authorized_keys_path}; fi'
-                )
-                _, error = _ssm_run(ssm_target, shell_line, capture=False)
+        # Resolve --node-id filter values (strip ig/ prefix, hostname → node_id).
+        filter_node_ids: list[str] = []
+        if node_id:
+            hostnames = _HyperpodHostnames.instance()
+            need_hostnames = any(n.startswith("ip-") or "/ip-" in n for n in node_id)
+            if need_hostnames:
+                try:
+                    hostnames.resolve(sm, cluster, all_nodes)
+                except Exception:
+                    pass
+            for n in node_id:
+                if "/" in n:
+                    n = n.split("/")[-1]
+                if n.startswith("ip-"):
+                    n = hostnames.get_node_id(n) or n
+                filter_node_ids.append(n)
+
+        targets = []
+        for node in all_nodes:
+            if instance_group_name and node["InstanceGroupName"] != instance_group_name:
+                continue
+            if filter_node_ids and node["InstanceId"] not in filter_node_ids:
+                continue
+            targets.append(node)
+
+        if not targets:
+            print("No nodes matched the given filters.")
+            return
+
+        # 1. Install the public key and capture each node's home directory.
+        print_lock = threading.Lock()
+        node_homes: dict[str, str] = {}
+
+        def install(node):
+            ig_name = node["InstanceGroupName"]
+            node_id_local = node["InstanceId"]
+            ssm_target = f"sagemaker-cluster:{cluster_id}_{ig_name}-{node_id_local}"
+            shell_line = (
+                f'HOME_DIR=$(getent passwd {user} | cut -d: -f6); '
+                f'if [ -z "$HOME_DIR" ]; then echo "HOME_DIR_NOT_FOUND"; exit 1; fi; '
+                f'mkdir -p "$HOME_DIR/.ssh" && chmod 700 "$HOME_DIR/.ssh" && '
+                f'chown {user} "$HOME_DIR/.ssh" && '
+                f'touch "$HOME_DIR/.ssh/authorized_keys" && '
+                f'chmod 600 "$HOME_DIR/.ssh/authorized_keys" && '
+                f'chown {user} "$HOME_DIR/.ssh/authorized_keys" && '
+                f'if ! grep -qF "{public_key}" "$HOME_DIR/.ssh/authorized_keys"; '
+                f'then echo "{public_key}" >> "$HOME_DIR/.ssh/authorized_keys"; fi; '
+                f'echo "HOME_DIR=$HOME_DIR"'
+            )
+            output, error = _ssm_run(ssm_target, shell_line, capture=True)
+            with print_lock:
                 if error:
-                    print(f"  [error on {node_id}: {error}]")
+                    print(f"  [error on {node_id_local}: {error}]")
+                    return
+                home_match = re.search(r"^HOME_DIR=(\S+)$", output or "", re.MULTILINE)
+                if not home_match or "HOME_DIR_NOT_FOUND" in (output or ""):
+                    print(f"  [error on {node_id_local}: could not determine home "
+                          f"directory for user {user}]")
+                    return
+                node_homes[node_id_local] = home_match.group(1)
+                print(f"Installed SSH key on {ig_name}/{node_id_local} "
+                      f"(home: {node_homes[node_id_local]})")
 
-            for _ in pool.map(install, nodes):
+        workers = max(1, min(16, len(targets)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            for _ in pool.map(install, targets):
                 pass
+
+        if not node_homes:
+            print("Key installation failed on every targeted node; not updating "
+                  "~/.ssh/config.")
+            return
+
+        # 2. Build the SSH config block(s) and merge into ~/.ssh/config.
+        identity_file = public_key_file
+        if identity_file.endswith(".pub"):
+            identity_file = identity_file[:-4]
+
+        profile = _get_profile()
+        region = _get_region() or ""
+
+        config_path = os.path.expanduser("~/.ssh/config")
+        existing = ""
+        if os.path.exists(config_path):
+            with open(config_path) as fd:
+                existing = fd.read()
+
+        added_blocks: list[str] = []
+        host_aliases: list[str] = []
+        for node in targets:
+            node_id_local = node["InstanceId"]
+            if node_id_local not in node_homes:
+                continue
+            ig_name = node["InstanceGroupName"]
+            host_alias = f"{cluster_name}-{ig_name}-{node_id_local}"
+            host_aliases.append(host_alias)
+
+            if re.search(rf"(?m)^Host\s+{re.escape(host_alias)}\s*$", existing):
+                continue
+
+            block = (
+                f"Host {host_alias}\n"
+                f"    HostName sagemaker-cluster:{cluster_id}_{ig_name}-{node_id_local}\n"
+                f"    User {user}\n"
+                f"    IdentityFile {identity_file}\n"
+                f"    ProxyCommand aws --profile {profile} --region {region} "
+                f"ssm start-session --target %h --document-name AWS-StartSSHSession "
+                f"--parameters portNumber=%p\n"
+            )
+            added_blocks.append(block)
+
+        if added_blocks:
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            sep = "" if not existing or existing.endswith("\n") else "\n"
+            with open(config_path, "a") as fd:
+                fd.write(sep + "\n" + "\n".join(added_blocks))
+            print()
+            print(f"Added {len(added_blocks)} Host entr"
+                  f"{'y' if len(added_blocks) == 1 else 'ies'} to {config_path}:")
+            print()
+            for block in added_blocks:
+                print(block, end="")
+        else:
+            print()
+            print(f"All Host entries already present in {config_path}.")
+
+        if host_aliases:
+            print()
+            print("Example:")
+            print(f"  ssh {host_aliases[0]}")
 
     @hyperpod.command(
         "run",
