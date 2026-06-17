@@ -38,6 +38,7 @@ import json
 import os
 import re
 import signal
+import threading
 import time
 import urllib.parse
 import webbrowser
@@ -1937,23 +1938,40 @@ def _register_hyperpod(awsut) -> None:
                 pass
 
     @hyperpod.command(
-        "run", help="Run a single line command on nodes of an instance group",
+        "run",
+        help="Run a single line command on cluster nodes (in parallel)",
         params=[
             arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
             arg("--instance-group-name", metavar="NAME",
                 completer=_HyperpodInstanceGroupNameCompleter(),
-                help="Instance group name"),
+                help="Restrict to nodes in this instance group"),
             arg("--instances", nargs="+", default=[], metavar="NODE",
                 completer=_HyperpodNodeIdCompleter(with_cwlog=False),
-                help="Instances to target"),
+                help="Restrict to these specific nodes"),
+            arg("--all", dest="all_nodes", action="store_true",
+                help="Run on every node in the cluster (required if neither "
+                     "--instance-group-name nor --instances is given)"),
+            arg("--max-parallel", type=int, default=16, metavar="N",
+                help="Maximum number of nodes to run on concurrently (default: 16)"),
             arg("--command", required=True, metavar="CMD",
                 help="Single line of command to run"),
         ],
     )
-    def _run(cluster_name, instance_group_name, instances, command):
+    def _run(cluster_name, instance_group_name, instances, all_nodes,
+             max_parallel, command):
+        # Validate targeting first — cheap and useful even without pexpect.
+        if not (all_nodes or instance_group_name or instances):
+            print("Refusing to run without an explicit target. Pass "
+                  "--instance-group-name NAME, --instances NODE [NODE ...], "
+                  "or --all to run on every node in the cluster.")
+            return
+        if all_nodes and (instance_group_name or instances):
+            print("--all is mutually exclusive with --instance-group-name "
+                  "and --instances.")
+            return
+
         try:
             import pexpect
-            import pexpect.popen_spawn
         except ImportError:
             print("pexpect is required for `awsut hyperpod run`. "
                   "Install it: pip install pexpect")
@@ -1979,41 +1997,135 @@ def _register_hyperpod(awsut) -> None:
                 inst = hostnames.get_node_id(inst) or inst
             node_ids.append(inst)
 
-        custom_prompt = r"pexpect# "
-
+        targets = []
         for node in nodes:
             ig_name = node["InstanceGroupName"]
             node_id = node["InstanceId"]
-
             if instance_group_name and ig_name != instance_group_name:
-                print(f"Skipping {ig_name}/{node_id}")
                 continue
             if node_ids and node_id not in node_ids:
-                print(f"Skipping {ig_name}/{node_id}")
                 continue
+            targets.append(node)
 
+        if not targets:
+            print("No nodes matched the given filters.")
+            return
+
+        # Use pexpect.spawn (PTY-backed), NOT pexpect.popen_spawn.PopenSpawn
+        # (pipe-backed). The remote SSM-attached shell only delivers an
+        # interactive prompt when it sees a real tty; with bare pipes it
+        # goes non-interactive and never prints a prompt at all — that was
+        # the root cause of the earlier TIMEOUTs.
+        #
+        # `awsut hyperpod ssh install-key` happens to work on PopenSpawn
+        # only because its loose `expect(["sh-4.2#", "#"])` pattern matches
+        # the SSM banner (which contains "#") and the shell builtins it
+        # sends afterwards (if/echo/fi) execute regardless of prompt state.
+        # That's a coincidence worth knowing about, not a pattern to copy.
+        sentinel = "__cshell2_run_done_aef36c__"
+        # Initial-prompt patterns — accept the shapes seen across AL2,
+        # AL2023, and Ubuntu, and fall through to TIMEOUT if the SSM
+        # banner ends before any prompt is printed.
+        initial_prompt_patterns = [
+            r"sh-\d+\.\d+[#\$]\s*",  # AL2 / AL2023 default bash prompt
+            r"[#\$]\s+",              # generic "$ " / "# "
+            pexpect.TIMEOUT,
+        ]
+        print_lock = threading.Lock()
+
+        def run_on(node):
+            ig_name = node["InstanceGroupName"]
+            node_id = node["InstanceId"]
             ssm_target = f"sagemaker-cluster:{cluster_id}_{ig_name}-{node_id}"
-            print(f"Running command in {node_id}")
-            print()
+            output = ""
+            error = None
+            p = None
+            try:
+                p = pexpect.spawn(
+                    awscli[0],
+                    args=[*awscli[1:], "ssm", "start-session",
+                          "--target", ssm_target],
+                    timeout=30,
+                    encoding="utf-8",
+                )
+                idx = p.expect(initial_prompt_patterns, timeout=30)
+                if idx == len(initial_prompt_patterns) - 1:
+                    # Banner finished without a prompt — try to nudge one
+                    # out by sending a bare newline.
+                    p.sendline("")
+                    p.expect(initial_prompt_patterns[:-1], timeout=10)
 
-            p = pexpect.popen_spawn.PopenSpawn(
-                [*awscli, "ssm", "start-session", "--target", ssm_target]
-            )
-            p.expect(["# "])
-            print(p.before.decode("utf-8") + p.after.decode("utf-8"), end="")
+                # Bracket the command with a sentinel echo so "command
+                # done" is detectable independent of whatever PS1 the
+                # remote shell is using.
+                #
+                # Subtlety: pexpect.expect(SENTINEL) matches the FIRST
+                # literal occurrence in the stream — including the
+                # echoed command line. If we wrote `echo SENTINEL`
+                # verbatim, the match would fire on the echo, before any
+                # command output had arrived, and we'd capture nothing.
+                # Build the sentinel from two halves the shell joins at
+                # runtime so the echoed source line ("$S$T") doesn't
+                # contain the literal sentinel — only the resolved
+                # command output does.
+                head, tail = sentinel[: len(sentinel) // 2], sentinel[len(sentinel) // 2 :]
+                p.sendline(f'S="{head}"; T="{tail}"; {command}; echo "$S$T"')
+                p.expect(sentinel, timeout=30)
 
-            p.sendline(f'export PS1="{custom_prompt}"')
-            p.expect("\n" + custom_prompt)
-            print(p.before.decode("utf-8") + p.after.decode("utf-8"), end="")
+                # The first newline-delimited chunk in p.before is the
+                # shell's echo of our `sendline`. Drop it; everything
+                # after that, up to the sentinel, is the real output.
+                #
+                # Normalize line endings in one pass: pexpect's PTY runs in
+                # cooked mode and applies ONLCR on top of the SSM client's
+                # already-CRLF output, so bytes commonly arrive as "\r\r\n".
+                # Collapse any run of \r optionally followed by \n down to
+                # a single \n. (A naive \r\n→\n then \r→\n turns "\r\r\n"
+                # into "\n\n" — the double-newline you saw.)
+                raw = re.sub(r"\r+\n?", "\n", p.before or "")
+                _, _, after_echo = raw.partition("\n")
+                # Drop a trailing "echo \"$S$T\"\n" line if present.
+                output = re.sub(r'echo "\$S\$T"\s*\n?$', "", after_echo)
 
-            p.sendline(command)
-            p.expect(custom_prompt)
-            print(p.before.decode("utf-8") + p.after.decode("utf-8"), end="")
+                # Graceful disconnect — give SSM a clean session close
+                # rather than killing it from underneath.
+                p.sendline("exit")
+                try:
+                    p.expect(pexpect.EOF, timeout=5)
+                except pexpect.TIMEOUT:
+                    pass
+            except pexpect.TIMEOUT:
+                error = "TIMEOUT"
+                if p is not None and p.before:
+                    error += f" (tail: {p.before[-200:]!r})"
+            except pexpect.EOF:
+                error = "EOF: SSM session ended before command completed"
+                if p is not None and p.before:
+                    error += f" (tail: {p.before[-200:]!r})"
+            except Exception as e:
+                msg = str(e).splitlines()[0] if str(e) else ""
+                error = f"{type(e).__name__}{': ' + msg if msg else ''}"
+            finally:
+                if p is not None and p.isalive():
+                    try:
+                        p.terminate(force=True)
+                    except Exception:
+                        pass
 
-            p.kill(signal.SIGINT)
-            print()
-            print()
-            print("---")
+            with print_lock:
+                print(f"--- {ig_name}/{node_id} ---")
+                if output:
+                    print(output, end="")
+                    if not output.endswith("\n"):
+                        print()
+                if error:
+                    print(f"[error running on {node_id}: {error}]")
+                print()
+
+        workers = max(1, min(max_parallel, len(targets)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            for _ in pool.map(run_on, targets):
+                pass
 
     @hyperpod.command(
         "search-capacity",
