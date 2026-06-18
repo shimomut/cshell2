@@ -667,13 +667,26 @@ class _HyperpodInstanceGroupNameCompleter(Completer):
             cluster = sm.describe_cluster(ClusterName=cluster_name)
         except Exception:
             return []
-        choices: list[str] = []
-        for ig in cluster.get("InstanceGroups", []):
-            choices.append(ig["InstanceGroupName"])
-        for ig in cluster.get("RestrictedInstanceGroups", []):
-            choices.append(ig["InstanceGroupName"])
-        return [Completion(value=c, description="instance group")
-                for c in choices if c.startswith(ctx.prefix)]
+        result: list[Completion] = []
+        for ig in (cluster.get("InstanceGroups", [])
+                   + cluster.get("RestrictedInstanceGroups", [])):
+            name = ig["InstanceGroupName"]
+            if not name.startswith(ctx.prefix):
+                continue
+            instance_type = ig.get("InstanceType", "")
+            current = ig.get("CurrentCount")
+            target = ig.get("TargetCount")
+            if current is not None and target is not None:
+                count = f"{current}=>{target}" if current != target else f"{current}"
+            elif target is not None:
+                count = str(target)
+            elif current is not None:
+                count = str(current)
+            else:
+                count = ""
+            desc = " ".join(p for p in (instance_type, f"({count})" if count else "") if p)
+            result.append(Completion(value=name, description=desc))
+        return result
 
 
 class _HyperpodSubnetIdCompleter(Completer):
