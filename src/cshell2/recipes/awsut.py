@@ -2126,8 +2126,9 @@ def _register_hyperpod(awsut) -> None:
 
         if host_aliases:
             print()
-            print("Example:")
+            print("Examples:")
             print(f"  ssh {host_aliases[0]}")
+            print(f"  code --remote ssh-remote+{host_aliases[0]} /home/{user}")
 
     @hyperpod.command(
         "run",
