@@ -1762,7 +1762,11 @@ def _register_hyperpod(awsut) -> None:
         nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
 
         if raw:
+            cluster.pop("ResponseMetadata", None)
+            print("=== Cluster ===")
             print(json.dumps(cluster, indent=2, default=str))
+            print()
+            print("=== Nodes ===")
             print(json.dumps(nodes, indent=2, default=str))
             return
 
