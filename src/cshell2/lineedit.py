@@ -208,6 +208,17 @@ class LineEditor:
         # cancel themselves on resize; the next _redraw after _picker_session
         # exits then runs cleanly with the new geometry.
         self._picker_active: bool = False
+        # SIGWINCH reentrancy guard. _on_resize does I/O on stdout (DSR
+        # query + _redraw); both call sys.stdout.flush(), which holds the
+        # BufferedWriter lock. Drag-resize fires many SIGWINCHes — when a
+        # second one is delivered while we're already inside _redraw, the
+        # nested handler's flush() re-enters that lock and Python raises
+        # ``RuntimeError: reentrant call inside <_io.BufferedWriter>``.
+        # The flag below lets nested calls bail out (after refreshing the
+        # tracked size), and ``_resize_pending`` makes the outer call
+        # replay once so the final geometry isn't lost.
+        self._in_resize: bool = False
+        self._resize_pending: bool = False
 
     def add_to_history(self, line: str) -> None:
         """Add *line* to history from outside the editor (e.g. after joining continuation lines)."""
@@ -311,6 +322,27 @@ class LineEditor:
         if self._picker_active:
             self._update_cols()
             return
+        # SIGWINCH can be delivered between bytecodes while we're already
+        # inside this handler — typically during _redraw's stdout writes,
+        # which hold the BufferedWriter lock. A nested handler that calls
+        # query_cursor_position or _redraw would re-enter that lock and
+        # crash with ``RuntimeError: reentrant call inside ...``. Bail out
+        # of the nested call but record that another resize happened so
+        # the outer call replays once with the latest geometry.
+        if self._in_resize:
+            self._resize_pending = True
+            self._update_cols()
+            return
+        self._in_resize = True
+        try:
+            self._handle_resize()
+            while self._resize_pending:
+                self._resize_pending = False
+                self._handle_resize()
+        finally:
+            self._in_resize = False
+
+    def _handle_resize(self) -> None:
         old_cursor_row = self._cursor_row
         old_cols = self._cols
         self._update_cols()
