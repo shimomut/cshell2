@@ -37,6 +37,7 @@ import fnmatch
 import json
 import os
 import re
+import sys
 import threading
 import time
 import urllib.parse
@@ -159,6 +160,23 @@ def _get_all_profiles() -> dict[str, dict]:
                 profiles[profile_name]["account"] = m.group(1)
                 profiles[profile_name]["role"] = m.group(2)
     return profiles
+
+
+def _print_json(obj) -> None:
+    """Print JSON, syntax-highlighted when stdout is a TTY."""
+    text = json.dumps(obj, indent=2, default=str)
+    if sys.stdout.isatty():
+        try:
+            from pygments import highlight
+            from pygments.formatters import Terminal256Formatter
+            from pygments.lexers import JsonLexer
+            sys.stdout.write(
+                highlight(text, JsonLexer(), Terminal256Formatter(style="monokai"))
+            )
+            return
+        except Exception:
+            pass
+    print(text)
 
 
 def _max_len(items, key) -> int:
@@ -1764,10 +1782,10 @@ def _register_hyperpod(awsut) -> None:
         if raw:
             cluster.pop("ResponseMetadata", None)
             print("=== Cluster ===")
-            print(json.dumps(cluster, indent=2, default=str))
+            _print_json(cluster)
             print()
             print("=== Nodes ===")
-            print(json.dumps(nodes, indent=2, default=str))
+            _print_json(nodes)
             return
 
         hostnames = _HyperpodHostnames.instance()
