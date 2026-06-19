@@ -1804,8 +1804,31 @@ def _register_hyperpod(awsut) -> None:
             if hn:
                 max_hostname_len = max(max_hostname_len, len(hn))
 
+        # Pre-scan: assign tag numbers in display order so footnotes match.
+        failures: list[tuple[int, str, str, str]] = []
+        node_tag: dict[str, int] = {}
+        for ig in cluster["InstanceGroups"] + cluster["RestrictedInstanceGroups"]:
+            for node in nodes:
+                if node["InstanceGroupName"] != ig["InstanceGroupName"]:
+                    continue
+                msg = node["InstanceStatus"].get("Message")
+                if msg:
+                    tag = len(failures) + 1
+                    node_tag[node["InstanceId"]] = tag
+                    failures.append((tag, ig["InstanceGroupName"],
+                                     node["InstanceId"], msg))
+
+        def _status_label(node):
+            status = node["InstanceStatus"]["Status"]
+            if status == "Pending":
+                status = "*Pending"
+            tag = node_tag.get(node["InstanceId"])
+            if tag is not None:
+                status = f"{status} [{tag}]"
+            return status
+
         ig_w   = _max_len(nodes, "InstanceGroupName") if nodes else 0
-        stat_w = _max_len(nodes, ("InstanceStatus", "Status")) + 1 if nodes else 0
+        stat_w = max((len(_status_label(n)) for n in nodes), default=0)
 
         for ig in cluster["InstanceGroups"] + cluster["RestrictedInstanceGroups"]:
             print(f"{ig['InstanceGroupName']:<{ig_w}} : {ig['InstanceType']} : "
@@ -1817,26 +1840,24 @@ def _register_hyperpod(awsut) -> None:
                 ig_name = node["InstanceGroupName"]
                 node_id = node["InstanceId"]
                 hn = hostnames.get_hostname(node_id) or ""
-                node_status = node["InstanceStatus"]["Status"]
                 ssm_target = f"sagemaker-cluster:{cluster_id}_{ig_name}-{node_id}"
 
-                if node_status == "Pending":
-                    node_status = "*Pending"
-
                 print(f"    {node_id} : {hn:<{max_hostname_len}} : "
-                      f"{node_status:<{stat_w}} : "
+                      f"{_status_label(node):<{stat_w}} : "
                       f"{node['LaunchTime'].strftime('%Y/%m/%d %H:%M:%S')} : "
                       f"{ssm_target}")
 
-                msg = node["InstanceStatus"].get("Message")
-                if msg:
-                    print()
-                    for line in msg.splitlines():
-                        print(line)
-                    print()
-                    print("---")
-
             print()
+
+        if failures:
+            print("Failures:")
+            for tag, ig_name, node_id, msg in failures:
+                lines = msg.splitlines() or [""]
+                prefix = f"  [{tag}] {ig_name}/{node_id}: "
+                indent = " " * len(prefix)
+                print(prefix + lines[0])
+                for line in lines[1:]:
+                    print(indent + line)
 
     @hyperpod.command(
         "wait", help="Wait for asynchronous cluster operations",
