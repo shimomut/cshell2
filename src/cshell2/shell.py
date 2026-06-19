@@ -738,6 +738,20 @@ class PythonCommandSlot:
         # Tell the child the terminal it sees is a TTY.
         env.setdefault("TERM", os.environ.get("TERM", "xterm-256color"))
 
+        def _make_session_leader():
+            # Mirror ProcessSlot.start(): make the slave PTY the child's
+            # controlling terminal.  Without TIOCSCTTY there is no foreground
+            # process group on this PTY, so the slave line discipline's ISIG
+            # silently eats control bytes we forward via the master
+            # (e.g. \x03 from Ctrl+C during `aws ssm start-session`).  With a
+            # controlling terminal the kernel delivers SIGINT to the child,
+            # which well-behaved clients then forward to the remote session.
+            os.setsid()
+            try:
+                fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+            except OSError:
+                pass
+
         try:
             proc = subprocess.Popen(
                 argv,
@@ -745,7 +759,7 @@ class PythonCommandSlot:
                 stdout=slave_fd,
                 stderr=slave_fd,
                 env=env,
-                start_new_session=True,
+                preexec_fn=_make_session_leader,
                 **popen_kwargs,
             )
         finally:
