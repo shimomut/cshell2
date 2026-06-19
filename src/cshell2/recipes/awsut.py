@@ -106,14 +106,14 @@ _instance_type_choices = [
 
 def _get_boto3_client(service_name: str):
     region_name = os.environ.get("AWS_REGION")
-    return boto3.client(service_name, region_name=region_name)
+    return boto3.Session().client(service_name, region_name=region_name)
 
 
 def _get_sagemaker_client(region_name: str | None = None):
     endpoint_url = sagemaker_endpoint or None
     if region_name is None:
         region_name = os.environ.get("AWS_REGION")
-    return boto3.client(
+    return boto3.Session().client(
         sagemaker_service_name,
         region_name=region_name,
         endpoint_url=endpoint_url,
