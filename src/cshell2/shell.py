@@ -2848,7 +2848,6 @@ class Shell:
                     raise exc
                 if exc is not None and not isinstance(exc, KeyboardInterrupt):
                     print(f"{command_name}: error: {exc}")
-                    traceback.print_exc()
                 return slot.exit_code or 0
 
         # External command
