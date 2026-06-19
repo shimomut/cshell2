@@ -3318,13 +3318,41 @@ class Shell:
         else:
             slot.activate(replay_missed=True)
 
-    def _handle_switch(self) -> bool:
+    def _emit_context_separator(self, new_name: str) -> None:
+        """Print a dim full-width separator labelled with the new context name.
+
+        Called when the active context changes (by Ctrl+] in either the line
+        editor or a running process) so the new prompt is visually distinct
+        from the previous context's output.  Cursor is assumed to be at column
+        0 of an otherwise blank line; the separator ends with ``\\r\\n`` so the
+        cursor lands on a fresh line below.
+        """
+        try:
+            cols = os.get_terminal_size().columns
+        except OSError:
+            cols = 80
+        from .lineedit import _wcswidth
+        label = f"─ {new_name} "
+        label_w = _wcswidth(label)
+        fill = "─" * max(1, cols - label_w)
+        sys.stdout.write(f"\r\033[2m{label}{fill}\033[22m\r\n")
+        sys.stdout.flush()
+
+    def _handle_switch(self) -> tuple[bool, str | None]:
         """Handle Ctrl+] switch request.
 
-        Returns True to signal lineedit that it should exit (CONTEXT_CHANGED_SENTINEL)
-        so the run() loop can take over — either to replay buffered output or to
-        enter forwarding mode.  Returns False only when there is nothing pending in
-        the target context (no process_slot at all).
+        Returns ``(needs_forward, new_context_name)``.  ``needs_forward`` is
+        True when lineedit should exit (CONTEXT_CHANGED_SENTINEL) so the run()
+        loop can take over — either to replay buffered output or to enter
+        forwarding mode.  ``new_context_name`` is the name of the now-active
+        context when it differs from the one we entered with (lineedit uses it
+        to decide whether to preserve the old prompt); ``None`` when the
+        context did not change (plain picker cancel).
+
+        When the context changes, a dim separator labelled with the new
+        context's name is printed before returning, so all call sites
+        (line-editor Ctrl+] and forwarding-mode Ctrl+] from vi/etc.) get a
+        consistent visual break between contexts.
         """
         ctx = self.context_manager.current()
         original_name = ctx.name if ctx else None
@@ -3332,6 +3360,15 @@ class Shell:
             ctx.process_slot.deactivate()
 
         result = self._show_switch_menu()
+
+        def _finish(needs_forward: bool) -> tuple[bool, str | None]:
+            new_ctx = self.context_manager.current()
+            new_name = new_ctx.name if new_ctx else None
+            if new_name != original_name:
+                if new_name is not None:
+                    self._emit_context_separator(new_name)
+                return (needs_forward, new_name)
+            return (needs_forward, None)
 
         if result is None:
             # User cancelled.  If a menu action (pop) changed the current
@@ -3343,14 +3380,13 @@ class Shell:
             # time _enter_python_forwarding_mode is called from run().
             new_ctx = self.context_manager.current()
             if new_ctx is None or (new_ctx.name != original_name):
-                if new_ctx and new_ctx.process_slot:
-                    return True
-                return False
+                needs_forward = bool(new_ctx and new_ctx.process_slot)
+                return _finish(needs_forward)
             if ctx and ctx.process_slot and ctx.process_slot.is_alive():
                 slot = ctx.process_slot
                 if not isinstance(slot, PythonCommandSlot):
                     self._resume_pty_slot(slot)
-            return False
+            return (False, None)
 
         target_name, is_new = result
 
@@ -3363,14 +3399,13 @@ class Shell:
             self.context_manager.switch(target_name)
 
         new_ctx = self.context_manager.current()
-        if new_ctx and new_ctx.process_slot:
-            # Don't activate the slot here — leave that to run()'s resume
-            # path so it can choose between snapshot replay (TUI) and
-            # missed-buffer flush (streaming) based on alt-screen state.
-            # Returning True makes lineedit exit so run() takes over
-            # immediately rather than waiting for the user to press Enter.
-            return True
-        return False
+        # Don't activate a new-context slot here — leave that to run()'s resume
+        # path so it can choose between snapshot replay (TUI) and missed-buffer
+        # flush (streaming) based on alt-screen state.  Returning True makes
+        # lineedit exit so run() takes over immediately rather than waiting for
+        # the user to press Enter.
+        needs_forward = bool(new_ctx and new_ctx.process_slot)
+        return _finish(needs_forward)
 
     def _background_count(self) -> int:
         """Count contexts with running processes (excluding current)."""

@@ -175,7 +175,7 @@ class LineEditor:
         history: History,
         get_completions: GetCompletionsFn,
         get_prompt: Callable[[], str],
-        switch_fn: Callable[[], None] | None = None,
+        switch_fn: Callable[[], tuple[bool, str | None]] | None = None,
         get_arg_info: GetArgInfoFn | None = None,
     ):
         self._history = history
@@ -695,14 +695,23 @@ class LineEditor:
 
         assert self._switch_fn is not None
         with self._picker_session():
-            needs_forward = self._switch_fn()
+            needs_forward, new_context_name = self._switch_fn()
 
         # Picker cleanup left cursor at the anchor (col 0 of the blank line).
-        # Move back up to the caret row so _redraw() can take over from there.
-        # Skip the flush so the up-move batches with the redraw the caller
-        # performs next — otherwise the terminal briefly renders the caret at
-        # col 0 of the prompt row.
-        sys.stdout.write(f"\033[{rows_above}A")
+        if new_context_name is not None:
+            # The previous context's prompt + any output above it should stay
+            # on screen.  ``_switch_fn`` already drew a dim separator labelled
+            # with the new context name; we just need to let the next _redraw()
+            # paint the new prompt fresh on the row below.  Resetting
+            # _cursor_row to 0 prevents _redraw() from walking back up over
+            # the old prompt.
+            self._cursor_row = 0
+        else:
+            # Move back up to the caret row so _redraw() can take over from
+            # there.  Skip the flush so the up-move batches with the redraw
+            # the caller performs next — otherwise the terminal briefly
+            # renders the caret at col 0 of the prompt row.
+            sys.stdout.write(f"\033[{rows_above}A")
 
         # Prompt text may have changed after a context switch.
         self._prompt_str = self._get_prompt()
