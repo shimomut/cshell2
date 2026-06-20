@@ -1582,18 +1582,7 @@ def _register_hyperpod(awsut) -> None:
         params = {"ClusterName": cluster_name}
         if "NodeRecovery" in cluster:
             params["NodeRecovery"] = cluster["NodeRecovery"]
-
-        regular = [_sanitize_instance_group(ig)
-                   for ig in cluster.get("InstanceGroups", [])
-                   if ig["InstanceGroupName"] != instance_group_name]
-        restricted = [_sanitize_restricted_instance_group(ig)
-                      for ig in cluster.get("RestrictedInstanceGroups", [])
-                      if ig["InstanceGroupName"] != instance_group_name]
-
-        if regular:
-            params["InstanceGroups"] = regular
-        if restricted:
-            params["RestrictedInstanceGroups"] = restricted
+        params["InstanceGroupsToDelete"] = [instance_group_name]
 
         response = sm.update_cluster(**params)
         print(f"Deleting instance group [{instance_group_name}] started : "
