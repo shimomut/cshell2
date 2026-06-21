@@ -26,6 +26,23 @@ def _venv_exe() -> Path:
     return PROJECT_ROOT / ".venv" / "bin" / "cshell2"
 
 
+def _broadcast_environment_change() -> None:
+    # Registry writes to HKCU\Environment don't propagate to running processes.
+    # explorer.exe (which spawns new cmd.exe/PowerShell windows from the Start
+    # Menu) caches its environment block at logon and only refreshes it on this
+    # broadcast -- without it, new terminals stay stale until logoff/reboot.
+    import ctypes
+
+    HWND_BROADCAST = 0xFFFF
+    WM_SETTINGCHANGE = 0x001A
+    SMTO_ABORTIFHUNG = 0x0002
+    result = ctypes.c_long()
+    ctypes.windll.user32.SendMessageTimeoutW(
+        HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment",
+        SMTO_ABORTIFHUNG, 5000, ctypes.byref(result),
+    )
+
+
 def install_windows() -> None:
     import winreg
 
@@ -60,6 +77,7 @@ def install_windows() -> None:
         else:
             print(f"{bin_dir} already on user PATH.")
 
+    _broadcast_environment_change()
     print(f"Installed shims in {bin_dir}.")
     print("Open a NEW terminal (PowerShell / cmd / Git bash), then run: cshell2")
 
