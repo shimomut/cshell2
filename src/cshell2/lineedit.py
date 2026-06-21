@@ -1037,7 +1037,7 @@ class LineEditor:
         # arg_hint flags always get a space — _prompt_for_arg uses it as a separator.
         if completion.arg_hint:
             value = value + " "
-        elif not value.endswith(("/", "=")) and not post[:1].isspace():
+        elif not completion.value.endswith(("/", "=")) and not post[:1].isspace():
             value = value + " "
         self._buf = pre + value + post
         self._cursor = len(pre) + len(value)
