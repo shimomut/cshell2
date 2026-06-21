@@ -4,7 +4,7 @@ ifeq ($(OS),Windows_NT)
     # Windows: venv scripts live in Scripts/, executables end in .exe.
     # Prefer python3.14 if it's already on PATH; otherwise fall back to the
     # `py` launcher.
-    PY_ON_PATH := $(shell where python3.14 2>nul)
+    PY_ON_PATH := $(shell where python3.14 2>/dev/null)
     ifneq ($(strip $(PY_ON_PATH)),)
         PYTHON_BOOTSTRAP := python3.14
     else
