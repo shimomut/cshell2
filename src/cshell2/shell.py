@@ -237,6 +237,10 @@ class _StdoutProxy(io.TextIOBase):
         self._buf = io.StringIO()
         self._active = False
         self._lock = threading.Lock()
+        # Last char written through the proxy.  Used by the switch handler
+        # to skip its protective newline when the cursor is already at
+        # column 0 (last char ``\n`` / ``\r``).
+        self._last_char: str = "\n"
 
     @property
     def encoding(self) -> str:
@@ -248,6 +252,8 @@ class _StdoutProxy(io.TextIOBase):
 
     def write(self, s: str) -> int:
         with self._lock:
+            if s:
+                self._last_char = s[-1]
             if self._active:
                 return self._real.write(s)
             return self._buf.write(s)
@@ -490,6 +496,7 @@ class PythonCommandSlot:
         self._pty_subproc: subprocess.Popen | None = None
         self._pty_reader: threading.Thread | None = None
         self._pty_buffer = OutputBuffer()
+        self._pty_last_byte: bytes = b"\n"
         self._pty_active = False
         self._pty_lock = threading.Lock()
         # passthrough_input() coordination — events are flipped by the
@@ -626,6 +633,21 @@ class PythonCommandSlot:
 
     def suspend_terminal_modes(self) -> str:
         return ""
+
+    def cursor_at_col0(self) -> bool:
+        """Heuristic: did the most recent output leave the cursor at column 0?
+
+        ``True`` when either the buffering proxy or an active PTY reader's
+        most recent byte was a line terminator.  The switch handler uses
+        this to skip its protective newline (which would otherwise leave a
+        blank line for the common case of a subprocess whose output ends in
+        ``\\n``).
+        """
+        if self._pty_master_fd >= 0:
+            return self._pty_last_byte in (b"\n", b"\r")
+        if self._proxy is not None:
+            return self._proxy._last_char in ("\n", "\r")
+        return True
 
     def write_stdin(self, data: bytes) -> None:
         """Forward bytes from the main loop's stdin reader.
@@ -822,6 +844,7 @@ class PythonCommandSlot:
             if not data:
                 break
             self._pty_buffer.append(data)
+            self._pty_last_byte = data[-1:]
             if self._pty_active:
                 try:
                     sys.stdout.buffer.write(data)
@@ -1046,6 +1069,7 @@ class PipelineSlot(PythonCommandSlot):
         self._pty_subproc: subprocess.Popen | None = None
         self._pty_reader: threading.Thread | None = None
         self._pty_buffer = OutputBuffer()
+        self._pty_last_byte: bytes = b"\n"
         self._pty_active = False
         self._pty_lock = threading.Lock()
         self._input_request = threading.Event()
@@ -3356,7 +3380,29 @@ class Shell:
         ctx = self.context_manager.current()
         original_name = ctx.name if ctx else None
         if ctx and ctx.process_slot:
-            ctx.process_slot.deactivate()
+            slot = ctx.process_slot
+            slot_alive = slot.is_alive()
+            # Snapshot the cursor-column hint *before* deactivating — once
+            # deactivated, new output is buffered (not displayed), but
+            # ``cursor_at_col0()`` reflects what is already on screen, so
+            # the ordering is not strictly required.  Done first anyway for
+            # symmetry with how the line-editor path measures its caret.
+            at_col0 = slot.cursor_at_col0() if slot_alive else True
+            slot.deactivate()
+            if slot_alive and not at_col0:
+                # The picker is anchored at the current cursor position and
+                # its first render does ``\r\033[J`` — clearing the anchor
+                # row from column 0 onwards. If the subprocess's last write
+                # did not end with ``\n`` / ``\r``, the cursor sits mid-line
+                # and the picker would erase that last output line. Move
+                # down to a fresh row first.  When the cursor is already at
+                # column 0 (output ended with ``\n`` — the common case for
+                # streaming tools like ``ping``), skip this so we don't add
+                # a blank row.  The line-editor path (``_do_inline_switch``)
+                # has its own pre-picker positioning and never reaches here
+                # for a live slot.
+                sys.stdout.write("\r\n")
+                sys.stdout.flush()
 
         result = self._show_switch_menu()
 

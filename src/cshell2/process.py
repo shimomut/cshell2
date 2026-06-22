@@ -106,6 +106,13 @@ class ProcessSlot:
         # output so users don't lose lines but also don't see duplicates.
         self.missed: OutputBuffer = OutputBuffer()
         self.active: bool = False
+        # Last byte ever written to the real stdout from this slot.  Used by
+        # the switch-handler to tell whether the cursor is already at column
+        # 0 (last byte ``\n`` / ``\r``) so it can skip the protective newline
+        # it would otherwise emit before opening the picker.  Bytes coming
+        # off the PTY are raw — cooked-mode CRLF translation does not apply
+        # here, so apps that emit a bare ``\n`` still register correctly.
+        self._last_out_byte: bytes = b"\n"
         self.exit_code: int | None = None
         self._exit_event = threading.Event()
         self._reader_thread: threading.Thread | None = None
@@ -220,6 +227,7 @@ class ProcessSlot:
                     break
                 self._track_terminal_modes(data)
                 self.buffer.append(data)
+                self._last_out_byte = data[-1:]
                 if self.active:
                     sys.stdout.buffer.write(data)
                     sys.stdout.buffer.flush()
@@ -282,6 +290,16 @@ class ProcessSlot:
 
     def deactivate(self) -> None:
         self.active = False
+
+    def cursor_at_col0(self) -> bool:
+        """Heuristic: did the most recent PTY output leave the cursor at column 0?
+
+        ``True`` when the last byte written to the real terminal was a line
+        terminator.  The switch handler uses this to skip its protective
+        newline (which would otherwise leave a blank row for the common
+        case of a subprocess whose output ends in ``\\n``).
+        """
+        return self._last_out_byte in (b"\n", b"\r")
 
     def suspend_terminal_modes(self) -> str:
         """Return escape sequences to undo active terminal modes on switch-away."""
