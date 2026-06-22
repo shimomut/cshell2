@@ -9,6 +9,9 @@ description = "A lightweight but powerful terminal shell environment"
 requires-python = ">=3.12"
 dependencies = []
 
+[project.optional-dependencies]
+aws = ["boto3"]
+
 [project.scripts]
 cshell2 = "cshell2.__main__:main"
 
