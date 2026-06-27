@@ -54,6 +54,7 @@ from ..completion import (
     CompletionContext,
     FileCompleter,
 )
+from ..completion_cache import aws_env_key, get_or_fetch
 from ..shell import passthrough_input, passthrough_run
 from ..variables import Var, registry as var_registry
 
@@ -224,32 +225,45 @@ class _CostServiceCompleter(Completer):
     """Completes service names from Cost Explorer (last 30 days)."""
 
     def complete(self, ctx: CompletionContext) -> list[Completion]:
-        today = datetime.datetime.now().date()
         try:
-            client = _get_boto3_client("ce")
-            response = client.get_dimension_values(
-                TimePeriod={
-                    "Start": (today - datetime.timedelta(days=30)).strftime("%Y-%m-%d"),
-                    "End":   (today + datetime.timedelta(days=1)).strftime("%Y-%m-%d"),
-                },
-                Dimension="SERVICE",
+            values = get_or_fetch(
+                ("awsut.cost_services", aws_env_key()),
+                self._fetch,
             )
         except Exception:
             return []
-        return [
-            Completion(value=d["Value"])
-            for d in response.get("DimensionValues", [])
-            if d["Value"].startswith(ctx.prefix)
-        ]
+        return [Completion(value=v) for v in values if v.startswith(ctx.prefix)]
+
+    @staticmethod
+    def _fetch() -> list[str]:
+        today = datetime.datetime.now().date()
+        client = _get_boto3_client("ce")
+        response = client.get_dimension_values(
+            TimePeriod={
+                "Start": (today - datetime.timedelta(days=30)).strftime("%Y-%m-%d"),
+                "End":   (today + datetime.timedelta(days=1)).strftime("%Y-%m-%d"),
+            },
+            Dimension="SERVICE",
+        )
+        return [d["Value"] for d in response.get("DimensionValues", [])]
 
 
 class _Ec2InstanceNameCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         try:
-            ec2 = _get_boto3_client("ec2")
-            response = ec2.describe_instances()
+            names = get_or_fetch(
+                ("awsut.ec2_instance_names", aws_env_key()),
+                self._fetch,
+            )
         except Exception:
             return []
+        return [Completion(value=n, description="ec2 instance")
+                for n in names if n.startswith(ctx.prefix)]
+
+    @staticmethod
+    def _fetch() -> list[str]:
+        ec2 = _get_boto3_client("ec2")
+        response = ec2.describe_instances()
         names: list[str] = []
         for reservation in response.get("Reservations", []):
             for instance in reservation.get("Instances", []):
@@ -257,8 +271,7 @@ class _Ec2InstanceNameCompleter(Completer):
                     if tag["Key"] == "Name":
                         names.append(tag["Value"])
                         break
-        return [Completion(value=n, description="ec2 instance")
-                for n in names if n.startswith(ctx.prefix)]
+        return names
 
 
 def _list_log_groups(prefix: str = "") -> list[dict]:
@@ -281,8 +294,16 @@ def _list_log_groups(prefix: str = "") -> list[dict]:
 
 class _LogGroupCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
+        # ``_list_log_groups`` takes a server-side prefix filter — using
+        # ``ctx.prefix`` directly would defeat caching (every keystroke is a
+        # new key). Cache the unfiltered list per profile/region instead and
+        # filter locally; the keystroke rate is low enough that the larger
+        # initial fetch is the right tradeoff.
         try:
-            groups = _list_log_groups(ctx.prefix)
+            groups = get_or_fetch(
+                ("awsut.log_groups", aws_env_key()),
+                lambda: _list_log_groups(""),
+            )
         except Exception:
             return []
         return [Completion(value=g["logGroupName"], description="log group")
@@ -297,12 +318,16 @@ class _LogStreamCompleter(Completer):
             return []
         group_name = ctx.args[0]
         try:
-            logs = _get_boto3_client("logs")
-            response = logs.describe_log_streams(logGroupName=group_name)
+            streams = get_or_fetch(
+                ("awsut.log_streams", aws_env_key(), group_name),
+                lambda: _get_boto3_client("logs")
+                            .describe_log_streams(logGroupName=group_name)
+                            .get("logStreams", []),
+            )
         except Exception:
             return []
         return [Completion(value=s["logStreamName"], description="log stream")
-                for s in response.get("logStreams", [])
+                for s in streams
                 if s["logStreamName"].startswith(ctx.prefix)]
 
 
@@ -353,12 +378,14 @@ def _list_cf_stacks(
 class _CfStackNameCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         try:
-            cf = _get_boto3_client("cloudformation")
-            stacks = _list_cf_stacks(
-                cf,
-                include_deleted=False,
-                include_successfully_completed=True,
-                include_nested=True,
+            stacks = get_or_fetch(
+                ("awsut.cf_stacks", aws_env_key()),
+                lambda: _list_cf_stacks(
+                    _get_boto3_client("cloudformation"),
+                    include_deleted=False,
+                    include_successfully_completed=True,
+                    include_nested=True,
+                ),
             )
         except Exception:
             return []
@@ -661,11 +688,40 @@ def _ssm_run(
 
 # ─── HyperPod completers ────────────────────────────────────────────────────
 
+def _cached_clusters() -> list[dict]:
+    return get_or_fetch(
+        ("awsut.hyperpod_clusters", aws_env_key(), sagemaker_endpoint, sagemaker_service_name),
+        lambda: _list_hyperpod_clusters_all(_get_sagemaker_client()),
+    )
+
+
+def _cached_describe_cluster(cluster_name: str) -> dict:
+    return get_or_fetch(
+        ("awsut.hyperpod_describe", aws_env_key(), sagemaker_endpoint,
+         sagemaker_service_name, cluster_name),
+        lambda: _get_sagemaker_client().describe_cluster(ClusterName=cluster_name),
+    )
+
+
+def _cached_cluster_nodes(cluster_name: str) -> list[dict]:
+    return get_or_fetch(
+        ("awsut.hyperpod_nodes", aws_env_key(), sagemaker_endpoint,
+         sagemaker_service_name, cluster_name),
+        lambda: _list_hyperpod_cluster_nodes_all(_get_sagemaker_client(), cluster_name),
+    )
+
+
+def _describe_vpc_subnets(seed_subnet: str) -> dict:
+    ec2 = _get_boto3_client("ec2")
+    seed_resp = ec2.describe_subnets(SubnetIds=[seed_subnet])
+    vpc_id = seed_resp["Subnets"][0]["VpcId"]
+    return ec2.describe_subnets(Filters=[{"Name": "vpc-id", "Values": [vpc_id]}])
+
+
 class _HyperpodClusterNameCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         try:
-            sm = _get_sagemaker_client()
-            clusters = _list_hyperpod_clusters_all(sm)
+            clusters = _cached_clusters()
         except Exception:
             return []
         return [Completion(value=c["ClusterName"], description=c.get("ClusterStatus", ""))
@@ -681,8 +737,7 @@ class _HyperpodInstanceGroupNameCompleter(Completer):
             return []
         cluster_name = ctx.args[0]
         try:
-            sm = _get_sagemaker_client()
-            cluster = sm.describe_cluster(ClusterName=cluster_name)
+            cluster = _cached_describe_cluster(cluster_name)
         except Exception:
             return []
         result: list[Completion] = []
@@ -721,8 +776,7 @@ class _HyperpodSubnetIdCompleter(Completer):
             return []
         cluster_name = ctx.args[0]
         try:
-            sm = _get_sagemaker_client()
-            cluster = sm.describe_cluster(ClusterName=cluster_name)
+            cluster = _cached_describe_cluster(cluster_name)
         except Exception:
             return []
 
@@ -742,11 +796,9 @@ class _HyperpodSubnetIdCompleter(Completer):
             return []
 
         try:
-            ec2 = _get_boto3_client("ec2")
-            seed_resp = ec2.describe_subnets(SubnetIds=[seed_subnet])
-            vpc_id = seed_resp["Subnets"][0]["VpcId"]
-            vpc_resp = ec2.describe_subnets(
-                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}],
+            vpc_resp = get_or_fetch(
+                ("awsut.hyperpod_vpc_subnets", aws_env_key(), seed_subnet),
+                lambda: _describe_vpc_subnets(seed_subnet),
             )
         except Exception:
             return []
@@ -779,12 +831,21 @@ class _HyperpodNodeIdCompleter(Completer):
             return []
         cluster_name = ctx.args[0]
         try:
-            sm = _get_sagemaker_client()
-            logs = _get_boto3_client("logs")
-            cluster = sm.describe_cluster(ClusterName=cluster_name)
-            nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
+            unique = get_or_fetch(
+                ("awsut.hyperpod_node_choices", aws_env_key(),
+                 sagemaker_endpoint, sagemaker_service_name,
+                 cluster_name, self.with_cwlog),
+                lambda: self._fetch_choices(cluster_name),
+            )
         except Exception:
             return []
+        return [Completion(value=c, description="node")
+                for c in unique if c.startswith(ctx.prefix)]
+
+    def _fetch_choices(self, cluster_name: str) -> list[str]:
+        sm = _get_sagemaker_client()
+        cluster = _cached_describe_cluster(cluster_name)
+        nodes = _cached_cluster_nodes(cluster_name)
 
         hostnames = _HyperpodHostnames.instance()
         try:
@@ -806,7 +867,8 @@ class _HyperpodNodeIdCompleter(Completer):
             cluster_id = cluster["ClusterArn"].split("/")[-1]
             log_group = f"/aws/sagemaker/Clusters/{cluster_name}/{cluster_id}"
             try:
-                streams = _list_hyperpod_log_streams_all(logs, log_group)
+                streams = _list_hyperpod_log_streams_all(
+                    _get_boto3_client("logs"), log_group)
             except Exception:
                 streams = []
             for stream in streams:
@@ -824,8 +886,7 @@ class _HyperpodNodeIdCompleter(Completer):
             if c not in seen:
                 seen.add(c)
                 unique.append(c)
-        return [Completion(value=c, description="node")
-                for c in unique if c.startswith(ctx.prefix)]
+        return unique
 
 
 # ─── module-level Python-backed Vars ────────────────────────────────────────

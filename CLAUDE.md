@@ -790,6 +790,7 @@ cshell2/
 │       ├── commands.py         # command registry, @command decorator
 │       ├── variables.py        # Var ABC, VarRegistry, EnvVar, VarCompleter
 │       ├── completion.py       # Completer ABC, CompletionContext, built-in completers
+│       ├── completion_cache.py # TTL store for completer fetches; invalidated after every command
 │       ├── context.py          # Context, ContextManager, ContextState
 │       ├── history.py          # history storage and search
 │       ├── lineedit.py         # DIY raw-mode line editor, History, TAB completion glue
@@ -821,6 +822,7 @@ cshell2/
 └── tests/
     ├── test_commands.py
     ├── test_completion.py
+    ├── test_completion_cache.py
     ├── test_context.py
     ├── test_decorators.py
     ├── test_parsing.py
@@ -907,3 +909,5 @@ The thread-local routing (`_ThreadLocalStdin` / `_ThreadLocalStdout` / `_ThreadL
 9. **One reader for real stdin** — when a Python command spawns an interactive subprocess, the child must not inherit fd 0 directly. The main forwarding thread is already reading stdin in raw mode; a second reader (the subprocess) splits keystrokes unpredictably between them. `passthrough_run` enforces the rule by allocating a slot-owned PTY for the child, so the chain stays `stdin → main → master → subprocess`. This is the same architecture `ProcessSlot` uses for external commands; `passthrough_run` extends it to subprocesses launched from inside a `PythonCommandSlot`.
 
 10. **Decorators as a sigil-prefixed grammar, not a built-in command** — `@name [flags] body` is parsed *before* the normal pipeline grammar runs (`pipeline.py::_extract_decorator_prefix`), so the syntax is unambiguous to the parser and can never collide with a POSIX command name. Borrowed from IPython's magics (`%name args`); see [doc/decorators.md](doc/decorators.md). The `{...}` body delimiter is required when the wrapped pipeline contains operators, which makes the decorator's scope visible at a glance and side-steps the `watch -n 5 ls | grep abc` ambiguity that POSIX `watch` is famous for. `Pipeline.run()` lets a decorator body re-enter `Shell._execute_pipeline` so redirects/pipes/Python-stage routing all work the same as at the top level.
+
+11. **TTL cache + command-boundary invalidation for completer fetches** — TAB completion runs the completer on every keystroke while the picker is open (see `lineedit.py::refresh_fn`). Completers that hit AWS APIs (e.g. `aws_completer`, `_HyperpodNodeIdCompleter`) would otherwise issue the same boto3 call four or five times for a single typed token. `completion_cache.py` provides `get_or_fetch(key, fn, ttl=60)` with a process-global store. Keys are tuples that include the active `(AWS_PROFILE, AWS_REGION)` via `aws_env_key()` so the cache doesn't bleed across profiles. `Shell._execute()` calls `completion_cache.invalidate_all()` after each pipeline finishes, so a freshly-mutated resource (e.g. after `awsut hyperpod scale`) is re-fetched on the next TAB — TTL handles the within-session repeats, the invalidation hook handles correctness across commands.

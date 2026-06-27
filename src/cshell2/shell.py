@@ -2085,12 +2085,19 @@ class Shell:
             print(f"cshell2: {e}", file=sys.stderr)
             return
         last_exit = 0
-        for op, pipeline in seq.items:
-            if op == "&&" and last_exit != 0:
-                continue
-            if op == "||" and last_exit == 0:
-                continue
-            last_exit = self._execute_pipeline(pipeline)
+        try:
+            for op, pipeline in seq.items:
+                if op == "&&" and last_exit != 0:
+                    continue
+                if op == "||" and last_exit == 0:
+                    continue
+                last_exit = self._execute_pipeline(pipeline)
+        finally:
+            # User-run commands may have mutated remote state (e.g.
+            # ``awsut hyperpod scale``); drop cached completer fetches so the
+            # next TAB session re-queries.
+            from . import completion_cache
+            completion_cache.invalidate_all()
 
     def _tokenize_stage(self, stage: Stage) -> list[str]:
         """Expand variables, tokenize, alias-expand, and glob-expand a stage's text."""

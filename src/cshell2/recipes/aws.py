@@ -34,6 +34,7 @@ from pathlib import Path
 
 from ..commands import registry as command_registry
 from ..completion import Completer, Completion, CompletionContext
+from ..completion_cache import aws_env_key, get_or_fetch
 from ..variables import EnvVar, Var, registry as var_registry
 
 
@@ -143,8 +144,6 @@ class AwsCompleter(Completer):
         # network.  Tight timeouts cause silent empty results.
         self._timeout = timeout
         self._binary = binary
-        # Cache: (line, point) → list of candidate strings.
-        self._cache: dict[tuple[str, int], list[str]] = {}
 
     def should_activate(self, ctx: CompletionContext) -> bool:
         return shutil.which(self._binary) is not None
@@ -156,12 +155,8 @@ class AwsCompleter(Completer):
         # ctx.line is the input up to the cursor, so cursor position equals
         # its byte length.
         point = len(line.encode("utf-8"))
-        key = (line, point)
-        if key in self._cache:
-            words = self._cache[key]
-        else:
-            words = self._invoke(line, point)
-            self._cache[key] = words
+        key = ("aws_completer", aws_env_key(), line, point)
+        words = get_or_fetch(key, lambda: self._invoke(line, point))
         prefix = ctx.prefix
         return [Completion(value=w) for w in words if w.startswith(prefix)]
 

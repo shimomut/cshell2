@@ -28,6 +28,16 @@ def pytest_configure(config):
     )
 
 
+@pytest.fixture(autouse=True)
+def _clear_completion_cache():
+    """The completion cache is process-global; tests that exercise
+    cached completers must start from a clean slate."""
+    from cshell2 import completion_cache
+    completion_cache.invalidate_all()
+    yield
+    completion_cache.invalidate_all()
+
+
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_pyfunc_call(pyfuncitem):
     """Suspend global stdio capture and reinstall the thread-local stdio
