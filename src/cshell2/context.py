@@ -4,6 +4,8 @@ Each context stores:
 - variables: set/restored on context switch
 - cwd: saved/restored on switch
 - process_slot: optional running subprocess (for multiplexing)
+- history: per-context Up/Down command list (in-memory; global Ctrl-R
+  history is stored separately on disk)
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ class Context:
     variables: dict[str, str] = field(default_factory=dict)
     cwd: str = field(default_factory=os.getcwd)
     process_slot: Any = field(default=None, repr=False)  # ProcessSlot | PythonCommandSlot
+    history: list[str] = field(default_factory=list, repr=False)
 
     @property
     def state(self) -> ContextState:
@@ -50,8 +53,18 @@ class ContextManager:
         self._env_backup: dict[str, str | None] = {}
         self._initial_cwd: str = os.getcwd()
 
-    def create(self, name: str, variables: dict[str, str] | None = None) -> Context:
-        ctx = Context(name=name, variables=dict(variables or {}), cwd=os.getcwd())
+    def create(
+        self,
+        name: str,
+        variables: dict[str, str] | None = None,
+        history: list[str] | None = None,
+    ) -> Context:
+        ctx = Context(
+            name=name,
+            variables=dict(variables or {}),
+            cwd=os.getcwd(),
+            history=list(history or []),
+        )
         self.contexts[name] = ctx
         self._display_order.append(name)
         if self.current_name is None:

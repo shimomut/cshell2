@@ -177,8 +177,13 @@ class LineEditor:
         get_prompt: Callable[[], str],
         switch_fn: Callable[[], tuple[bool, str | None]] | None = None,
         get_arg_info: GetArgInfoFn | None = None,
+        local_history_fn: Callable[[], list[str]] | None = None,
     ):
         self._history = history
+        # Returns the current context's per-session Up/Down history list
+        # (the actual mutable list). Ctrl-R and the on-disk store stay global
+        # (self._history); only Up/Down navigation is scoped per context.
+        self._local_history_fn = local_history_fn
         self._get_completions = get_completions
         self._get_prompt = get_prompt
         self._switch_fn = switch_fn
@@ -221,8 +226,18 @@ class LineEditor:
         self._resize_pending: bool = False
 
     def add_to_history(self, line: str) -> None:
-        """Add *line* to history from outside the editor (e.g. after joining continuation lines)."""
+        """Add *line* to history from outside the editor (e.g. after joining continuation lines).
+
+        Appends to the global on-disk store (used by Ctrl-R and to seed the
+        default context) and to the current context's per-session Up/Down list.
+        """
         self._history.add(line)
+        if self._local_history_fn is not None:
+            stripped = line.rstrip()
+            if stripped:
+                local = self._local_history_fn()
+                if not local or local[-1] != stripped:
+                    local.append(stripped)
 
     @contextlib.contextmanager
     def _picker_session(self):
@@ -514,7 +529,7 @@ class LineEditor:
         if key in (b"\r", b"\n"):
             result = self._buf
             if self._add_to_history:
-                self._history.add(result)
+                self.add_to_history(result)
             return result
 
         # Ctrl+D — EOF if buffer empty
@@ -653,8 +668,14 @@ class LineEditor:
 
     # ── history ──────────────────────────────────────────────────────────────
 
+    def _local_entries(self) -> list[str]:
+        """Per-context Up/Down history (falls back to the global store)."""
+        if self._local_history_fn is not None:
+            return self._local_history_fn()
+        return self._history.entries
+
     def _hist_back(self) -> None:
-        entries = self._history.entries
+        entries = self._local_entries()
         if not entries:
             return
         if self._hist_idx == 0:
@@ -671,7 +692,7 @@ class LineEditor:
         if self._hist_idx == 0:
             self._buf = self._saved_buf
         else:
-            self._buf = self._history.entries[-self._hist_idx]
+            self._buf = self._local_entries()[-self._hist_idx]
         self._cursor = len(self._buf)
 
     # ── context switch ───────────────────────────────────────────────────────

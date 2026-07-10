@@ -252,3 +252,40 @@ def test_cwd_saved_and_restored_on_push_pop():
         os.chdir(original_cwd)
 
     os.chdir(original_cwd)
+
+
+def test_create_with_history_snapshot():
+    cm = ContextManager()
+    cm.create("prod", history=["a", "b"])
+    ctx = cm.contexts["prod"]
+    assert ctx.history == ["a", "b"]
+
+
+def test_history_snapshot_is_copied_not_shared():
+    cm = ContextManager()
+    seed = ["a", "b"]
+    cm.create("prod", history=seed)
+    # Mutating the source list must not leak into the context.
+    seed.append("c")
+    assert cm.contexts["prod"].history == ["a", "b"]
+    # And the context's own list is independent of the source.
+    cm.contexts["prod"].history.append("d")
+    assert seed == ["a", "b", "c"]
+
+
+def test_history_defaults_to_empty():
+    cm = ContextManager()
+    cm.create("prod")
+    assert cm.contexts["prod"].history == []
+
+
+def test_child_history_diverges_from_parent():
+    cm = ContextManager()
+    cm.create("parent", history=["shared"])
+    parent = cm.contexts["parent"]
+    cm.create("child", history=list(parent.history))
+    child = cm.contexts["child"]
+    parent.history.append("parent-only")
+    child.history.append("child-only")
+    assert parent.history == ["shared", "parent-only"]
+    assert child.history == ["shared", "child-only"]

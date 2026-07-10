@@ -92,9 +92,15 @@ change.
 Entry point. Reads input, parses lines, dispatches commands.
 
 - Uses a DIY raw-mode line editor (`lineedit.py`) — no external dependencies
-- Supports `Ctrl+R` history search (via inline picker)
+- Supports `Ctrl+R` history search (via inline picker) — searches the
+  **global** history (every command from every context)
 - Supports `Ctrl+]` to open an inline context-switch picker
-- Maintains command history in `~/.cshell2/history`
+- Maintains a global command history in `~/.cshell2/history` (every executed
+  command, across all contexts). **Up/Down navigation is scoped per context**
+  (each `Context` carries an in-memory `history` list); the global file backs
+  `Ctrl+R` and seeds the `default` context's Up/Down list at startup. A newly
+  created context snapshots its parent's Up/Down list, then they diverge.
+  Per-context lists are in-memory only — not persisted across restarts.
 - Runs external commands in PTY-backed subprocess slots (`process.py`)
 - Executes pipelines (`|`), sequences (`;`, `&&`, `||`), and redirections (`>`, `>>`, `<`, `2>`, `2>&1`)
 
@@ -437,6 +443,9 @@ Contexts represent an environment (e.g., AWS account + region, k8s cluster). Eac
 - `cwd: str` — saved and restored on switch
 - `process_slot: ProcessSlot | None` — optional running subprocess for multiplexing
 - `state: ContextState` — `IDLE`, `RUNNING`, or `EXITED` (derived from `process_slot`)
+- `history: list[str]` — per-context Up/Down command history (in-memory). Seeded
+  from the global history file for `default`, or snapshotted from the parent at
+  `create()` time; `Ctrl+R` ignores this and searches the global store instead
 
 ```python
 class ContextManager:
@@ -444,7 +453,8 @@ class ContextManager:
     current_name: str | None       # which context is active
     stack: list[str]               # push/pop stack (stores names)
 
-    def create(self, name: str, variables: dict | None = None) -> Context: ...
+    def create(self, name: str, variables: dict | None = None,
+               history: list[str] | None = None) -> Context: ...
     def switch(self, name: str): ...           # set current to any existing context
     def push(self, name: str): ...             # save current to stack, switch to name
     def pop(self) -> Context | None: ...       # switch back to previous on stack

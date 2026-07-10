@@ -1272,12 +1272,19 @@ class Shell:
         history_path.parent.mkdir(parents=True, exist_ok=True)
 
         history = History(history_path)
+        # Seed the default context's per-session Up/Down list from the global
+        # on-disk history. New contexts snapshot their parent's list at create
+        # time; Ctrl-R always searches the global store (self._history).
+        default_ctx = self.context_manager.current()
+        if default_ctx is not None:
+            default_ctx.history = list(history.entries)
         self._line_editor = LineEditor(
             history=history,
             get_completions=self._get_completions,
             get_prompt=lambda: get_prompt_func()(self.context_manager),
             switch_fn=self._handle_switch,
             get_arg_info=self._get_arg_info,
+            local_history_fn=self._current_context_history,
         )
 
         self._command_completer = CommandNameCompleter(self.registry)
@@ -1289,6 +1296,18 @@ class Shell:
         # Wire @bg so it can ask the running shell for a new background slot.
         from .decorators import set_background_runner
         set_background_runner(self._run_in_background)
+
+    def _current_context_history(self) -> list[str]:
+        """Return the current context's per-session Up/Down history list.
+
+        This is the actual mutable list on the Context, so the line editor
+        both reads (Up/Down) and appends (on Enter) through it. Falls back to
+        an ephemeral list if somehow there is no active context.
+        """
+        ctx = self.context_manager.current()
+        if ctx is None:
+            return []
+        return ctx.history
 
     def _maybe_decorator_completion(
         self,
@@ -1941,7 +1960,10 @@ class Shell:
                     return
                 parent = self.context_manager.current()
                 inherited = dict(parent.variables) if parent else {}
-                self.context_manager.create(name, variables=inherited)
+                inherited_history = list(parent.history) if parent else []
+                self.context_manager.create(
+                    name, variables=inherited, history=inherited_history
+                )
                 self.context_manager.push(name)
                 print(f"Pushed context '{name}'")
 
@@ -2186,8 +2208,12 @@ class Shell:
             target = existing[name]
             target.process_slot = slot
         else:
-            inherited = dict(self.context_manager.current().variables) if self.context_manager.current() else {}
-            target = self.context_manager.create(name, variables=inherited)
+            parent = self.context_manager.current()
+            inherited = dict(parent.variables) if parent else {}
+            inherited_history = list(parent.history) if parent else []
+            target = self.context_manager.create(
+                name, variables=inherited, history=inherited_history
+            )
             target.process_slot = slot
         return name
 
@@ -3445,7 +3471,10 @@ class Shell:
         if is_new:
             parent = self.context_manager.current()
             inherited = dict(parent.variables) if parent else {}
-            self.context_manager.create(target_name, variables=inherited)
+            inherited_history = list(parent.history) if parent else []
+            self.context_manager.create(
+                target_name, variables=inherited, history=inherited_history
+            )
             self.context_manager.push(target_name)
         else:
             self.context_manager.switch(target_name)
