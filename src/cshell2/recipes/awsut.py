@@ -412,9 +412,10 @@ def _sanitize_instance_group(ig: dict) -> dict:
               "SoftwareUpdateStatus", "TargetStateCount",
               "ActiveOperations", "FailureMessages",
               "TrainingPlanStatus", "CurrentImageId",
-              "ImageVersionStatus"):
+              "ImageVersionStatus", "CurrentImageReleaseVersion"):
         _drop(ig, k)
     _rename(ig, "DesiredImageId", "ImageId")
+    _rename(ig, "DesiredImageReleaseVersion", "ImageReleaseVersion")
     if "KubernetesConfig" in ig:
         kc = ig["KubernetesConfig"]
         _rename(kc, "DesiredLabels", "Labels")
