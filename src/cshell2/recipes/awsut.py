@@ -9,7 +9,7 @@ Provides the ``awsut`` command tree:
 * ``awsut cf list|wait|open``
 * ``awsut hyperpod create|update|scale|add-ig|remove-ig|
   delete-nodes|reboot-nodes|replace-nodes|upgrade-ami|delete|
-  list|describe|wait|log|ssm|ssh|run|search-capacity|
+  list|describe|watch|log|ssm|ssh|run|search-capacity|
   kubeconfig|events``
 
 Profile and region switching live in the ``aws`` recipe as ``Var`` entries
@@ -192,7 +192,7 @@ def _max_len(items, key) -> int:
     return n
 
 
-# ─── progress dots used by `cf wait` and `hyperpod wait` ────────────────────
+# ─── progress dots used by `cf wait` ────────────────────────────────────────
 
 class _ProgressDots:
     def __init__(self):
@@ -465,11 +465,15 @@ def _list_hyperpod_cluster_nodes_all(sagemaker_client, cluster_name: str) -> lis
     return nodes
 
 
-def _list_hyperpod_cluster_events_all(sagemaker_client, cluster_name: str) -> list[dict]:
+def _list_hyperpod_cluster_events_all(
+    sagemaker_client, cluster_name: str, event_time_after=None,
+) -> list[dict]:
     events: list[dict] = []
     next_token = None
     while True:
         params = {"ClusterName": cluster_name}
+        if event_time_after is not None:
+            params["EventTimeAfter"] = event_time_after
         if next_token:
             params["NextToken"] = next_token
         response = sagemaker_client.list_cluster_events(**params)
@@ -478,6 +482,32 @@ def _list_hyperpod_cluster_events_all(sagemaker_client, cluster_name: str) -> li
         if not next_token:
             break
     return events
+
+
+def _hyperpod_transitions_finished(cluster: dict, nodes: list[dict]) -> bool:
+    """Return True when the cluster has no in-flight transitions left.
+
+    This is the same condition the ``hyperpod wait`` command uses to decide
+    it can stop, expressed as a single predicate:
+
+    * cluster status is a terminal one (``InService`` / ``Failed``),
+    * every instance group is terminal *and* its current count matches the
+      target count (i.e. no scaling in progress), and
+    * no node is in a non-terminal status (``Pending`` and every other
+      not-yet-``Running``/``Failed`` state counts as still transitioning).
+    """
+    if cluster["ClusterStatus"] not in ("InService", "Failed"):
+        return False
+    for ig in (cluster.get("InstanceGroups", [])
+               + cluster.get("RestrictedInstanceGroups", [])):
+        if ig["Status"] not in ("InService", "Failed"):
+            return False
+        if ig["CurrentCount"] != ig["TargetCount"]:
+            return False
+    for node in nodes:
+        if node["InstanceStatus"]["Status"] not in ("Running", "Failed"):
+            return False
+    return True
 
 
 def _list_hyperpod_log_streams_all(logs_client, log_group: str) -> list[dict]:
@@ -1911,60 +1941,161 @@ def _register_hyperpod(awsut) -> None:
                     print(indent + line)
 
     @hyperpod.command(
-        "wait", help="Wait for asynchronous cluster operations",
+        "watch",
+        help="Watch and report cluster status changes (events + nodes)",
         params=[
-            arg("cluster_name", nargs="?",
-                completer=_HyperpodClusterNameCompleter(),
-                help="Cluster name (omit to wait cluster creation/deletion)"),
+            arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
+            arg("-f", "--follow", action="store_true",
+                help="Keep watching after all transitions finish "
+                     "(default: stop once settled)"),
+            arg("-n", "--interval", type=float, default=10.0, metavar="SEC",
+                help="Poll interval in seconds (default 10)"),
         ],
     )
-    def _wait(cluster_name=None):
+    def _watch(cluster_name, follow=False, interval=10.0):
         sm = _get_sagemaker_client()
-        progress = _ProgressDots()
 
-        if cluster_name is None:
-            while True:
-                status_list = []
-                for cluster in _list_hyperpod_clusters_all(sm):
-                    if cluster["ClusterStatus"] not in ("InService", "Failed"):
-                        status_list.append(f"{cluster['ClusterName']}:{cluster['ClusterStatus']}")
-                progress.tick(", ".join(status_list))
-                if not status_list:
-                    progress.tick(None)
-                    break
-                time.sleep(5)
-            return
+        def stamp() -> str:
+            return datetime.datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+
+        def emit(line: str) -> None:
+            print(f"[{stamp()}] {line}", flush=True)
+
+        # Baseline snapshot — report changes relative to it, not the whole
+        # world on the first tick.
+        #
+        # Events are fetched with a moving ``EventTimeAfter`` watermark rather
+        # than pulling the full history every tick and filtering client-side:
+        #   * the watermark starts at command-execution time, so events older
+        #     than "now" are never fetched or reported, and
+        #   * each tick advances it to the newest event seen, so subsequent
+        #     calls only return events that arrived since.
+        # ``seen_events`` holds just the event ids sitting exactly on the
+        # watermark, to de-dup the inclusive-boundary event(s) between ticks.
+        event_watermark = datetime.datetime.now(datetime.timezone.utc)
+        seen_events: set[str] = set()
+        prev_cluster_status: str | None = None
+        prev_ig: dict[str, tuple] = {}        # ig_name -> (status, current, target)
+        prev_nodes: dict[str, str] = {}       # node_id -> node status
+        first = True
+
+        emit(f"Watching cluster [{cluster_name}] "
+             f"(mode: {'follow' if follow else 'until settled'})")
 
         while True:
-            status_list = []
             try:
                 cluster = sm.describe_cluster(ClusterName=cluster_name)
             except sm.exceptions.ResourceNotFound:
-                print(f"Cluster [{cluster_name}] not found.")
+                emit(f"Cluster [{cluster_name}] not found.")
                 return
 
-            if cluster["ClusterStatus"] not in ("InService", "Failed"):
-                status_list.append(f"{cluster_name}:{cluster['ClusterStatus']}")
+            try:
+                nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
+            except sm.exceptions.ResourceNotFound:
+                emit(f"Cluster [{cluster_name}] not found.")
+                return
 
-            for ig in cluster["InstanceGroups"]:
-                ig_name = ig["InstanceGroupName"]
-                if ig["Status"] not in ("InService", "Failed"):
-                    status_list.append(f"{ig_name}:{ig['Status']}")
-                if ig["CurrentCount"] != ig["TargetCount"]:
-                    status_list.append(f"{ig_name}:Scaling({ig['CurrentCount']}->{ig['TargetCount']})")
+            try:
+                events = _list_hyperpod_cluster_events_all(
+                    sm, cluster_name, event_time_after=event_watermark,
+                )
+            except Exception as e:              # events are best-effort
+                events = []
+                emit(f"(warning: could not list cluster events: {e})")
 
-            for node in _list_hyperpod_cluster_nodes_all(sm, cluster_name):
-                ig_name = node["InstanceGroupName"]
+            # ── cluster status ──────────────────────────────────────────
+            cluster_status = cluster["ClusterStatus"]
+            if cluster_status != prev_cluster_status:
+                if not first:
+                    emit(f"Cluster status: {prev_cluster_status} -> "
+                         f"{cluster_status}")
+                    if cluster.get("FailureMessage"):
+                        emit(f"  Failure message: {cluster['FailureMessage']}")
+                prev_cluster_status = cluster_status
+
+            # ── instance groups (status + scaling) ──────────────────────
+            all_igs = (cluster.get("InstanceGroups", [])
+                       + cluster.get("RestrictedInstanceGroups", []))
+            cur_ig: dict[str, tuple] = {}
+            for ig in all_igs:
+                name = ig["InstanceGroupName"]
+                state = (ig["Status"], ig["CurrentCount"], ig["TargetCount"])
+                cur_ig[name] = state
+                if not first and prev_ig.get(name) != state:
+                    prev = prev_ig.get(name)
+                    if prev is None:
+                        emit(f"InstanceGroup {name}: appeared "
+                             f"[{state[0]} {state[1]}/{state[2]}]")
+                    else:
+                        emit(f"InstanceGroup {name}: "
+                             f"{prev[0]}({prev[1]}/{prev[2]}) -> "
+                             f"{state[0]}({state[1]}/{state[2]})")
+            if not first:
+                for name in prev_ig.keys() - cur_ig.keys():
+                    emit(f"InstanceGroup {name}: removed")
+            prev_ig = cur_ig
+
+            # ── nodes (appeared / disappeared / status change) ──────────
+            cur_nodes: dict[str, str] = {}
+            node_ig: dict[str, str] = {}
+            for node in nodes:
                 node_id = node["InstanceId"]
-                node_status = node["InstanceStatus"]["Status"]
-                if node_status not in ("Running", "Failed"):
-                    status_list.append(f"{ig_name}:{node_id}:{node_status}")
+                status = node["InstanceStatus"]["Status"]
+                cur_nodes[node_id] = status
+                node_ig[node_id] = node["InstanceGroupName"]
+                if not first:
+                    prev = prev_nodes.get(node_id)
+                    if prev is None:
+                        emit(f"Node {node['InstanceGroupName']}/{node_id}: "
+                             f"appeared [{status}]")
+                    elif prev != status:
+                        msg = node["InstanceStatus"].get("Message")
+                        line = (f"Node {node['InstanceGroupName']}/{node_id}: "
+                                f"{prev} -> {status}")
+                        if msg:
+                            line += f"  ({msg})"
+                        emit(line)
+            if not first:
+                for node_id in prev_nodes.keys() - cur_nodes.keys():
+                    emit(f"Node {node_id}: disappeared "
+                         f"(was {prev_nodes[node_id]})")
+            prev_nodes = cur_nodes
 
-            progress.tick(", ".join(status_list))
-            if not status_list:
-                progress.tick(None)
-                break
-            time.sleep(5)
+            # ── new events ──────────────────────────────────────────────
+            # The API filtered to events at/after the watermark; drop the
+            # boundary event(s) we already reported last tick, then report the
+            # rest in chronological order.
+            new_events = [e for e in events if e["EventId"] not in seen_events]
+            new_events.sort(key=lambda e: e["EventTime"])
+            for event in new_events:
+                target = event.get("InstanceId") or event.get("InstanceGroupName") or ""
+                target = f" {target}" if target else ""
+                emit(f"Event {event['ResourceType']}{target}: "
+                     f"{event['Description']}")
+
+            # Advance the watermark to the newest event time seen so the next
+            # call only returns events after it.  Keep the ids sitting exactly
+            # on the new watermark in ``seen_events`` to de-dup the inclusive
+            # boundary next tick.
+            if events:
+                newest = max(e["EventTime"] for e in events)
+                event_watermark = newest
+                seen_events = {e["EventId"] for e in events
+                               if e["EventTime"] == newest}
+
+            if first:
+                emit(f"Baseline: cluster={cluster_status}, "
+                     f"{len(all_igs)} instance group(s), "
+                     f"{len(nodes)} node(s)")
+                first = False
+
+            # ── stop condition ──────────────────────────────────────────
+            settled = _hyperpod_transitions_finished(cluster, nodes)
+            if settled and not follow:
+                emit("All transitions finished. Stopping.")
+                return
+
+            time.sleep(interval)
 
     @hyperpod.command(
         "log", help="Print log from a cluster node",
