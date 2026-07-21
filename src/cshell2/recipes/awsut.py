@@ -6,7 +6,7 @@ Provides the ``awsut`` command tree:
 * ``awsut recent-cost``              — show recent AWS cost
 * ``awsut ec2 list|start|stop|reboot``
 * ``awsut logs list|monitor|export``
-* ``awsut cf list|wait|open``
+* ``awsut cloudformation list|wait|open``
 * ``awsut hyperpod create|update|scale|add-ig|remove-ig|
   delete-nodes|reboot-nodes|replace-nodes|upgrade-ami|delete|
   list|describe|watch|log|ssm|ssh|run|search-capacity|
@@ -68,12 +68,12 @@ from ..variables import Var, registry as var_registry
 #     awsut.console_url_modifier_func = lambda account, role, url: ...
 
 console_pages: dict[str, str] = {
-    "home":     "https://console.aws.amazon.com/console/home",
-    "s3":       "https://console.aws.amazon.com/s3/home",
-    "iam":      "https://console.aws.amazon.com/iam/home",
-    "cf":       "https://console.aws.amazon.com/cloudformation/home",
-    "cost":     "https://console.aws.amazon.com/costmanagement/home#/cost-explorer?granularity=Daily&historicalRelativeRange=LAST_7_DAYS",
-    "hyperpod": "https://console.aws.amazon.com/sagemaker/home#/cluster-management",
+    "home":           "https://console.aws.amazon.com/console/home",
+    "s3":             "https://console.aws.amazon.com/s3/home",
+    "iam":            "https://console.aws.amazon.com/iam/home",
+    "cloudformation": "https://console.aws.amazon.com/cloudformation/home",
+    "cost":           "https://console.aws.amazon.com/costmanagement/home#/cost-explorer?granularity=Daily&historicalRelativeRange=LAST_7_DAYS",
+    "hyperpod":       "https://console.aws.amazon.com/sagemaker/home#/cluster-management",
 }
 
 console_url_modifier_func: Callable[[str, str, str], str] | None = None
@@ -192,7 +192,7 @@ def _max_len(items, key) -> int:
     return n
 
 
-# ─── progress dots used by `cf wait` ────────────────────────────────────────
+# ─── progress dots used by `cloudformation wait` ────────────────────────────
 
 class _ProgressDots:
     def __init__(self):
@@ -1320,7 +1320,7 @@ def _register_logs(awsut) -> None:
 
 
 def _register_cf(awsut) -> None:
-    cf = awsut.command("cf", help="CloudFormation commands")
+    cf = awsut.command("cloudformation", help="CloudFormation commands")
 
     @cf.command(
         "list", help="List CloudFormation stacks",
