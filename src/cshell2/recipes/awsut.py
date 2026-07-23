@@ -1977,6 +1977,10 @@ def _register_hyperpod(awsut) -> None:
         prev_cluster_status: str | None = None
         prev_ig: dict[str, tuple] = {}        # ig_name -> (status, current, target)
         prev_nodes: dict[str, str] = {}       # node_id -> node status
+        # Scaling / readiness snapshots — re-reported whenever they change (and
+        # at baseline), independent of the per-item transition lines above.
+        prev_scaling: dict[str, tuple] = {}   # ig_name -> (current, target), only when current != target
+        prev_not_running: dict[str, tuple] = {}  # node_id -> (ig_name, status), only when status != Running
         first = True
 
         emit(f"Watching cluster [{cluster_name}] "
@@ -2061,6 +2065,49 @@ def _register_hyperpod(awsut) -> None:
                          f"(was {prev_nodes[node_id]})")
             prev_nodes = cur_nodes
 
+            if first:
+                emit(f"Baseline: cluster={cluster_status}, "
+                     f"{len(all_igs)} instance group(s), "
+                     f"{len(nodes)} node(s)")
+
+            # ── scaling summary (instance groups where current != target) ──
+            # Report the set of in-flight scaling operations at baseline and
+            # again whenever that set changes.
+            cur_scaling = {
+                name: (state[1], state[2])
+                for name, state in cur_ig.items()
+                if state[1] != state[2]
+            }
+            if cur_scaling != prev_scaling:
+                if cur_scaling:
+                    summary = ", ".join(
+                        f"{name} {cur:d}/{tgt:d}"
+                        for name, (cur, tgt) in sorted(cur_scaling.items())
+                    )
+                    emit(f"Scaling in progress: {summary}")
+                elif not first:
+                    emit("Scaling in progress: none (all groups at target)")
+                prev_scaling = cur_scaling
+
+            # ── non-Running nodes ───────────────────────────────────────
+            # List every node that is not yet Running at baseline and again
+            # whenever that list (or any node's status in it) changes.
+            cur_not_running = {
+                node_id: (node_ig[node_id], status)
+                for node_id, status in cur_nodes.items()
+                if status != "Running"
+            }
+            if cur_not_running != prev_not_running:
+                if cur_not_running:
+                    emit(f"Nodes not Running ({len(cur_not_running)}):")
+                    for node_id, (ig_name, status) in sorted(
+                        cur_not_running.items(), key=lambda kv: (kv[1][0], kv[0])
+                    ):
+                        emit(f"    {ig_name}/{node_id}: {status}")
+                elif not first:
+                    emit("Nodes not Running: none (all nodes Running)")
+                prev_not_running = cur_not_running
+
             # ── new events ──────────────────────────────────────────────
             # The API filtered to events at/after the watermark; drop the
             # boundary event(s) we already reported last tick, then report the
@@ -2070,7 +2117,9 @@ def _register_hyperpod(awsut) -> None:
             for event in new_events:
                 target = event.get("InstanceId") or event.get("InstanceGroupName") or ""
                 target = f" {target}" if target else ""
-                emit(f"Event {event['ResourceType']}{target}: "
+                level = event.get("EventLevel")
+                level = f"[{level}] " if level else ""
+                emit(f"Event {level}{event['ResourceType']}{target}: "
                      f"{event['Description']}")
 
             # Advance the watermark to the newest event time seen so the next
@@ -2083,11 +2132,7 @@ def _register_hyperpod(awsut) -> None:
                 seen_events = {e["EventId"] for e in events
                                if e["EventTime"] == newest}
 
-            if first:
-                emit(f"Baseline: cluster={cluster_status}, "
-                     f"{len(all_igs)} instance group(s), "
-                     f"{len(nodes)} node(s)")
-                first = False
+            first = False
 
             # ── stop condition ──────────────────────────────────────────
             settled = _hyperpod_transitions_finished(cluster, nodes)
