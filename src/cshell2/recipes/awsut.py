@@ -2006,6 +2006,10 @@ def _register_hyperpod(awsut) -> None:
         # at baseline), independent of the per-item transition lines above.
         prev_scaling: dict[str, tuple] = {}   # ig_name -> (current, target), only when current != target
         prev_not_running: dict[str, tuple] = {}  # node_id -> (ig_name, status), only when status != Running
+        # Some clusters (NodeProvisioningMode != Continuous) don't support
+        # ListClusterEvents at all.  Warn once, then stop calling it — the
+        # error is identical every tick and would otherwise spam the output.
+        events_supported = True
         first = True
 
         emit(f"Watching cluster [{cluster_name}] "
@@ -2024,13 +2028,21 @@ def _register_hyperpod(awsut) -> None:
                 emit(f"Cluster [{cluster_name}] not found.")
                 return
 
-            try:
-                events = _list_hyperpod_cluster_events_all(
-                    sm, cluster_name, event_time_after=event_watermark,
-                )
-            except Exception as e:              # events are best-effort
-                events = []
-                emit(f"(warning: could not list cluster events: {e})")
+            events = []
+            if events_supported:
+                try:
+                    events = _list_hyperpod_cluster_events_all(
+                        sm, cluster_name, event_time_after=event_watermark,
+                    )
+                except Exception as e:          # events are best-effort
+                    emit(f"(warning: could not list cluster events: {e})")
+                    # ValidationException means the cluster fundamentally
+                    # doesn't support ListClusterEvents (e.g. non-Continuous
+                    # provisioning); the error repeats every tick, so stop
+                    # calling it after warning once.  Other errors may be
+                    # transient, so keep retrying those.
+                    if "ValidationException" in str(e):
+                        events_supported = False
 
             # ── cluster status ──────────────────────────────────────────
             cluster_status = cluster["ClusterStatus"]
