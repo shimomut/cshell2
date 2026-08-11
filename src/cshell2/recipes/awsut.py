@@ -6,7 +6,7 @@ Provides the ``awsut`` command tree:
 * ``awsut recent-cost``              — show recent AWS cost
 * ``awsut ec2 list|start|stop|reboot``
 * ``awsut logs list|monitor|export``
-* ``awsut cloudformation list|wait|open``
+* ``awsut cloudformation list|watch|open``
 * ``awsut hyperpod create|update|scale|add-ig|remove-ig|
   delete-nodes|reboot-nodes|replace-nodes|upgrade-ami|delete|
   list|describe|watch|log|ssm|ssh|run|search-capacity|
@@ -192,7 +192,7 @@ def _max_len(items, key) -> int:
     return n
 
 
-# ─── progress dots used by `cloudformation wait` ────────────────────────────
+# ─── progress dots used by `cloudformation watch` ───────────────────────────
 
 class _ProgressDots:
     def __init__(self):
@@ -373,6 +373,64 @@ def _list_cf_stacks(
     if not include_nested:
         stacks = [s for s in stacks if "ParentId" not in s]
     return stacks
+
+
+def _osc8(url: str, label: str) -> str:
+    """Wrap ``label`` in an OSC 8 hyperlink escape so terminals that support
+    it (including the VSCode integrated terminal) render a clickable link.
+    Terminals that don't support OSC 8 simply show ``label`` (the URL), which
+    most terminals auto-link anyway."""
+    return f"\x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\"
+
+
+def _cf_console_url(stack_arn: str) -> str:
+    """Build the CloudFormation console URL for a stack's events view,
+    applying ``console_url_modifier_func`` when configured."""
+    region = _get_region() or "us-east-1"
+    encoded = urllib.parse.quote(stack_arn)
+    url = (f"https://{region}.console.aws.amazon.com/cloudformation/home"
+           f"?region={region}#/stacks/events?stackId={encoded}")
+    if console_url_modifier_func is not None:
+        profile_name = _get_profile()
+        profile = _get_all_profiles().get(profile_name, {})
+        url = console_url_modifier_func(
+            profile.get("account", ""), profile.get("role", ""), url,
+        )
+    return url
+
+
+def _cf_failure_reasons(cf_client, stack_name: str) -> list[str]:
+    """Return the resource-level failure reasons for a stack's most recent
+    operation, taken from ``describe_stack_events`` (most-recent page)."""
+    try:
+        response = cf_client.describe_stack_events(StackName=stack_name)
+    except Exception:                       # best-effort — never break the watch
+        return []
+    reasons: list[str] = []
+    for event in response.get("StackEvents", []):
+        if not event.get("ResourceStatus", "").endswith("_FAILED"):
+            continue
+        reason = event.get("ResourceStatusReason")
+        if not reason:
+            continue
+        line = f"{event.get('LogicalResourceId', '')}: {reason}"
+        if line not in reasons:
+            reasons.append(line)
+    return reasons
+
+
+def _report_cf_failure(cf_client, stack: dict) -> None:
+    """Print a failed stack's status, failure reason(s) and a clickable
+    console hyperlink."""
+    name = stack["StackName"]
+    print(f"{name}: {stack['StackStatus']}")
+    reason = stack.get("StackStatusReason")
+    if reason:
+        print(f"  {reason}")
+    for line in _cf_failure_reasons(cf_client, name):
+        print(f"  {line}")
+    url = _cf_console_url(stack.get("StackId", name))
+    print(f"  Console: {_osc8(url, url)}")
 
 
 class _CfStackNameCompleter(Completer):
@@ -1377,10 +1435,11 @@ def _register_cf(awsut) -> None:
                 f"{'(nested)' if nested else ''}"
             )
 
-    @cf.command("wait", help="Wait until all CloudFormation operations finish")
-    def _cf_wait():
+    @cf.command("watch", help="Watch CloudFormation operations until they finish")
+    def _cf_watch():
         cf_client = _get_boto3_client("cloudformation")
         progress = _ProgressDots()
+        stacks: list[dict] = []
         while True:
             status_list = []
             stacks = _list_cf_stacks(cf_client, include_nested=True)
@@ -1392,6 +1451,12 @@ def _register_cf(awsut) -> None:
                 progress.tick(None)
                 break
             time.sleep(5)
+
+        # Report any stacks that ended in a failed state (e.g. DELETE_FAILED),
+        # including the failure reason and a clickable console hyperlink.
+        failed = [s for s in stacks if s["StackStatus"].endswith("_FAILED")]
+        for stack in failed:
+            _report_cf_failure(cf_client, stack)
 
     @cf.command(
         "open", help="Open the CloudFormation management console",
