@@ -525,7 +525,13 @@ def _list_hyperpod_cluster_nodes_all(sagemaker_client, cluster_name: str) -> lis
 
 def _list_hyperpod_cluster_events_all(
     sagemaker_client, cluster_name: str, event_time_after=None,
+    max_results=None,
 ) -> list[dict]:
+    """List cluster events (newest first).
+
+    ``max_results`` caps how many events are returned and stops pagination
+    early once enough have been collected.
+    """
     events: list[dict] = []
     next_token = None
     while True:
@@ -537,9 +543,10 @@ def _list_hyperpod_cluster_events_all(
         response = sagemaker_client.list_cluster_events(**params)
         events += response["Events"]
         next_token = response.get("NextToken")
-        if not next_token:
+        if not next_token or (max_results is not None
+                              and len(events) >= max_results):
             break
-    return events
+    return events[:max_results] if max_results is not None else events
 
 
 def _hyperpod_event_failure_message(sagemaker_client, cluster_name: str,
@@ -548,9 +555,10 @@ def _hyperpod_event_failure_message(sagemaker_client, cluster_name: str,
 
     The event summaries returned by ``list_cluster_events`` carry only a
     ``Description``; the failure message lives in the detailed event under
-    ``EventDetails.EventMetadata.{Cluster|InstanceGroup|InstanceGroupScaling|
-    Instance}.FailureMessage``.  Returns the first non-empty message found, or
-    ``None`` if the call fails or no message is present.
+    ``EventDetails.EventDetails.EventMetadata.{Cluster|InstanceGroup|
+    InstanceGroupScaling|Instance}.FailureMessage`` (the API nests an inner
+    ``EventDetails`` inside the top-level one).  Returns the first non-empty
+    message found, or ``None`` if the call fails or no message is present.
     """
     try:
         response = sagemaker_client.describe_cluster_event(
@@ -558,7 +566,12 @@ def _hyperpod_event_failure_message(sagemaker_client, cluster_name: str,
         )
     except Exception:                       # best-effort — never break the watch
         return None
-    metadata = response.get("EventDetails", {}).get("EventMetadata", {})
+    outer = response.get("EventDetails", {}) or {}
+    # Metadata lives under the inner EventDetails; fall back to the flat shape
+    # in case the API response layout changes.
+    metadata = (outer.get("EventDetails", {}) or {}).get("EventMetadata")
+    if not metadata:
+        metadata = outer.get("EventMetadata", {}) or {}
     for section in ("Instance", "InstanceGroupScaling", "InstanceGroup",
                     "Cluster"):
         message = (metadata.get(section) or {}).get("FailureMessage")
@@ -2672,19 +2685,32 @@ def _register_hyperpod(awsut) -> None:
         "events", help="Print historical events",
         params=[
             arg("cluster_name", completer=_HyperpodClusterNameCompleter()),
-            arg("--format", choices=["csv", "jsonl"], default="csv",
-                help="Output format"),
+            arg("--format", choices=["table", "csv", "jsonl"], default="table",
+                help="Output format (default: aligned table)"),
+            arg("--max", dest="max_events", type=int, default=100, metavar="N",
+                help="Maximum number of (most recent) events to show "
+                     "(default 100; 0 = no limit)"),
             arg("--details", action="store_true",
                 help="Dump detailed JSON description of each event"),
         ],
     )
-    def _events(cluster_name, format, details):
+    def _events(cluster_name, format, max_events, details):
         sm = _get_sagemaker_client()
+        limit = None if max_events in (0, None) else max_events
         try:
-            events = _list_hyperpod_cluster_events_all(sm, cluster_name)
+            events = _list_hyperpod_cluster_events_all(
+                sm, cluster_name, max_results=limit)
         except sm.exceptions.ResourceNotFound:
             print(f"Cluster [{cluster_name}] not found.")
             return
+
+        def failure_message(event):
+            # Error/Warn events carry a FailureMessage only in the detailed
+            # event; fetch it so the cause isn't hidden.
+            if event.get("EventLevel") not in ("Error", "Warn"):
+                return ""
+            return _hyperpod_event_failure_message(
+                sm, cluster_name, event["EventId"]) or ""
 
         if details:
             for event in events:
@@ -2696,18 +2722,59 @@ def _register_hyperpod(awsut) -> None:
                     print(json.dumps(response, default=str, indent=2))
                 except Exception as e:
                     print(f"Error fetching details for event {event_id}: {e}")
-        elif format == "csv":
-            print("Timestamp\tResourceType\tInstanceGroup\tInstance\tDescription")
+        elif format in ("table", "csv"):
+            # Description and FailureMessage share the last column: the
+            # description's length is unpredictable, so padding it to the widest
+            # cell would leave a ragged gap before a separate FailureMessage
+            # column.  Appending the message keeps every row single-line and the
+            # cause right next to its description.
+            headers = ["Timestamp", "EventLevel", "ResourceType",
+                       "InstanceGroup", "Instance", "Description"]
+            rows = []
             for event in events:
-                print(
-                    f"{event['EventTime']}\t"
-                    f"{event['ResourceType']}\t"
-                    f"{event.get('InstanceGroupName', '')}\t"
-                    f"{event.get('InstanceId', '')}\t"
-                    f"{event['Description']}"
-                )
+                # Collapse newlines so each row stays a single line.
+                message = " ".join(failure_message(event).split())
+                description = event["Description"]
+                if message:
+                    description = f"{description} — {message}"
+                rows.append([
+                    str(event["EventTime"]),
+                    event.get("EventLevel", ""),
+                    event["ResourceType"],
+                    event.get("InstanceGroupName", ""),
+                    event.get("InstanceId", ""),
+                    description,
+                ])
+            if format == "csv":
+                print("\t".join(headers))
+                for row in rows:
+                    print("\t".join(row))
+            else:
+                # Left-justify every column but the last to the widest cell
+                # (header included) so columns line up in the terminal.
+                widths = [
+                    max(len(headers[i]), *(len(r[i]) for r in rows))
+                    if rows else len(headers[i])
+                    for i in range(len(headers))
+                ]
+
+                def fmt(cells):
+                    return "  ".join(
+                        cell.ljust(widths[i]) if i < len(cells) - 1 else cell
+                        for i, cell in enumerate(cells)
+                    )
+
+                print(fmt(headers))
+                for row in rows:
+                    print(fmt(row))
         elif format == "jsonl":
             for event in events:
+                # Enrich Error/Warn summaries with the FailureMessage that only
+                # lives in the detailed event, mirroring the table output.
+                if "FailureMessage" not in event:
+                    message = failure_message(event)
+                    if message:
+                        event = {**event, "FailureMessage": message}
                 print(json.dumps(event, default=str))
 
 
