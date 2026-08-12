@@ -2728,8 +2728,8 @@ def _register_hyperpod(awsut) -> None:
             # cell would leave a ragged gap before a separate FailureMessage
             # column.  Appending the message keeps every row single-line and the
             # cause right next to its description.
-            headers = ["Timestamp", "EventLevel", "ResourceType",
-                       "InstanceGroup", "Instance", "Description"]
+            headers = ["Timestamp", "Level", "Type",
+                       "Group", "Instance", "Description"]
             rows = []
             for event in events:
                 # Collapse newlines so each row stays a single line.
@@ -2737,8 +2737,14 @@ def _register_hyperpod(awsut) -> None:
                 description = event["Description"]
                 if message:
                     description = f"{description} — {message}"
+                event_time = event["EventTime"]
+                # Trim to second precision (drop microseconds + tz offset) to
+                # keep the timestamp column narrow.
+                timestamp = (event_time.strftime("%Y-%m-%d %H:%M:%S")
+                             if hasattr(event_time, "strftime")
+                             else str(event_time))
                 rows.append([
-                    str(event["EventTime"]),
+                    timestamp,
                     event.get("EventLevel", ""),
                     event["ResourceType"],
                     event.get("InstanceGroupName", ""),
@@ -2758,15 +2764,33 @@ def _register_hyperpod(awsut) -> None:
                     for i in range(len(headers))
                 ]
 
-                def fmt(cells):
-                    return "  ".join(
-                        cell.ljust(widths[i]) if i < len(cells) - 1 else cell
-                        for i, cell in enumerate(cells)
-                    )
+                # Color the Level column (index 1) by severity. Applied after
+                # padding so the ANSI codes don't throw off ljust alignment;
+                # only when writing to a terminal.
+                RED, YELLOW, RESET = "\033[91m", "\033[93m", "\033[0m"
+                level_color = {"Error": RED, "Warn": YELLOW}
+                use_color = sys.stdout.isatty()
 
-                print(fmt(headers))
+                # A leading marker on each logical row makes the start of a row
+                # obvious even when a long Description wraps onto several
+                # physical lines (continuation lines have no marker).
+                MARKER = "• "
+                INDENT = "  "
+
+                def fmt(cells, marker="", colorize=False):
+                    out = []
+                    for i, cell in enumerate(cells):
+                        text = cell.ljust(widths[i]) if i < len(cells) - 1 else cell
+                        if colorize and i == 1 and use_color:
+                            color = level_color.get(cell)
+                            if color:
+                                text = f"{color}{text}{RESET}"
+                        out.append(text)
+                    return marker + "  ".join(out)
+
+                print(fmt(headers, marker=INDENT))
                 for row in rows:
-                    print(fmt(row))
+                    print(fmt(row, marker=MARKER, colorize=True))
         elif format == "jsonl":
             for event in events:
                 # Enrich Error/Warn summaries with the FailureMessage that only
