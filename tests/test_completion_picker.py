@@ -105,8 +105,8 @@ def test_backspacing_to_zero_candidates_closes_picker(capsys):
     capsys.readouterr()
 
 
-def test_tab_with_nothing_to_extend_selects_first_item(capsys):
-    """Second TAB (no common prefix left) moves onto the first candidate."""
+def test_tab_with_nothing_to_extend_leaves_selection_alone(capsys):
+    """TAB only types the shared prefix — it never highlights a row for you."""
     items = ["alpha", "beta"]
     p = InlinePicker(
         items,
@@ -115,10 +115,7 @@ def test_tab_with_nothing_to_extend_selects_first_item(capsys):
         refresh_fn=lambda typed: (items, 0),
     )
     assert p._handle_tab_complete() is False   # no shared prefix to type
-    assert p._current() is None
-    # run()'s tab_complete branch then falls through to _move(1); emulate it.
-    p._move(1)
-    assert p._current() == "alpha"
+    assert p._current() is None                # and no selection conjured up
     capsys.readouterr()
 
 

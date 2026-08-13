@@ -839,7 +839,7 @@ class LineEditor:
                 reopen_when=lambda items: bool(items) and all(c.multi_select for c in items),
                 status_label=status_label,
                 # Open with nothing highlighted: Enter must not insert a
-                # candidate the user never picked. Down/Up (or TAB) select.
+                # candidate the user never picked. Only Down/Up select.
                 select_first=False,
             )
             with self._picker_session():

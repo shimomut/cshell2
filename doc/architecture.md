@@ -134,7 +134,7 @@ DIY raw-mode line editor. No prompt_toolkit or readline.
 
 - `LineEditor.prompt()` — reads one line in raw terminal mode
 - Full key binding suite: `Ctrl+A/E/B/F/W/K/U/L`, `Alt+B/F`, arrows, `Ctrl+P/N`, `Ctrl+R`, `Ctrl+]`
-- TAB opens `InlinePicker` (or `InlineMultiPicker` for flags) with **no candidate pre-selected** — Enter dismisses, Down/Up or a second TAB selects; supports narrowing by typing, TAB-extend, backspace-to-close, and self-closes when narrowing leaves zero candidates
+- TAB opens `InlinePicker` (or `InlineMultiPicker` for flags) with **no candidate pre-selected** — Enter dismisses, only Down/Up select (TAB extends the common prefix, never selects); supports narrowing by typing, TAB-extend, backspace-to-close, and self-closes when narrowing leaves zero candidates
 - `Ctrl+R` opens a filterable history picker
 - Multi-line wrap tracking for correct cursor repositioning
 - VSCode integrated terminal detection for resize handling (see `doc/terminal-resize.md`)

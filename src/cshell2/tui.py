@@ -258,13 +258,11 @@ class InlinePicker(Generic[T]):
                         break
                     if self._handle_tab_complete():
                         break
-                    if self._selected < 0:
-                        # Nothing left to extend and no row highlighted: treat
-                        # the second TAB as "move onto the first candidate", so
-                        # accepting it is TAB TAB Enter rather than a reach for
-                        # the arrow keys.
-                        self._move(1)
-                        self._render()
+                    # Nothing left to extend: TAB is a no-op. It must NOT fall
+                    # back to highlighting a row — TAB means "type the shared
+                    # prefix for me", and moving the selection is the user's
+                    # job (Down/Up). Anything else re-introduces the surprise
+                    # that select_first=False exists to remove.
                 elif action == "backspace":
                     if self._handle_backspace():
                         break

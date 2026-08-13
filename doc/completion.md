@@ -190,12 +190,15 @@ just dismisses the list, leaving the line exactly as typed. To accept a
 candidate the user makes the choice explicit:
 
 - `Down` / `Ctrl+N` (or `Up` / `Ctrl+P` to enter at the bottom), then `Enter`
-- `TAB` — extends the common prefix; a second `TAB` with nothing left to
-  extend moves onto the first candidate, so `TAB TAB Enter` accepts it
 - `TAB` on a list narrowed to a single candidate accepts it outright
 
 The alternative — highlighting the first candidate on open — means a reflexive
 Enter silently rewrites the argument the user just typed.
+
+`TAB` inside an open picker *only* types the longest shared prefix of the
+remaining candidates. When there is nothing left to extend it does nothing:
+moving the selection is the user's job, and a TAB that quietly highlighted a
+row would re-introduce the same surprise from the other direction.
 
 ### An empty candidate list never stays open
 

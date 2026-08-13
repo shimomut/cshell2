@@ -496,7 +496,7 @@ DIY raw-mode line editor. No prompt_toolkit or readline.
 
 - `LineEditor.prompt()` — read one line; returns the line string, `SWITCH_SENTINEL` on `Ctrl+]`, raises `EOFError` (Ctrl+D on empty) or `KeyboardInterrupt` (Ctrl+C)
 - Key bindings: `Ctrl+A/E`, `Ctrl+B/F`, `Alt+B/F`, `Ctrl+W`, `Ctrl+K`, `Ctrl+U`, `Ctrl+L`, arrow keys, `Ctrl+P/N`, `Ctrl+R`
-- TAB opens an `InlinePicker` (or `InlineMultiPicker` for flags) with **no candidate pre-selected**, so Enter dismisses the list instead of inserting the first item; Down/Up (or a second TAB) makes a selection; typing narrows the list; TAB inside the picker extends the common prefix; Backspace can close the picker; narrowing to zero candidates closes it (a zero-row picker would be invisible but still eat keys). Characters typed inside a picker are committed to the buffer on every exit path.
+- TAB opens an `InlinePicker` (or `InlineMultiPicker` for flags) with **no candidate pre-selected**, so Enter dismisses the list instead of inserting the first item; only Down/Up make a selection; typing narrows the list; TAB inside the picker extends the common prefix and never moves the selection; Backspace can close the picker; narrowing to zero candidates closes it (a zero-row picker would be invisible but still eat keys). Characters typed inside a picker are committed to the buffer on every exit path.
 - History search (`Ctrl+R`) opens a filterable picker over all history entries
 - Multi-line wrapping is tracked so `_redraw()` correctly repositions the cursor after wraps
 - VSCode integrated terminal detection: skips reflow-based repositioning, falls back to explicit clear+redraw on resize (`TERM_PROGRAM=vscode`)
