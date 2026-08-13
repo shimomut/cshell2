@@ -382,9 +382,9 @@ Two escape hatches on `registry.command()` cover the cases where flags or positi
 #### OptionsCompleter — Multi-Select Flag Picker
 
 When all completions have `multi_select=True` (returned by `OptionsCompleter`), pressing TAB opens `InlineMultiPicker` instead of `InlinePicker`. The user can:
-- Navigate with arrows / `Ctrl+P` / `Ctrl+N`
-- **Space** to toggle a flag's checked state
-- **Enter** to confirm (checked items, or the highlighted item if nothing is checked)
+- Navigate with arrows / `Ctrl+P` / `Ctrl+N` — nothing is highlighted on open, so the first Down/Up moves onto the first/last flag
+- **Space** to toggle the highlighted flag's checked state
+- **Enter** to confirm (checked items, or the highlighted item if nothing is checked; if neither, the picker just closes without inserting anything)
 - Jump to a flag by typing its first letter
 
 Short boolean flags are automatically merged: selecting `-a` and `-l` inserts `-al`. Flags with `arg_hint` are inserted individually with a space, then followed by either a picker (if a value completer is registered via the `args` dict) or an inline hint prompting the user to type the value.
@@ -496,7 +496,7 @@ DIY raw-mode line editor. No prompt_toolkit or readline.
 
 - `LineEditor.prompt()` — read one line; returns the line string, `SWITCH_SENTINEL` on `Ctrl+]`, raises `EOFError` (Ctrl+D on empty) or `KeyboardInterrupt` (Ctrl+C)
 - Key bindings: `Ctrl+A/E`, `Ctrl+B/F`, `Alt+B/F`, `Ctrl+W`, `Ctrl+K`, `Ctrl+U`, `Ctrl+L`, arrow keys, `Ctrl+P/N`, `Ctrl+R`
-- TAB opens an `InlinePicker` (or `InlineMultiPicker` for flags); typing narrows the list; TAB inside the picker extends the common prefix; Backspace can close the picker
+- TAB opens an `InlinePicker` (or `InlineMultiPicker` for flags) with **no candidate pre-selected**, so Enter dismisses the list instead of inserting the first item; Down/Up (or a second TAB) makes a selection; typing narrows the list; TAB inside the picker extends the common prefix; Backspace can close the picker; narrowing to zero candidates closes it (a zero-row picker would be invisible but still eat keys). Characters typed inside a picker are committed to the buffer on every exit path.
 - History search (`Ctrl+R`) opens a filterable picker over all history entries
 - Multi-line wrapping is tracked so `_redraw()` correctly repositions the cursor after wraps
 - VSCode integrated terminal detection: skips reflow-based repositioning, falls back to explicit clear+redraw on resize (`TERM_PROGRAM=vscode`)
@@ -522,8 +522,8 @@ The single place that touches OS-specific terminal APIs. `lineedit.py`, `tui.py`
 
 No alternate screen; all rendering anchored with DECSC/DECRC (`ESC 7` / `ESC 8`). On POSIX a resize arrives via SIGWINCH; on Windows it is detected by polling `terminal.terminal_size()` between key reads. Either way the picker cancels (redrawing without an alt-screen is unreliable — the user presses TAB again).
 
-- **`InlinePicker`** — single-select list rendered inline below the current line. Supports narrowing by typing, TAB-extend common prefix, scrollbar, optional `meta_fn` for right-aligned labels.
-- **`InlineMultiPicker`** — multi-select list with Space to toggle checkboxes. Jump-to by typing a letter. Returns checked items (or highlighted item if nothing checked).
+- **`InlinePicker`** — single-select list rendered inline below the current line. Supports narrowing by typing, TAB-extend common prefix, scrollbar, optional `meta_fn` for right-aligned labels. `select_first=False` (used by the completion pickers) opens with no row highlighted, so Enter returns `None`; `closed_empty` signals "narrowing left zero candidates, I closed myself"; `typed` exposes the characters the picker echoed so the caller can commit them to its buffer.
+- **`InlineMultiPicker`** — multi-select list with Space to toggle checkboxes. Jump-to by typing a letter. Returns checked items (or the highlighted item if nothing is checked, or `None` when nothing is checked *and* nothing is highlighted). Takes the same `select_first` flag.
 - **`InlineArgPrompt`** — single-line text prompt for a flag's argument. Shows an optional description line above.
 
 ### process.py — PTY Process Slots (POSIX only)

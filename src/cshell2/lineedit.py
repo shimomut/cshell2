@@ -838,6 +838,9 @@ class LineEditor:
                 completion_prefix=prefix,
                 reopen_when=lambda items: bool(items) and all(c.multi_select for c in items),
                 status_label=status_label,
+                # Open with nothing highlighted: Enter must not insert a
+                # candidate the user never picked. Down/Up (or TAB) select.
+                select_first=False,
             )
             with self._picker_session():
                 selected = picker.run()
@@ -850,11 +853,17 @@ class LineEditor:
             # the token being completed.
             sys.stdout.write(f"\033[{rows_above}A")
 
+            # Characters typed while the picker was open were echoed to the
+            # screen by the picker but live only in ``picker.typed`` — commit
+            # them to the buffer on *every* exit path. Skipping this on the
+            # dismiss/cancel paths made the redraw on return silently erase
+            # what the user had typed since pressing TAB.
+            if picker.typed:
+                self._buf = self._buf[: self._cursor] + picker.typed + self._buf[self._cursor :]
+                self._cursor += len(picker.typed)
+
             if picker.reopen:
-                # TAB-complete typed chars; commit to buffer and reopen at new position.
-                typed = picker._typed
-                self._buf = self._buf[: self._cursor] + typed + self._buf[self._cursor :]
-                self._cursor += len(typed)
+                # TAB-complete typed chars: reopen the picker at the new position.
                 from_reopen = True
                 continue
 
@@ -865,6 +874,10 @@ class LineEditor:
                     self._cursor -= 1
                 return
 
+            # ``selected is None`` covers Esc, Enter with nothing highlighted,
+            # and ``picker.closed_empty`` (typing narrowed the list to zero):
+            # in all three the typed chars stay in the buffer and the user is
+            # handed back a plain prompt.
             if selected is not None:
                 self._apply(selected, prefix)
             return
@@ -893,6 +906,9 @@ class LineEditor:
             rows_above=rows_above,
             caret_col=caret_col,
             status_label=status_label,
+            # Nothing highlighted on open — Enter must not insert the first
+            # flag in the list. Space checks items; Down/Up highlight one.
+            select_first=False,
         )
         with self._picker_session():
             selected = picker.run()
@@ -1168,6 +1184,7 @@ class LineEditor:
                 value_fn=lambda c: c.value,
                 completion_prefix=prefix,
                 status_label=_flag_label,
+                select_first=False,   # Enter must not pick an unselected value
             )
             with self._picker_session():
                 selected = picker.run()
@@ -1178,18 +1195,20 @@ class LineEditor:
             # at the picker's anchor column on the prompt row.
             sys.stdout.write(f"\033[{rows_above}A")
 
+            # Commit what the user typed inside the picker on every exit path —
+            # the picker echoed those chars but never wrote them to the buffer.
+            if picker.typed:
+                self._buf = self._buf[: self._cursor] + picker.typed + self._buf[self._cursor :]
+                self._cursor += len(picker.typed)
+
             if picker.reopen:
                 # TAB was pressed inside the picker (or the display column
-                # shifted while narrowing): extend the typed chars into the
-                # buffer and reopen with a refreshed completion list. Even if
-                # narrowing leaves only one completion, do NOT auto-apply —
-                # the user can't see the count cross the threshold mid-typing,
-                # so a sudden close + insert would be surprising. Keep the
-                # picker open on the lone item; the user presses Enter to apply
-                # or TAB to extend the common prefix explicitly.
-                typed = picker._typed
-                self._buf = self._buf[: self._cursor] + typed + self._buf[self._cursor :]
-                self._cursor += len(typed)
+                # shifted while narrowing): reopen with a refreshed completion
+                # list. Even if narrowing leaves only one completion, do NOT
+                # auto-apply — the user can't see the count cross the threshold
+                # mid-typing, so a sudden close + insert would be surprising.
+                # Keep the picker open on the lone item; the user presses Enter
+                # to apply or TAB to extend the common prefix explicitly.
                 completions, prefix, _ = self._get_completions(self._buf[: self._cursor])
                 completions = [c for c in completions if not c.multi_select]
                 if not completions:
@@ -1204,6 +1223,9 @@ class LineEditor:
                     self._cursor -= 1
                 return True
 
+            # Esc, Enter with nothing highlighted, or the list narrowing to zero
+            # (``picker.closed_empty``): leave the typed value in the buffer and
+            # report "no value chosen" so the caller stops filling in flags.
             if selected is None:
                 return False
 

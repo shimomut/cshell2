@@ -112,9 +112,9 @@ OptionsCompleter(
 ```
 
 When all completions returned are `multi_select=True` (which `OptionsCompleter` always sets), the line editor opens `InlineMultiPicker` instead of `InlinePicker`. The user:
-- Navigates with arrows / `Ctrl+P/N`
-- **Space** to toggle a flag's checked state
-- **Enter** to confirm (checked items, or highlighted item if nothing checked)
+- Navigates with arrows / `Ctrl+P/N` — the list opens with **no** row highlighted, so the first Down/Up moves onto the first/last flag
+- **Space** to toggle the highlighted flag's checked state
+- **Enter** to confirm (checked items, or the highlighted item if nothing is checked; nothing at all if neither — the picker just closes)
 - Types a letter to jump to the next flag starting with that letter
 
 Boolean short flags are automatically merged: selecting `-a` and `-l` inserts `-al`. Flags with `arg_hint` are inserted individually followed by a space, then either a value picker or an inline hint line.
@@ -181,6 +181,35 @@ drops to one, the picker stays open on that lone item — the user can't
 see the count cross the threshold mid-typing, so a sudden close + insert
 would feel like the shell is finishing the word for them out of nowhere.
 Press Enter to apply, or TAB to extend the common prefix explicitly.
+
+### Nothing is selected until the user selects it
+
+Both completion pickers open with **no row highlighted** (`select_first=False`
+on the widget). Enter on a freshly opened list therefore inserts nothing — it
+just dismisses the list, leaving the line exactly as typed. To accept a
+candidate the user makes the choice explicit:
+
+- `Down` / `Ctrl+N` (or `Up` / `Ctrl+P` to enter at the bottom), then `Enter`
+- `TAB` — extends the common prefix; a second `TAB` with nothing left to
+  extend moves onto the first candidate, so `TAB TAB Enter` accepts it
+- `TAB` on a list narrowed to a single candidate accepts it outright
+
+The alternative — highlighting the first candidate on open — means a reflexive
+Enter silently rewrites the argument the user just typed.
+
+### An empty candidate list never stays open
+
+While a picker is open, typed characters are echoed by the *picker*; they are
+committed to the line buffer when it closes. Two rules keep that from losing
+input:
+
+1. If typing (or backspacing) narrows the list to zero candidates, the picker
+   closes itself (`InlinePicker.closed_empty`). Previously it stayed open
+   rendering zero rows — invisible, but still consuming keystrokes, and Enter
+   then discarded everything typed since TAB.
+2. `lineedit._complete` / `_prompt_for_arg` commit `picker.typed` into the
+   buffer on **every** exit path — accept, dismiss, Esc, or empty-close — so
+   the redraw on return can never erase characters the user saw echoed.
 
 The **fallback to `FileCompleter`** only triggers when **no completer** is registered for that position. If a completer is registered but returns empty results, no fallback occurs — commands can explicitly declare "no completions here" by registering a completer that returns `[]`.
 

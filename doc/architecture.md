@@ -134,7 +134,7 @@ DIY raw-mode line editor. No prompt_toolkit or readline.
 
 - `LineEditor.prompt()` — reads one line in raw terminal mode
 - Full key binding suite: `Ctrl+A/E/B/F/W/K/U/L`, `Alt+B/F`, arrows, `Ctrl+P/N`, `Ctrl+R`, `Ctrl+]`
-- TAB opens `InlinePicker` (or `InlineMultiPicker` for flags); supports narrowing by typing, TAB-extend, backspace-to-close
+- TAB opens `InlinePicker` (or `InlineMultiPicker` for flags) with **no candidate pre-selected** — Enter dismisses, Down/Up or a second TAB selects; supports narrowing by typing, TAB-extend, backspace-to-close, and self-closes when narrowing leaves zero candidates
 - `Ctrl+R` opens a filterable history picker
 - Multi-line wrap tracking for correct cursor repositioning
 - VSCode integrated terminal detection for resize handling (see `doc/terminal-resize.md`)
@@ -143,8 +143,8 @@ DIY raw-mode line editor. No prompt_toolkit or readline.
 
 Inline-rendered widgets anchored with DECSC/DECRC (no alternate screen). Cancel on SIGWINCH.
 
-- `InlinePicker` — single-select list; supports narrowing by typing, scrollbar, `meta_fn` labels
-- `InlineMultiPicker` — multi-select with Space; jump-to by letter; returns checked items (or highlighted)
+- `InlinePicker` — single-select list; supports narrowing by typing, scrollbar, `meta_fn` labels. `select_first=False` opens with no row highlighted (Enter → None); `closed_empty` reports "narrowed to zero candidates"; `typed` exposes the chars the picker echoed for the caller to commit
+- `InlineMultiPicker` — multi-select with Space; jump-to by letter; returns checked items (or the highlighted one, or None when neither); `select_first=False` as above
 - `InlineArgPrompt` — single-line text prompt for a flag's argument value
 
 ### process.py — PTY Process Slots

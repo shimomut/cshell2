@@ -119,6 +119,13 @@ class InlinePicker(Generic[T]):
     Position is anchored with DECSC/DECRC (ESC 7 / ESC 8) at reserve time.
     On SIGWINCH the picker cancels immediately — redrawing after a resize is
     unreliable without an alternate screen, so the user just presses TAB again.
+
+    ``select_first=False`` opens the list with *no* row highlighted, so Enter
+    dismisses instead of silently accepting a candidate the user never chose
+    (see the completion pickers in ``lineedit.py``). The first Down/Up moves
+    onto the first/last row. When ``refresh_fn`` narrows the list to nothing
+    the picker closes itself and sets ``closed_empty`` — an open-but-empty
+    picker renders no rows, so it would swallow keystrokes invisibly.
     """
 
     def __init__(
@@ -142,6 +149,7 @@ class InlinePicker(Generic[T]):
         preview_fn: Callable[[T], list[str]] | None = None,
         preview_height: int = 0,
         key_actions: dict[bytes, str] | None = None,
+        select_first: bool = True,
     ):
         self._items = items
         self._display_fn = display_fn
@@ -162,17 +170,36 @@ class InlinePicker(Generic[T]):
         self._preview_fn = preview_fn
         self._preview_height = max(0, preview_height) if preview_fn is not None else 0
         self._key_actions = dict(key_actions or {})
+        # -1 means "no row highlighted"; it is also the state the selection
+        # resets to whenever the list is re-filtered by typing.
+        self._no_selection = 0 if select_first else -1
         self._typed = ""
         self.reopen = False          # set True when tab-complete typed chars; caller should reopen
         self.apply_backspace = False  # set True when backspace pressed with no typed chars
+        self.closed_empty = False     # set True when narrowing left no candidates
         self.action: str | None = None  # set when run() exits via a key in key_actions
 
-        self._selected = 0
+        self._selected = self._no_selection
         self._offset = 0
         self._cols = 80
         self._lines = 24
         self._height = min(max_height, len(items))
         self._cancelled = False
+
+    @property
+    def typed(self) -> str:
+        """Characters the user typed while the picker was open.
+
+        The picker echoes them to the prompt line itself but never touches the
+        caller's buffer, so the caller must commit them on every exit path.
+        """
+        return self._typed
+
+    def _current(self) -> T | None:
+        """The highlighted item, or None when nothing is highlighted."""
+        if not self._items or self._selected < 0:
+            return None
+        return self._items[self._selected]
 
     def run(self) -> T | None:
         if not self._items:
@@ -201,11 +228,14 @@ class InlinePicker(Generic[T]):
                     self._status_label = ""
                 if key_bytes in self._key_actions:
                     self.action = self._key_actions[key_bytes]
-                    result = self._items[self._selected] if self._items else None
+                    result = self._current()
                     break
                 action = self._dispatch(key_bytes)
                 if action == "accept":
-                    result = self._items[self._selected] if self._items else None
+                    # With no row highlighted this returns None — Enter then
+                    # just dismisses the list instead of picking a candidate
+                    # the user never selected.
+                    result = self._current()
                     break
                 if action == "cancel":
                     break
@@ -224,10 +254,17 @@ class InlinePicker(Generic[T]):
                     # suffix past what was typed, which preserves the wrong
                     # case in the prefix region.
                     if len(self._items) == 1:
-                        result = self._items[self._selected]
+                        result = self._items[0]
                         break
                     if self._handle_tab_complete():
                         break
+                    if self._selected < 0:
+                        # Nothing left to extend and no row highlighted: treat
+                        # the second TAB as "move onto the first candidate", so
+                        # accepting it is TAB TAB Enter rather than a reach for
+                        # the arrow keys.
+                        self._move(1)
+                        self._render()
                 elif action == "backspace":
                     if self._handle_backspace():
                         break
@@ -319,9 +356,10 @@ class InlinePicker(Generic[T]):
         """Render the preview pane: ``preview_height`` lines below the list."""
         s = get_color_scheme()
         lines: list[str] = []
-        if self._items and self._preview_fn is not None:
+        focused = self._current()
+        if focused is not None and self._preview_fn is not None:
             try:
-                raw = self._preview_fn(self._items[self._selected])
+                raw = self._preview_fn(focused)
             except Exception:
                 raw = []
             lines = [str(line) for line in raw][-self._preview_height:]
@@ -467,18 +505,24 @@ class InlinePicker(Generic[T]):
         return True
 
     def _handle_char(self, ch: str) -> bool:
-        """Write ch at prompt caret and refresh. Returns True (sets reopen) if col changed or reopen_when fires."""
+        """Write ch at prompt caret and refresh. Returns True when the picker should close."""
         sys.stdout.write(ch)
         sys.stdout.flush()
         self._typed += ch
         if self._refresh_fn is not None:
             new_items, new_col = self._refresh_fn(self._typed)
+            self._items = new_items
+            if not new_items:
+                # Nothing matches what's now typed. Keeping the picker open
+                # would leave it rendering zero rows while still eating keys —
+                # invisible but active. Close instead; the caller commits the
+                # typed chars and the user can press TAB again.
+                self.closed_empty = True
+                return True
             if new_col != self._col or (self._reopen_when is not None and self._reopen_when(new_items)):
-                self._items = new_items
                 self.reopen = True
                 return True
-            self._items = new_items
-            self._selected = 0
+            self._selected = self._no_selection
             self._offset = 0
         self._render()
         return False
@@ -492,12 +536,14 @@ class InlinePicker(Generic[T]):
             self._typed = self._typed[:-1]
             if self._refresh_fn is not None:
                 new_items, new_col = self._refresh_fn(self._typed)
+                self._items = new_items
+                if not new_items:
+                    self.closed_empty = True   # same rule as _handle_char
+                    return True
                 if new_col != self._col:
-                    self._items = new_items
                     self.reopen = True
                     return True
-                self._items = new_items
-                self._selected = 0
+                self._selected = self._no_selection
                 self._offset = 0
             self._render()
             return False
@@ -546,7 +592,13 @@ class InlinePicker(Generic[T]):
 
     def _move(self, delta: int) -> None:
         n = len(self._items)
-        self._selected = max(0, min(n - 1, self._selected + delta))
+        if not n:
+            return
+        if self._selected < 0:
+            # Nothing highlighted yet: Down enters at the top, Up at the bottom.
+            self._selected = 0 if delta > 0 else n - 1
+        else:
+            self._selected = max(0, min(n - 1, self._selected + delta))
         if self._selected < self._offset:
             self._offset = self._selected
         elif self._selected >= self._offset + self._height:
@@ -664,6 +716,10 @@ class InlineMultiPicker(Generic[T]):
     returns all checked items (or just the highlighted item if nothing is
     checked). Esc / Ctrl+C cancels and returns None.
 
+    With ``select_first=False`` no row is highlighted until the user moves or
+    jumps, so Enter on a freshly opened picker returns None (dismiss) rather
+    than the first flag in the list.
+
     On SIGWINCH the picker cancels, same as InlinePicker.
     """
 
@@ -676,6 +732,7 @@ class InlineMultiPicker(Generic[T]):
         rows_above: int = 1,
         caret_col: int = 0,
         status_label: str = "",
+        select_first: bool = True,
     ):
         self._items = items
         self._display_fn = display_fn
@@ -685,7 +742,7 @@ class InlineMultiPicker(Generic[T]):
         self._caret_col = caret_col
         self._status_label = status_label
 
-        self._selected = 0
+        self._selected = 0 if select_first else -1  # -1 = no row highlighted
         self._offset = 0
         self._checked: set[int] = set()
         self._cols = 80
@@ -715,8 +772,10 @@ class InlineMultiPicker(Generic[T]):
                 if action == "accept":
                     if self._checked:
                         result = [self._items[i] for i in sorted(self._checked)]
-                    else:
+                    elif self._selected >= 0:
                         result = [self._items[self._selected]]
+                    else:
+                        result = None  # nothing checked, nothing highlighted
                     break
                 if action == "cancel":
                     break
@@ -728,6 +787,8 @@ class InlineMultiPicker(Generic[T]):
                     self._render()
                 elif action == "toggle":
                     idx = self._selected
+                    if idx < 0:
+                        continue  # nothing highlighted yet — nothing to toggle
                     if idx in self._checked:
                         self._checked.discard(idx)
                     else:
@@ -890,7 +951,13 @@ class InlineMultiPicker(Generic[T]):
 
     def _move(self, delta: int) -> None:
         n = len(self._items)
-        self._selected = max(0, min(n - 1, self._selected + delta))
+        if not n:
+            return
+        if self._selected < 0:
+            # Nothing highlighted yet: Down enters at the top, Up at the bottom.
+            self._selected = 0 if delta > 0 else n - 1
+        else:
+            self._selected = max(0, min(n - 1, self._selected + delta))
         self._scroll_to_selected()
 
     def _jump_to(self, ch: str) -> None:
