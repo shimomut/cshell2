@@ -171,26 +171,19 @@ verbatim, so a newline would submit the line on insert.
 **Directory scoping.** `ran_here_fn(entry)` answers "was this line run in the
 current directory?" — the shell passes `History.ran_here`, backed by the
 `~/.cshell2/history.dirs` side table (see below). Only entries that answer True
-are offered, so a `make deploy prod` from another checkout stays out of the way
-in this one. Strict scoping would turn a directory you have never run the command
-in into a dead end, so when *no* match was run here the completer falls back to
-the matches from elsewhere and labels them `history (elsewhere)`:
-
-```
-~/other-project> make deploy <TAB>
-┌────────────────────────────────────────────────┐
-│ staging --dry-run       history (elsewhere)    │
-│ prod                    history (elsewhere)    │
-└────────────────────────────────────────────────┘
-```
+are offered, so a `make deploy prod` from another checkout stays out of the way in
+this one. There is **no fallback**: a directory you have never run a matching line
+in contributes no history rows, and the picker shows only the ordinary candidates.
+Up/Down and `Ctrl+R` stay unscoped, so reaching across directories is still one
+key away.
 
 Two consequences worth knowing:
 
 - Entries recorded before the side table existed (or copied from another
-  machine without it) have no directory at all, so they only ever surface
-  through the fallback until they are run again.
+  machine without it) have no directory at all, so they are never offered as TAB
+  candidates until they are run again.
 - The scope is the directory the command was *typed* in, matched exactly. `cd`
-  into a subdirectory of a repo and the root's entries move to the fallback.
+  into a subdirectory of a repo and the root's entries drop out.
 
 **Where the directories come from.** `lineedit.History` appends each executed
 line to `~/.cshell2/history` as before, and records the cwd it was typed in
@@ -233,7 +226,7 @@ The rules that keep the merge from degrading the existing UX:
 | Rule | Why |
 |------|-----|
 | History rows are listed **first** | "What I ran before" is the most likely intent |
-| Scoped to the current directory, with a fallback | The lines you ran *here* are the relevant ones; falling back to elsewhere (labelled) keeps a new directory from being a dead end |
+| Scoped to the current directory | The lines you ran *here* are the relevant ones; another checkout's `make deploy prod` is noise. Up/Down and `Ctrl+R` remain unscoped for the rest |
 | Suppressed when nothing is typed | A bare TAB should list available commands; Up/Down and `Ctrl+R` already cover recall with an empty line |
 | Suppressed on the flag picker (all candidates `multi_select`) | One history candidate would demote the Space-to-toggle checkbox picker to a plain list |
 | Suppressed on the arg-hint (a lone `is_arg_hint`) | The editor renders that lone candidate as a hint line; a second candidate turns it into a picker |

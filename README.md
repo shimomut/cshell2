@@ -115,18 +115,11 @@ history candidate is never inserted without being shown in the picker first, and
 a unique ordinary completion still applies on the first TAB as before.
 
 Candidates are also scoped to the **directory** you're in: cshell2 records where
-each command was run (`~/.cshell2/history.dirs`) and offers only the lines you
-ran here, so another checkout's `make deploy` stays out of the way. When nothing
-you've typed matches anything run in this directory, the matches from elsewhere
-are offered instead, labelled `history (elsewhere)` so it's clear why:
-
-```
-~/other-project> make deploy <TAB>
-┌────────────────────────────────────────────────┐
-│ staging --dry-run       history (elsewhere)    │
-│ prod                    history (elsewhere)    │
-└────────────────────────────────────────────────┘
-```
+each command was run (`~/.cshell2/history.dirs`) and offers only the lines you ran
+here, so another checkout's `make deploy` stays out of the way. Nothing matching
+run here means no history rows — the picker just shows the ordinary candidates.
+`↑`/`↓` and `Ctrl+R` are not directory-scoped, so lines from elsewhere are still
+one key away.
 
 **Flag completion** — when flags are available, TAB opens a multi-select checkbox picker:
 - Navigate with arrows; **Space** toggles a flag; **Enter** confirms

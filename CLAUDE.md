@@ -423,18 +423,18 @@ while `Ctrl+R` stays global.
 Candidates are scoped to the **current directory** as well as the current
 context. `ran_here_fn(entry)` — wired to `History.ran_here` — answers "was this
 line run in the cwd?", and only entries that answer yes are offered, so another
-checkout's `make deploy prod` stays out of the way. Strict scoping alone would
-make a directory you've never run the command in a dead end, so when *no* match
-was run here the completer falls back to the matches from elsewhere, labelled
-`history (elsewhere)`. The directories come from a JSON side table
-(`~/.cshell2/history.dirs`, line → recent dirs, capped at
+checkout's `make deploy prod` stays out of the way. The scope is strict — there is
+no fallback to entries from elsewhere, so a directory you've never run a matching
+line in simply contributes no history rows; Up/Down and `Ctrl+R` stay unscoped for
+when you do want to reach across directories. The directories come from a JSON
+side table (`~/.cshell2/history.dirs`, line → recent dirs, capped at
 `lineedit.MAX_DIRS_PER_LINE`) that `History.add` maintains next to the plain
 `~/.cshell2/history` file; a re-run of the same line after a `cd` records the new
 directory even though the line itself is a duplicate, and every write prunes
 lines the history file no longer holds. Missing or corrupt side table → no
-directory is known and every candidate arrives via the fallback, which is also
-what happens to entries recorded before the side table existed. See
-[doc/completion.md](doc/completion.md#historycompleter).
+directory is known for any line, so history contributes no TAB candidates at all
+(likewise for entries recorded before the side table existed, until they are run
+again). See [doc/completion.md](doc/completion.md#historycompleter).
 
 History is deliberately suppressed where a candidate-list *shape* is itself the
 contract with the line editor: an empty line (bare TAB lists commands), the flag

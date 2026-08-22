@@ -97,25 +97,14 @@ def test_scoped_to_entries_run_in_the_current_directory():
     assert [r.description for r in results] == ["history"]
 
 
-def test_falls_back_to_other_directories_when_none_match_here():
-    """A directory you have never run this command in must not be a dead end."""
+def test_directory_scope_has_no_fallback():
+    """Lines run elsewhere are out of scope, even when that leaves nothing."""
     c = HistoryCompleter(
         lambda: ["make deploy prod", "make deploy staging"],
         ran_here_fn=lambda entry: False,
     )
 
-    results = c.complete(_ctx("make deploy "))
-
-    assert [r.value for r in results] == ["staging", "prod"]
-    # The label says why entries from elsewhere are on screen.
-    assert all(r.description == "history (elsewhere)" for r in results)
-
-
-def test_fallback_respects_the_limit():
-    entries = [f"make target{i}" for i in range(20)]
-    c = HistoryCompleter(entries.copy, limit=3, ran_here_fn=lambda entry: False)
-
-    assert len(c.complete(_ctx("make"))) == 3
+    assert c.complete(_ctx("make deploy ")) == []
 
 
 def test_no_ran_here_fn_means_no_directory_scoping():
@@ -163,6 +152,12 @@ def shell():
     """
     sh = Shell()
     sh.context_manager.current().history = []
+    # The live completer is directory-scoped against the real
+    # ~/.cshell2/history.dirs, which a test's synthetic entries are not in.
+    # Treat whatever the test sets as having been run in the cwd.
+    sh._history_completer._ran_here_fn = (
+        lambda entry: entry in sh.context_manager.current().history
+    )
     return sh
 
 
