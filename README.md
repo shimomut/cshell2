@@ -16,7 +16,7 @@ A lightweight but powerful terminal shell environment with rich tab completion a
 - **Protocol fallbacks** — automatic completion for cobra-based tools (`docker`, `kubectl`, `helm`, `gh`, …) and argcomplete-based Python CLIs (`pipx`, `conda`, `pre-commit`, `tox`, …) — no recipe needed
 - **System command fallback** — anything not a registered command runs through the system shell
 - **Cross-platform** — interactive shell, completion, pipelines, redirects, contexts, and history all work on POSIX and Windows; PTY-backed multiplexing of running native processes is POSIX-only
-- **History** — persistent history with up/down navigation and `Ctrl+R` search
+- **History** — persistent history with up/down navigation, `Ctrl+R` search, and past command lines offered as multi-argument TAB candidates
 
 ## Installation
 
@@ -91,6 +91,28 @@ Press TAB to complete:
 - Command names (registered commands + system PATH executables)
 - File/directory paths (default fallback)
 - Custom per-argument completions defined by commands
+- Past command lines from history (see below)
+
+**History completion** — TAB also offers past command lines that start with
+what you've typed so far. Only the part that would be *added* is listed, like
+any other candidate, tagged `history` and shown first:
+
+```
+cshell2> git commit <TAB>
+┌────────────────────────────────────────────────┐
+│ -m "fix typo"                      history     │
+│ --amend --no-edit                  history     │
+│ doc/                                           │
+│ src/                                           │
+└────────────────────────────────────────────────┘
+```
+
+Accepting one inserts it at the cursor verbatim, so a single suggestion can fill
+in several arguments at once. Matching is against the entire typed line —
+including pipelines (`ls | grep fo<TAB>`) — and draws on the current context's
+history, the same list `↑`/`↓` walks (`Ctrl+R` searches every context). A
+history candidate is never inserted without being shown in the picker first, and
+a unique ordinary completion still applies on the first TAB as before.
 
 **Flag completion** — when flags are available, TAB opens a multi-select checkbox picker:
 - Navigate with arrows; **Space** toggles a flag; **Enter** confirms
@@ -338,6 +360,7 @@ The function is called each time the prompt is displayed, so it reflects dynamic
 | `DirCompleter()` | Complete directory paths only |
 | `OptionsCompleter(options, args)` | Complete flags with multi-select TUI; `args` declares value-taking flags |
 | `ConditionalCompleter(mapping)` | Pick a sub-completer based on preceding args |
+| `HistoryCompleter(history_fn, limit)` | Continue the typed line from past command lines (may span several arguments) |
 
 ### Completion Recipes
 

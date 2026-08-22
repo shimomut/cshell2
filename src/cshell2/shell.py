@@ -34,6 +34,7 @@ from .completion import (
     CompletionContext,
     FileCompleter,
     Completion,
+    HistoryCompleter,
     get_argcomplete_fallback,
     get_cobra_fallback,
 )
@@ -1291,6 +1292,10 @@ class Shell:
         self._command_completer = CommandNameCompleter(self.registry)
         self._file_completer = FileCompleter()
         self._var_completer = VarCompleter()
+        # Whole-line suggestions from the *current context's* history — the same
+        # list Up/Down walks, so TAB recall and arrow recall agree on scope.
+        # (Ctrl+R is the one that searches the global store.)
+        self._history_completer = HistoryCompleter(self._current_context_history)
 
         # Wire Pipeline.run() so decorator bodies can re-enter execution.
         set_pipeline_executor(self._run_pipeline_from_decorator)
@@ -1443,6 +1448,48 @@ class Shell:
         return line[i:]
 
     def _get_completions(self, line_before_cursor: str) -> tuple[list[Completion], str, str]:
+        """Return ``(completions, prefix, status_label)`` for the cursor position.
+
+        Wraps the completer-driven candidates from :meth:`_get_base_completions`
+        with history suggestions (see :class:`HistoryCompleter`) — the tails of
+        past command lines that continue what is typed — listed first so "what I
+        ran before" is the top candidate.
+
+        History is deliberately *not* mixed into the two results whose shape is
+        itself a contract with the line editor:
+
+        * the flag picker (every candidate ``multi_select``) — one history
+          candidate would demote the checkbox picker to a plain list;
+        * the arg-hint (a lone ``is_arg_hint``) — the editor renders that as a
+          hint line below the prompt instead of opening a picker at all.
+
+        A unique token candidate still auto-applies without showing the picker
+        (that check lives in ``lineedit._complete`` and counts only non-history
+        candidates), so history stays one more TAB away in that case rather
+        than costing a keystroke on every completion.
+        """
+        completions, prefix, label = self._get_base_completions(line_before_cursor)
+
+        if completions and all(c.multi_select for c in completions):
+            return completions, prefix, label
+        if len(completions) == 1 and completions[0].is_arg_hint:
+            return completions, prefix, label
+
+        history = self._history_completer.complete(CompletionContext(
+            command=None,
+            args=[],
+            arg_index=0,
+            prefix=prefix,
+            line=line_before_cursor,
+            shell_context=self.context_manager.current(),
+        ))
+        if not history:
+            return completions, prefix, label
+        # With no completer candidates the picker is showing history and nothing
+        # else — say so rather than labelling it with the command name.
+        return history + completions, prefix, (label if completions else "history")
+
+    def _get_base_completions(self, line_before_cursor: str) -> tuple[list[Completion], str, str]:
         # Isolate the current pipeline stage so completions for `ls | grep -`
         # are computed against `grep`, not `ls`.
         stage_line = _split_on_operators(line_before_cursor, [";", "&&", "||", "|"])[-1][1]
@@ -1639,7 +1686,8 @@ class Shell:
 
         # Expand the leading token if it is an alias, so the status bar for
         # `hp <args>` resolves against the alias's expansion (e.g.
-        # `awsut hyperpod`).  Mirrors the alias handling in _get_completions.
+        # `awsut hyperpod`).  Mirrors the alias handling in
+        # _get_base_completions.
         expansion = self.registry.get_alias(command_name)
         if expansion is not None:
             expansion_tokens = tokenize(expansion)

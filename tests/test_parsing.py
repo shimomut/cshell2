@@ -2,7 +2,12 @@ import os
 
 import pytest
 
-from cshell2.parsing import expand_vars, tokenize, split_for_completion
+from cshell2.parsing import (
+    expand_vars,
+    raw_token_start,
+    split_for_completion,
+    tokenize,
+)
 from cshell2.variables import EnvVar, Var, VarRegistry, registry as var_registry
 
 
@@ -135,3 +140,27 @@ def test_expand_vars_falls_back_to_env_when_no_var(temp_var):
         assert expand_vars("echo $CSHELL2_PLAIN") == "echo plain"
     finally:
         del os.environ["CSHELL2_PLAIN"]
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("", 0),
+        ("gi", 0),
+        ("git ", 4),
+        ("git com", 4),
+        ("git commit  ", 12),          # runs of whitespace anchor after the last one
+        ("cat 'My Documents/no", 4),   # unclosed quote — the rest is one token
+        ("cat 'My Documents' x", 19),  # closed quote — the token after it
+        ("ls | grep fo", 10),          # operators are not special here
+    ],
+)
+def test_raw_token_start(text, expected):
+    assert raw_token_start(text) == expected
+
+
+def test_raw_token_start_agrees_with_split_for_completion():
+    """For an unquoted token the anchor and the shlex prefix must line up."""
+    line = "git com"
+    _, prefix = split_for_completion(line)
+    assert line[raw_token_start(line):] == prefix

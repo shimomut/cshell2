@@ -216,7 +216,7 @@ the framework filters kwargs to those the handler accepts.
 
 ### Walking the Tree for Completion
 
-`_get_completions()` builds a `CompletionContext` and walks the tree the
+`_get_base_completions()` builds a `CompletionContext` and walks the tree the
 same way as resolution, except:
 
 * The walk stops at the **last fully-typed token**; the partial prefix
@@ -281,7 +281,7 @@ path.
 * **Command registry (`commands.py`)** — `Command` becomes a tree node.
   `_build_completers()` is generalized to merge ancestor flags into a node's
   effective options dict. The flat path remains a degenerate case.
-* **Shell dispatch (`shell.py`)** — `_get_completions()` and the command
+* **Shell dispatch (`shell.py`)** — `_get_base_completions()` and the command
   invocation path call the resolution algorithm above. The
   `_positional_index()` helper is replaced by the walk.
 * **External recipes (`recipes/*.py`)** — migrated incrementally. Each

@@ -138,8 +138,9 @@ class InlinePicker(Generic[T]):
         initial_offset: int = 0,
         rows_above: int = 1,
         refresh_fn: Callable[[str], tuple[list[T], int]] | None = None,
-        value_fn: Callable[[T], str] | None = None,
+        value_fn: Callable[[T], str | None] | None = None,
         completion_prefix: str = "",
+        extend_fn: Callable[[list[T], str], str] | None = None,
         reopen_when: Callable[[list[T]], bool] | None = None,
         min_width: int = 0,
         hide_cursor: bool = False,
@@ -161,6 +162,7 @@ class InlinePicker(Generic[T]):
         self._refresh_fn = refresh_fn
         self._value_fn = value_fn
         self._completion_prefix = completion_prefix
+        self._extend_fn = extend_fn
         self._reopen_when = reopen_when
         self._min_width = min_width
         self._hide_cursor = hide_cursor
@@ -488,12 +490,26 @@ class InlinePicker(Generic[T]):
 
     def _handle_tab_complete(self) -> bool:
         """Type the common prefix extension. Returns True (sets reopen) if chars were typed."""
-        if not self._items or self._value_fn is None:
+        if not self._items:
             return False
-        values = [self._value_fn(item) for item in self._items]
-        common = _common_prefix(values)
-        effective_len = len(self._completion_prefix) + len(self._typed)
-        extension = common[effective_len:]
+        if self._extend_fn is not None:
+            # The caller owns the arithmetic: it sees the *current* items and
+            # typed text, so it can re-decide which value space the remaining
+            # rows live in and where the text already typed starts (narrowing
+            # can change both — see ``lineedit._complete``).
+            extension = self._extend_fn(self._items, self._typed)
+        elif self._value_fn is not None:
+            # Simple case: every item's value extends ``completion_prefix``,
+            # which grows by exactly the characters typed since the picker
+            # opened.  ``value_fn`` may return None to exclude an item from the
+            # common-prefix measurement.
+            values = [v for v in map(self._value_fn, self._items) if v is not None]
+            if not values:
+                return False
+            effective_len = len(self._completion_prefix) + len(self._typed)
+            extension = _common_prefix(values)[effective_len:]
+        else:
+            return False
         if not extension:
             return False
         sys.stdout.write(extension)

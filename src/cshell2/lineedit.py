@@ -12,6 +12,7 @@ from typing import Callable
 
 from . import terminal
 from .completion import Completion
+from .parsing import raw_token_start
 
 SWITCH_SENTINEL = "\x1d__SWITCH__"
 CONTEXT_CHANGED_SENTINEL = "\x1d__CHANGED__"
@@ -73,6 +74,28 @@ def _display_col_offset(prefix: str, completions: list[Completion]) -> int:
         if all(c.display.lower().startswith(suffix_lower) for c in completions):
             return _wcswidth(suffix)
     return 0
+
+
+def _picker_col_offset(prefix: str, completions: list[Completion]) -> int:
+    """Like :func:`_display_col_offset`, tolerating verbatim (history) candidates.
+
+    Verbatim candidates are anchored like any other, so they normally align with
+    the typed token too and are measured with everything else — that is what
+    puts a history-only picker under the token instead of at the caret.
+
+    The exception is a quoted token: a verbatim value starts at the *raw* anchor,
+    so its display begins with the quote character while ``prefix`` is what shlex
+    left after removing it, and nothing is shared.  Rather than un-align the
+    token candidates the user is completing against, fall back to measuring those
+    alone.
+    """
+    offset = _display_col_offset(prefix, completions)
+    if offset:
+        return offset
+    aligned = [c for c in completions if not c.verbatim]
+    if not aligned or len(aligned) == len(completions):
+        return offset
+    return _display_col_offset(prefix, aligned)
 
 
 def _pending_wrap_row(char_count: int, cols: int) -> int:
@@ -743,7 +766,7 @@ class LineEditor:
     # ── completion ───────────────────────────────────────────────────────────
 
     def _complete(self, fd: int) -> None:
-        from .tui import InlinePicker
+        from .tui import InlinePicker, _common_prefix
 
         buf_changed = False
         # True when the current loop iteration is a re-entry triggered by the
@@ -765,11 +788,21 @@ class LineEditor:
             if not completions:
                 return
 
+            # Single-token candidates only.  Verbatim (history) candidates are
+            # excluded from every "there is exactly one candidate" shortcut
+            # below: auto-applying a token is a small, predictable edit, while
+            # silently appending several arguments is not — so a history entry is
+            # only ever inserted from a picker the user can see.  This also
+            # keeps the pre-history behaviour of the shortcuts intact: a unique
+            # token completion still applies on the first TAB even when past
+            # command lines also match.
+            token_completions = [c for c in completions if not c.verbatim]
+
             # Arg-hint: the preceding flag needs a typed value (e.g. "-d N").
             # Show an informational hint below the buffer without opening a
             # picker or modifying the buffer — cleared by the next _redraw().
-            if len(completions) == 1 and completions[0].is_arg_hint:
-                hint = completions[0]
+            if len(token_completions) == 1 and token_completions[0].is_arg_hint:
+                hint = token_completions[0]
                 if hint.description:
                     self._hint = f"{hint.value} <{hint.arg_hint}>: {hint.description}"
                 else:
@@ -779,18 +812,18 @@ class LineEditor:
             # Single value-taking option: auto-apply then re-run the loop.
             # The next iteration will either open a value picker (when a
             # value_completer is registered) or set self._hint (is_arg_hint).
-            if (len(completions) == 1
-                    and completions[0].multi_select
-                    and completions[0].arg_hint
+            if (len(token_completions) == 1
+                    and token_completions[0].multi_select
+                    and token_completions[0].arg_hint
                     and not from_reopen):
-                self._apply(completions[0], prefix)
+                self._apply(token_completions[0], prefix)
                 buf_changed = True
                 continue
 
-            if len(completions) == 1 and not from_reopen:
-                self._apply(completions[0], prefix)
-                if completions[0].arg_hint:
-                    self._prompt_for_arg(completions[0])
+            if len(token_completions) == 1 and not from_reopen:
+                self._apply(token_completions[0], prefix)
+                if token_completions[0].arg_hint:
+                    self._prompt_for_arg(token_completions[0])
                 return
 
             # Multi-select options picker.
@@ -805,7 +838,7 @@ class LineEditor:
             caret_row = _pending_wrap_row(caret_char, self._cols)
             end_row = _pending_wrap_row(self._prompt_len + _wcswidth(self._buf), self._cols)
             rows_above = end_row - caret_row + 1
-            display_offset = _display_col_offset(prefix, completions)
+            display_offset = _picker_col_offset(prefix, completions)
             col = caret_col - display_offset
 
             cols_from_end = _wcswidth(self._buf[self._cursor:])
@@ -817,13 +850,51 @@ class LineEditor:
             buf_at_tab = self._buf[: self._cursor]
             caret_char_at_tab = caret_char
 
+            # The token prefix of the line as it stands, kept current by
+            # ``refresh`` so ``extend`` measures against the live anchor.
+            live = {"prefix": prefix}
+
             def refresh(typed: str) -> tuple[list[Completion], int]:
                 new_completions, new_prefix, _ = self._get_completions(buf_at_tab + typed)
+                live["prefix"] = new_prefix
                 new_caret_col = _pending_wrap_col(
                     caret_char_at_tab + len(typed), self._cols  # typed is always ASCII
                 )
-                new_col = new_caret_col - _display_col_offset(new_prefix, new_completions)
+                new_col = new_caret_col - _picker_col_offset(new_prefix, new_completions)
                 return new_completions, new_col
+
+            def extend(items: list[Completion], typed: str) -> str:
+                """Common prefix of *items*, minus the text already typed.
+
+                TAB-extend measures candidate *values*, so every measured value
+                must live in the same space as the text it is measured against.
+                Both kinds of candidate start at the completion anchor, but a
+                verbatim (history) value starts at the *raw* anchor while a
+                token value starts where the shlex-unquoted ``prefix`` does, so
+                the two spaces differ whenever the token is quoted.
+                Verbatim-only lists therefore measure against the raw token
+                text; mixed lists measure the token candidates and drop the
+                verbatim rows, which keeps TAB-extend behaving exactly as it did
+                before history candidates existed.
+
+                Both the value space and the already-typed length are decided
+                per TAB press rather than when the picker opened, because
+                narrowing moves both: a mixed list can narrow down to history
+                rows only, and typing a space moves the anchor (a history
+                candidate keeps matching across token boundaries, so the picker
+                stays open).  Measuring a fresh common prefix against a stale
+                anchor always over-counts, which silently made TAB inert.
+                """
+                if all(c.verbatim for c in items):
+                    values = [c.value for c in items]
+                    line = buf_at_tab + typed
+                    typed_len = len(line) - raw_token_start(line)
+                else:
+                    values = [c.value for c in items if not c.verbatim]
+                    typed_len = len(live["prefix"])
+                if not values:
+                    return ""
+                return _common_prefix(values)[typed_len:]
 
             picker = InlinePicker(
                 completions,
@@ -834,8 +905,7 @@ class LineEditor:
                 initial_offset=display_offset,
                 rows_above=rows_above,
                 refresh_fn=refresh,
-                value_fn=lambda c: c.value,
-                completion_prefix=prefix,
+                extend_fn=extend,
                 reopen_when=lambda items: bool(items) and all(c.multi_select for c in items),
                 status_label=status_label,
                 # Open with nothing highlighted: Enter must not insert a
@@ -946,8 +1016,11 @@ class LineEditor:
             self._cursor += len(ins)
 
             value_comps, _, _ = self._get_completions(self._buf[: self._cursor])
+            # ``verbatim`` (history) candidates are not values for this flag —
+            # they'd make every flag look like it had a value completer.
             has_value_picker = any(
-                not c.multi_select and not c.is_arg_hint for c in value_comps
+                not c.multi_select and not c.is_arg_hint and not c.verbatim
+                for c in value_comps
             )
 
             if has_value_picker:
@@ -1028,32 +1101,27 @@ class LineEditor:
     def _raw_token_start(self) -> int:
         """Return the index in self._buf where the current raw token starts.
 
-        Scans forward up to the cursor, tracking single- and double-quote
-        state so that a token like ``'My Documents/'`` is treated as one unit.
-        The returned index is the position of the first character of the last
-        whitespace-delimited (but quote-aware) token before the cursor.
+        Shares :func:`parsing.raw_token_start` with the completers, so a
+        candidate is measured from exactly the position it is inserted at.
         """
-        buf = self._buf[: self._cursor]
-        last_start = 0
-        i = 0
-        while i < len(buf):
-            c = buf[i]
-            if c in (" ", "\t"):
-                last_start = i + 1
-                i += 1
-            elif c in ("'", '"'):
-                j = buf.find(c, i + 1)
-                if j == -1:
-                    break  # unclosed quote — rest is part of this token
-                i = j + 1
-            else:
-                i += 1
-        return last_start
+        return raw_token_start(self._buf[: self._cursor])
 
 
         sys.stdout.flush()
 
     def _apply(self, completion: Completion, prefix: str) -> None:  # noqa: ARG002
+        # Verbatim candidate (history): the value may span several tokens and is
+        # already shell syntax, so it replaces the raw token as-is — no shell
+        # quoting and no trailing space.  It starts at the same anchor an
+        # ordinary token candidate would, so what the user saw in the picker is
+        # what lands under the caret.  Text after the caret is kept: applying a
+        # suggestion must not silently discard part of the buffer.
+        if completion.verbatim:
+            raw_start = self._raw_token_start()
+            post = self._buf[self._cursor :]
+            self._buf = self._buf[:raw_start] + completion.value + post
+            self._cursor = raw_start + len(completion.value)
+            return
         # Find where the raw token starts in the buffer.  We cannot use
         # len(prefix) here because shlex.split returns the *unquoted* length,
         # which differs from the raw length when the token is surrounded by
@@ -1091,10 +1159,15 @@ class LineEditor:
         self._redraw()
 
         # Ask the completion engine what's available for this argument position.
-        # Filter out multi_select entries (flag pickers) and is_arg_hint entries
-        # (hint-only flags with no value completer) — only real value completions remain.
+        # Filter out multi_select entries (flag pickers), is_arg_hint entries
+        # (hint-only flags with no value completer), and verbatim entries
+        # (history suggestions, which are not values for this flag) —
+        # only real value completions remain.
         raw_completions, prefix, _ = self._get_completions(self._buf[: self._cursor])
-        completions = [c for c in raw_completions if not c.multi_select and not c.is_arg_hint]
+        completions = [
+            c for c in raw_completions
+            if not c.multi_select and not c.is_arg_hint and not c.verbatim
+        ]
 
         end_char = self._prompt_len + _wcswidth(self._buf)
         end_row = _pending_wrap_row(end_char, self._cols)
@@ -1165,7 +1238,9 @@ class LineEditor:
 
             def refresh(typed: str) -> tuple[list[Completion], int]:
                 new_raw, new_prefix, _ = self._get_completions(buf_at_open + typed)
-                new_completions = [c for c in new_raw if not c.multi_select]
+                new_completions = [
+                    c for c in new_raw if not c.multi_select and not c.verbatim
+                ]
                 new_caret_col = _pending_wrap_col(
                     caret_char_at_open + len(typed), self._cols  # typed is always ASCII
                 )
@@ -1210,7 +1285,9 @@ class LineEditor:
                 # Keep the picker open on the lone item; the user presses Enter
                 # to apply or TAB to extend the common prefix explicitly.
                 completions, prefix, _ = self._get_completions(self._buf[: self._cursor])
-                completions = [c for c in completions if not c.multi_select]
+                completions = [
+                    c for c in completions if not c.multi_select and not c.verbatim
+                ]
                 if not completions:
                     return True  # typed chars committed; no further completions
                 continue

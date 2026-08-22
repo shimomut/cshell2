@@ -35,7 +35,16 @@ class Completion:
     combinable: bool = False     # True for single-char flags that can be merged (-a -l → -al)
     arg_hint: str = ""           # non-empty when flag requires a following argument (e.g. "N")
     is_arg_hint: bool = False    # True when this IS the hint for a preceding flag's value
+    verbatim: bool = False       # True → value may span tokens; inserted as-is
 ```
+
+Every candidate's `value` starts at the **completion anchor** — the position the
+current token starts at (`parsing.raw_token_start`), which is where the editor
+splices it in. `verbatim` marks one whose value may run past the end of that
+token (today: history suggestions — see
+[History candidates](#history-candidates)); because such a value is already
+shell syntax, the editor inserts it without shell-quoting it and without
+appending a trailing space.
 
 ### Completer Protocol
 
@@ -137,12 +146,113 @@ ConditionalCompleter({
 
 Performs longest-prefix matching on `ctx.args` against the mapping keys: tries the full `args` tuple first, then progressively shorter prefixes.
 
+### HistoryCompleter
+
+Completes the typed line from past command lines. It is the one completer that
+*matches* in **line space**: an entry qualifies when it starts with `ctx.line`
+(everything before the caret), not merely with `ctx.prefix`. What it returns is
+an ordinary anchored candidate — the entry from `raw_token_start(ctx.line)`
+onwards — flagged `verbatim=True` because that tail can span several tokens.
+
+```python
+HistoryCompleter(history_fn, limit=10)
+```
+
+`history_fn` returns the entries to search — the shell passes the **current
+context's** in-memory Up/Down list, so TAB recall and arrow recall agree on
+scope (`Ctrl+R` is the one that searches the global store). It is called on
+every keystroke while a picker is open, so it must stay cheap.
+
+Candidates are most-recent-first, deduplicated, and capped at `limit`. Entries
+are skipped when they add nothing (an exact match, or one differing only by
+trailing whitespace) and when they contain a newline — the value is inserted
+verbatim, so a newline would submit the line on insert.
+
+Anchoring means the picker shows what a candidate would *add*, so a history row
+reads like the token rows next to it: `git com<TAB>` offers `commit` (the
+sub-command) and `commit -m "fix typo"` (from history) side by side, both
+starting from the `com` the user typed.
+
+## History candidates
+
+Because a history entry spans several arguments, it can suggest things no
+per-argument completer could produce:
+
+```
+cshell2> git commit <TAB>
+┌────────────────────────────────────────────────┐
+│ -m "fix typo"                      history     │
+│ --amend --no-edit                  history     │
+│ doc/                                           │
+│ src/                                           │
+└────────────────────────────────────────────────┘
+```
+
+`Shell._get_completions` is a thin wrapper that merges these on top of the
+completer-driven candidates from `_get_base_completions`, so history reaches
+*every* position — command name, sub-command, argument, and the stages of a
+pipeline (`ls | grep fo<TAB>` matches past lines starting with `ls | grep fo`).
+
+The rules that keep the merge from degrading the existing UX:
+
+| Rule | Why |
+|------|-----|
+| History rows are listed **first** | "What I ran before" is the most likely intent |
+| Suppressed when nothing is typed | A bare TAB should list available commands; Up/Down and `Ctrl+R` already cover recall with an empty line |
+| Suppressed on the flag picker (all candidates `multi_select`) | One history candidate would demote the Space-to-toggle checkbox picker to a plain list |
+| Suppressed on the arg-hint (a lone `is_arg_hint`) | The editor renders that lone candidate as a hint line; a second candidate turns it into a picker |
+| Excluded from flag-value pickers (`_prompt_for_arg`) | A history tail is not a value for the flag being filled in |
+| Never auto-applied | Every "exactly one candidate" shortcut in `lineedit._complete` counts only single-token candidates, so a unique token completion still applies on the first TAB, and a lone history candidate is always *shown* before it inserts several arguments |
+
+The last rule has a visible consequence worth knowing: when a position has
+exactly one token candidate, the first TAB auto-applies it and the history rows
+are not shown. They are one TAB away — press it again on the now-longer line.
+The alternative (opening a picker whenever history matches) would cost a
+keystroke on completions that used to be instant.
+
+**TAB-extend and the raw anchor.** `TAB` inside a picker types the longest shared
+prefix of the candidate *values*, which requires every value to live in the same
+space as the prefix it is measured against. Anchored history values nearly share
+the token's space, with one exception: they start at the *raw* anchor, while
+`ctx.prefix` is what shlex left after stripping quotes — so for `cat 'My Do<TAB>`
+the history value begins with `'`. `lineedit._complete` therefore picks one space
+per TAB press: a history-only list measures against the raw token text
+(`line[raw_token_start(line):]`), while a mixed list measures the token prefix
+(`ctx.prefix` as recomputed for the current line) and drops the verbatim rows
+from the measurement.
+
+The choice is re-made on every TAB, not fixed when the picker opened, because
+narrowing moves both halves of the subtraction:
+
+- A **mixed list can narrow to history rows only** — `make job <TAB>` opens with
+  file candidates alongside the history tails, and typing `J` drops the files.
+- **Typing a space moves the anchor.** History candidates match in line space, so
+  they keep matching across a token boundary and the picker stays open; the
+  values are then anchored one token further right.
+
+Both cases used to leave a stale, too-long prefix on the measuring side, so the
+extension came out empty and `TAB` appeared to do nothing. The picker delegates
+the whole computation to the `extend_fn(items, typed)` callback `_complete`
+supplies (`InlinePicker`'s simpler `value_fn` + `completion_prefix` pair still
+serves the flag-value picker, where the value space is fixed).
+
+Picker column alignment (`_picker_col_offset`) measures history rows *with*
+everything else, since anchored values normally do start with the typed token —
+that is what opens a history-only picker under the token instead of at the caret.
+Only when including them shares nothing (again, the quoted token) does it fall
+back to measuring the token rows alone.
+
 ## How TAB Completion Works
 
 The line editor (`lineedit.py`) calls `_get_completions(line_before_cursor)` on every TAB press. The shell implements this as:
 
 ```
 _get_completions(line_before_cursor)
+  → _get_base_completions(line_before_cursor)   ← the dispatch chain below
+  → HistoryCompleter, unless the base result is a flag picker or an arg-hint
+      → prepend the matching entries' tails from the anchor (verbatim=True)
+
+_get_base_completions(line_before_cursor)
   → _split_on_operators() → isolate current pipeline stage
   → split_for_completion(stage) → (tokens, prefix)
   → No tokens?
@@ -174,6 +284,11 @@ Once completions are returned to the line editor:
 | Single non-hint completion | Apply immediately; if it has `arg_hint`, then prompt for the value |
 | All `multi_select` | Open `InlineMultiPicker` |
 | Mixed | Open `InlinePicker` (narrows as user types more characters) |
+
+Every "single completion" row above counts **single-token** candidates only;
+`verbatim` (history) candidates are excluded, so they never auto-apply and never
+turn a unique token completion into a picker. See
+[History candidates](#history-candidates).
 
 Auto-apply on a single completion only fires on the **initial** TAB press.
 If the user is narrowing inside an open picker and the candidate count

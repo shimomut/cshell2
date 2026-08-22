@@ -221,15 +221,18 @@ User input → expand_vars() → parse_line() → Sequence of Pipelines
 User presses TAB
   → LineEditor._complete()
     → _get_completions(line_before_cursor)
-      → _split_on_operators() → isolate current pipeline stage
-      → split_for_completion(stage) → (tokens, prefix)
-      → No tokens? → CommandNameCompleter
-      → Has tokens?
-          → Look up command (registered or external completers)
-          → Check completers[None] for OptionsCompleter (if prefix starts with "-")
-          → Check completers[arg_index] for positional completer
-          → No completer registered? → FileCompleter fallback
-    → Single completion → _apply() directly
+      → _get_base_completions(line_before_cursor)
+          → _split_on_operators() → isolate current pipeline stage
+          → split_for_completion(stage) → (tokens, prefix)
+          → No tokens? → CommandNameCompleter
+          → Has tokens?
+              → Look up command (registered or external completers)
+              → Check completers[None] for OptionsCompleter (if prefix starts with "-")
+              → Check completers[arg_index] for positional completer
+              → No completer registered? → FileCompleter fallback
+      → HistoryCompleter (current context's history, tail from the anchor)
+          → prepended, unless the base result is a flag picker or an arg-hint
+    → Single token completion → _apply() directly
     → All multi_select completions → InlineMultiPicker
     → Otherwise → InlinePicker (narrows as user types)
 ```

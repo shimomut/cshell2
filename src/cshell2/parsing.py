@@ -195,3 +195,32 @@ def split_for_completion(line: str) -> tuple[list[str], str]:
         return [], ""
 
     return tokens[:-1], tokens[-1]
+
+
+def raw_token_start(text: str) -> int:
+    """Return the index in *text* where its last (partial) token starts.
+
+    This is the **completion anchor**: the position a candidate is inserted at,
+    and therefore the position candidate values are measured from.  Everything
+    from here to the end of *text* is the raw text of the token being completed.
+
+    Scans forward tracking single- and double-quote state so a token like
+    ``'My Documents/'`` counts as one unit.  Note "raw": the returned index
+    counts the quote characters, unlike :func:`split_for_completion`, whose
+    prefix is what shlex produced after removing them.
+    """
+    last_start = 0
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c in (" ", "\t"):
+            last_start = i + 1
+            i += 1
+        elif c in ("'", '"'):
+            j = text.find(c, i + 1)
+            if j == -1:
+                break  # unclosed quote — the rest is part of this token
+            i = j + 1
+        else:
+            i += 1
+    return last_start

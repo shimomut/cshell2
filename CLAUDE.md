@@ -48,6 +48,7 @@ change.
 │  ├── Command name completion                       │
 │  ├── Argument completion (per-command completers)  │
 │  ├── Options completion (flags, multi-select TUI)  │
+│  ├── HistoryCompleter — tails of past command lines│
 │  ├── CobraCompleter — drives <cmd> __complete      │
 │  ├── ArgcompleteCompleter — drives argcomplete IPC │
 │  └── Filesystem completion (fallback)              │
@@ -100,7 +101,9 @@ Entry point. Reads input, parses lines, dispatches commands.
   (each `Context` carries an in-memory `history` list); the global file backs
   `Ctrl+R` and seeds the `default` context's Up/Down list at startup. A newly
   created context snapshots its parent's Up/Down list, then they diverge.
-  Per-context lists are in-memory only — not persisted across restarts.
+  Per-context lists are in-memory only — not persisted across restarts. The
+  per-context list also feeds **history TAB completion** (`HistoryCompleter`),
+  so TAB recall and Up/Down recall share one scope.
 - Runs external commands in PTY-backed subprocess slots (`process.py`)
 - Executes pipelines (`|`), sequences (`;`, `&&`, `||`), and redirections (`>`, `>>`, `<`, `2>`, `2>&1`)
 
@@ -320,6 +323,7 @@ class Completion:
     combinable: bool = False     # True for single-char flags that can be merged (-a -l → -al)
     arg_hint: str = ""           # non-empty when flag requires a following argument (e.g. "N")
     is_arg_hint: bool = False    # True when this completion IS the hint for a preceding flag's value
+    verbatim: bool = False       # True → value may span several tokens; inserted as-is (history)
 ```
 
 #### Built-in Completers
@@ -332,6 +336,8 @@ class ChoiceCompleter(Completer):          # static list of choices
     def __init__(self, choices: list[str]): ...
 class CallbackCompleter(Completer):        # dynamic list from a function
     def __init__(self, func: Callable[[], list[str]]): ...
+class HistoryCompleter(Completer):         # tails of past command lines (verbatim=True)
+    def __init__(self, history_fn: Callable[[], list[str]], limit: int = 10): ...
 class OptionsCompleter(Completer):         # flags with optional arg-hints and multi-select TUI
     def __init__(self, options: dict[str, str],
                  args: dict[str, str | tuple[str, Completer]] | None = None): ...
@@ -388,6 +394,41 @@ When all completions have `multi_select=True` (returned by `OptionsCompleter`), 
 - Jump to a flag by typing its first letter
 
 Short boolean flags are automatically merged: selecting `-a` and `-l` inserts `-al`. Flags with `arg_hint` are inserted individually with a space, then followed by either a picker (if a value completer is registered via the `args` dict) or an inline hint prompting the user to type the value.
+
+#### `HistoryCompleter` — Multi-Argument Candidates from History
+
+Past command lines are offered as TAB candidates at every position, so a
+suggestion can span several arguments (`git commit <TAB>` → `-m "fix typo"`).
+This is the one completer that *matches* in **line** space instead of token
+space: an entry qualifies when it starts with `ctx.line` (everything before the
+caret), not merely with `ctx.prefix`. What it returns is anchored like any other
+candidate — the entry from `parsing.raw_token_start(ctx.line)` onwards — so the
+picker shows only what would be added. The values carry `verbatim=True` because
+they can run past the current token, and `lineedit._apply` splices them in at the
+anchor as-is: no shell-quoting, no trailing space, text after the caret
+preserved.
+
+`Shell._get_completions` is a thin wrapper that prepends these to the
+completer-driven candidates from `Shell._get_base_completions` (history first —
+"what I ran before" is the most likely intent). It draws on the **current
+context's** Up/Down history list, so TAB recall matches arrow recall in scope
+while `Ctrl+R` stays global.
+
+History is deliberately suppressed where a candidate-list *shape* is itself the
+contract with the line editor: an empty line (bare TAB lists commands), the flag
+picker (all `multi_select`), the arg-hint (a lone `is_arg_hint`), and flag-value
+pickers (`_prompt_for_arg`). And every "exactly one candidate" shortcut in
+`lineedit._complete` counts single-token candidates only, so a unique token
+completion still auto-applies on the first TAB and a lone history candidate is
+always shown in a picker before it inserts several arguments.
+
+TAB *inside* an open picker types the candidates' longest shared prefix. Because
+history rows are measured from the raw anchor while token rows are measured from
+the shlex-stripped prefix — and because narrowing can drop one kind entirely or
+move the anchor across a space — `_complete` recomputes which space to measure in
+on every press, via the `extend_fn(items, typed)` callback it hands the picker.
+See [doc/completion.md](doc/completion.md) for the full rule table and the
+picker-alignment rules.
 
 #### Example: Context-Aware EC2 Completer
 
@@ -497,6 +538,7 @@ DIY raw-mode line editor. No prompt_toolkit or readline.
 - `LineEditor.prompt()` — read one line; returns the line string, `SWITCH_SENTINEL` on `Ctrl+]`, raises `EOFError` (Ctrl+D on empty) or `KeyboardInterrupt` (Ctrl+C)
 - Key bindings: `Ctrl+A/E`, `Ctrl+B/F`, `Alt+B/F`, `Ctrl+W`, `Ctrl+K`, `Ctrl+U`, `Ctrl+L`, arrow keys, `Ctrl+P/N`, `Ctrl+R`
 - TAB opens an `InlinePicker` (or `InlineMultiPicker` for flags) with **no candidate pre-selected**, so Enter dismisses the list instead of inserting the first item; only Down/Up make a selection; typing narrows the list; TAB inside the picker extends the common prefix and never moves the selection; Backspace can close the picker; narrowing to zero candidates closes it (a zero-row picker would be invisible but still eat keys). Characters typed inside a picker are committed to the buffer on every exit path.
+- TAB candidates include **past command lines** matching everything typed so far (from the current context's history — see `HistoryCompleter`), listed first and tagged `history`. Only the tail from the completion anchor is offered, and applying one splices it in verbatim (`Completion.verbatim`); they are never auto-applied without being shown
 - History search (`Ctrl+R`) opens a filterable picker over all history entries
 - Multi-line wrapping is tracked so `_redraw()` correctly repositions the cursor after wraps
 - VSCode integrated terminal detection: skips reflow-based repositioning, falls back to explicit clear+redraw on resize (`TERM_PROGRAM=vscode`)
@@ -522,7 +564,7 @@ The single place that touches OS-specific terminal APIs. `lineedit.py`, `tui.py`
 
 No alternate screen; all rendering anchored with DECSC/DECRC (`ESC 7` / `ESC 8`). On POSIX a resize arrives via SIGWINCH; on Windows it is detected by polling `terminal.terminal_size()` between key reads. Either way the picker cancels (redrawing without an alt-screen is unreliable — the user presses TAB again).
 
-- **`InlinePicker`** — single-select list rendered inline below the current line. Supports narrowing by typing, TAB-extend common prefix, scrollbar, optional `meta_fn` for right-aligned labels. `select_first=False` (used by the completion pickers) opens with no row highlighted, so Enter returns `None`; `closed_empty` signals "narrowing left zero candidates, I closed myself"; `typed` exposes the characters the picker echoed so the caller can commit them to its buffer.
+- **`InlinePicker`** — single-select list rendered inline below the current line. Supports narrowing by typing, TAB-extend common prefix (via `value_fn` + `completion_prefix`, or an `extend_fn(items, typed)` callback when the caller must recompute the value space per press), scrollbar, optional `meta_fn` for right-aligned labels. `select_first=False` (used by the completion pickers) opens with no row highlighted, so Enter returns `None`; `closed_empty` signals "narrowing left zero candidates, I closed myself"; `typed` exposes the characters the picker echoed so the caller can commit them to its buffer.
 - **`InlineMultiPicker`** — multi-select list with Space to toggle checkboxes. Jump-to by typing a letter. Returns checked items (or the highlighted item if nothing is checked, or `None` when nothing is checked *and* nothing is highlighted). Takes the same `select_first` flag.
 - **`InlineArgPrompt`** — single-line text prompt for a flag's argument. Shows an optional description line above.
 
