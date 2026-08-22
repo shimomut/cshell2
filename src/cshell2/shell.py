@@ -1294,8 +1294,12 @@ class Shell:
         self._var_completer = VarCompleter()
         # Whole-line suggestions from the *current context's* history — the same
         # list Up/Down walks, so TAB recall and arrow recall agree on scope.
-        # (Ctrl+R is the one that searches the global store.)
-        self._history_completer = HistoryCompleter(self._current_context_history)
+        # (Ctrl+R is the one that searches the global store.)  Scoped further to
+        # the lines recorded as run in the cwd; the directory side table is
+        # global, so it keeps working for a context's inherited entries.
+        self._history_completer = HistoryCompleter(
+            self._current_context_history, ran_here_fn=history.ran_here
+        )
 
         # Wire Pipeline.run() so decorator bodies can re-enter execution.
         set_pipeline_executor(self._run_pipeline_from_decorator)

@@ -291,11 +291,22 @@ class HistoryCompleter(Completer):
     *limit* so they can never flood the picker.  ``history_fn`` is called on
     every keystroke while the picker is open, so it must be cheap — the shell
     passes the current context's in-memory Up/Down list.
+
+    Candidates are also **scoped to the current directory** when
+    ``ran_here_fn`` is supplied: it is asked, per entry, whether that line was
+    recorded as run in the cwd (the shell passes :meth:`history.History.ran_here`).
+    Only those entries are offered — ``make deploy`` from another checkout is
+    rarely what you want here, and the same line typed in the right directory is
+    still one Up-arrow away.  When *no* matching entry was run here the scope
+    would leave the user with nothing, so the completer falls back to the
+    matches from elsewhere and labels them ``history (elsewhere)`` to say why
+    they are being shown.
     """
 
-    def __init__(self, history_fn, limit: int = 10):
+    def __init__(self, history_fn, limit: int = 10, ran_here_fn=None):
         self._history_fn = history_fn
         self.limit = limit
+        self._ran_here_fn = ran_here_fn
 
     def should_activate(self, ctx: CompletionContext) -> bool:
         # A bare TAB on an empty prompt should list the commands available, not
@@ -308,10 +319,13 @@ class HistoryCompleter(Completer):
             return []
         line = ctx.line
         anchor = raw_token_start(line)
-        result: list[Completion] = []
+        # Matches split by where they were run: entries from the cwd are the
+        # answer, the rest are only a fallback for when there are none.
+        here: list[str] = []
+        elsewhere: list[str] = []
         seen: set[str] = set()
         for entry in reversed(self._history_fn()):
-            if len(result) >= self.limit:
+            if len(here) >= self.limit:
                 break
             if entry in seen:
                 continue
@@ -329,12 +343,18 @@ class HistoryCompleter(Completer):
             # "inserted verbatim" safe by construction.
             if "\n" in entry or "\r" in entry:
                 continue
-            result.append(
-                Completion(
-                    value=entry[anchor:], description="history", verbatim=True
-                )
-            )
-        return result
+            if self._ran_here_fn is not None and not self._ran_here_fn(entry):
+                # Only the first *limit* of these can ever be shown, but the
+                # scan has to run on to the end to prove nothing matched here.
+                if len(elsewhere) < self.limit:
+                    elsewhere.append(entry)
+            else:
+                here.append(entry)
+        entries, label = (here, "history") if here else (elsewhere, "history (elsewhere)")
+        return [
+            Completion(value=entry[anchor:], description=label, verbatim=True)
+            for entry in entries[: self.limit]
+        ]
 
 
 class OptionsCompleter(Completer):

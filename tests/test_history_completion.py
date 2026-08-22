@@ -79,6 +79,49 @@ def test_silent_on_an_empty_line(line):
     assert c.should_activate(_ctx(line)) is False
 
 
+def test_scoped_to_entries_run_in_the_current_directory():
+    here = {"make deploy staging"}
+    c = HistoryCompleter(
+        lambda: ["make deploy prod", "make deploy staging"],
+        ran_here_fn=lambda entry: entry in here,
+    )
+
+    results = c.complete(_ctx("make deploy "))
+
+    assert [r.value for r in results] == ["staging"]
+    assert [r.description for r in results] == ["history"]
+
+
+def test_falls_back_to_other_directories_when_none_match_here():
+    """A directory you have never run this command in must not be a dead end."""
+    c = HistoryCompleter(
+        lambda: ["make deploy prod", "make deploy staging"],
+        ran_here_fn=lambda entry: False,
+    )
+
+    results = c.complete(_ctx("make deploy "))
+
+    assert [r.value for r in results] == ["staging", "prod"]
+    # The label says why entries from elsewhere are on screen.
+    assert all(r.description == "history (elsewhere)" for r in results)
+
+
+def test_fallback_respects_the_limit():
+    entries = [f"make target{i}" for i in range(20)]
+    c = HistoryCompleter(entries.copy, limit=3, ran_here_fn=lambda entry: False)
+
+    assert len(c.complete(_ctx("make"))) == 3
+
+
+def test_no_ran_here_fn_means_no_directory_scoping():
+    c = HistoryCompleter(lambda: ["make deploy prod", "make deploy staging"])
+
+    results = c.complete(_ctx("make deploy "))
+
+    assert [r.value for r in results] == ["staging", "prod"]
+    assert all(r.description == "history" for r in results)
+
+
 @pytest.mark.parametrize("entry", ["make test", "make test   "])
 def test_skips_entries_with_nothing_to_add(entry):
     """An exact match (or one differing only by trailing space) adds no value."""

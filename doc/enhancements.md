@@ -141,6 +141,20 @@ of [architecture.md](architecture.md).
   `_init_common()` on the base, or a small `WorkUnit` strategy so
   the subclass only specifies what it runs.
 
+- **Delete (or make real) the duplicate `history.py`.**
+  `src/cshell2/history.py` defines a second, unused `History`
+  class; nothing imports it. The live implementation — the one
+  `shell.py` instantiates, that owns the on-disk `~/.cshell2/history`
+  file and the `history.dirs` directory side table — is
+  `lineedit.History`. Having two classes with the same name is an
+  active trap: a change made to the wrong one type-checks, imports,
+  and silently does nothing. Either delete `history.py`, or move
+  `lineedit.History` into it and have `lineedit` import from there
+  (the latter is the better home — storage doesn't belong in the
+  key-dispatch module). *Risk:* trivial either way; the second
+  option needs `from .history import History` re-exported from
+  `lineedit` for the tests that import it from there.
+
 - **Reload integration for user decorators.** Once
   `~/.cshell2/decorators/` lands, `reload` should call
   `decorator_registry.clear_user_decorators()` (the method

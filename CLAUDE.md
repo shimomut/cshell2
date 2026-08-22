@@ -48,7 +48,7 @@ change.
 │  ├── Command name completion                       │
 │  ├── Argument completion (per-command completers)  │
 │  ├── Options completion (flags, multi-select TUI)  │
-│  ├── HistoryCompleter — tails of past command lines│
+│  ├── HistoryCompleter — past lines, cwd-scoped     │
 │  ├── CobraCompleter — drives <cmd> __complete      │
 │  ├── ArgcompleteCompleter — drives argcomplete IPC │
 │  └── Filesystem completion (fallback)              │
@@ -103,7 +103,9 @@ Entry point. Reads input, parses lines, dispatches commands.
   created context snapshots its parent's Up/Down list, then they diverge.
   Per-context lists are in-memory only — not persisted across restarts. The
   per-context list also feeds **history TAB completion** (`HistoryCompleter`),
-  so TAB recall and Up/Down recall share one scope.
+  so TAB recall and Up/Down recall share one scope — with one extra filter on
+  the TAB side: candidates are narrowed to the lines that were run in the
+  current directory (`~/.cshell2/history.dirs`; see `HistoryCompleter`).
 - Runs external commands in PTY-backed subprocess slots (`process.py`)
 - Executes pipelines (`|`), sequences (`;`, `&&`, `||`), and redirections (`>`, `>>`, `<`, `2>`, `2>&1`)
 
@@ -337,7 +339,8 @@ class ChoiceCompleter(Completer):          # static list of choices
 class CallbackCompleter(Completer):        # dynamic list from a function
     def __init__(self, func: Callable[[], list[str]]): ...
 class HistoryCompleter(Completer):         # tails of past command lines (verbatim=True)
-    def __init__(self, history_fn: Callable[[], list[str]], limit: int = 10): ...
+    def __init__(self, history_fn: Callable[[], list[str]], limit: int = 10,
+                 ran_here_fn: Callable[[str], bool] | None = None): ...
 class OptionsCompleter(Completer):         # flags with optional arg-hints and multi-select TUI
     def __init__(self, options: dict[str, str],
                  args: dict[str, str | tuple[str, Completer]] | None = None): ...
@@ -413,6 +416,22 @@ completer-driven candidates from `Shell._get_base_completions` (history first �
 "what I ran before" is the most likely intent). It draws on the **current
 context's** Up/Down history list, so TAB recall matches arrow recall in scope
 while `Ctrl+R` stays global.
+
+Candidates are scoped to the **current directory** as well as the current
+context. `ran_here_fn(entry)` — wired to `History.ran_here` — answers "was this
+line run in the cwd?", and only entries that answer yes are offered, so another
+checkout's `make deploy prod` stays out of the way. Strict scoping alone would
+make a directory you've never run the command in a dead end, so when *no* match
+was run here the completer falls back to the matches from elsewhere, labelled
+`history (elsewhere)`. The directories come from a JSON side table
+(`~/.cshell2/history.dirs`, line → recent dirs, capped at
+`lineedit.MAX_DIRS_PER_LINE`) that `History.add` maintains next to the plain
+`~/.cshell2/history` file; a re-run of the same line after a `cd` records the new
+directory even though the line itself is a duplicate, and every write prunes
+lines the history file no longer holds. Missing or corrupt side table → no
+directory is known and every candidate arrives via the fallback, which is also
+what happens to entries recorded before the side table existed. See
+[doc/completion.md](doc/completion.md#historycompleter).
 
 History is deliberately suppressed where a candidate-list *shape* is itself the
 contract with the line editor: an empty line (bare TAB lists commands), the flag
@@ -538,7 +557,7 @@ DIY raw-mode line editor. No prompt_toolkit or readline.
 - `LineEditor.prompt()` — read one line; returns the line string, `SWITCH_SENTINEL` on `Ctrl+]`, raises `EOFError` (Ctrl+D on empty) or `KeyboardInterrupt` (Ctrl+C)
 - Key bindings: `Ctrl+A/E`, `Ctrl+B/F`, `Alt+B/F`, `Ctrl+W`, `Ctrl+K`, `Ctrl+U`, `Ctrl+L`, arrow keys, `Ctrl+P/N`, `Ctrl+R`
 - TAB opens an `InlinePicker` (or `InlineMultiPicker` for flags) with **no candidate pre-selected**, so Enter dismisses the list instead of inserting the first item; only Down/Up make a selection; typing narrows the list; TAB inside the picker extends the common prefix and never moves the selection; Backspace can close the picker; narrowing to zero candidates closes it (a zero-row picker would be invisible but still eat keys). Characters typed inside a picker are committed to the buffer on every exit path.
-- TAB candidates include **past command lines** matching everything typed so far (from the current context's history — see `HistoryCompleter`), listed first and tagged `history`. Only the tail from the completion anchor is offered, and applying one splices it in verbatim (`Completion.verbatim`); they are never auto-applied without being shown
+- TAB candidates include **past command lines** matching everything typed so far (from the current context's history, scoped to the lines run in the cwd — see `HistoryCompleter`), listed first and tagged `history`. Only the tail from the completion anchor is offered, and applying one splices it in verbatim (`Completion.verbatim`); they are never auto-applied without being shown
 - History search (`Ctrl+R`) opens a filterable picker over all history entries
 - Multi-line wrapping is tracked so `_redraw()` correctly repositions the cursor after wraps
 - VSCode integrated terminal detection: skips reflow-based repositioning, falls back to explicit clear+redraw on resize (`TERM_PROGRAM=vscode`)
@@ -845,7 +864,7 @@ cshell2/
 │       ├── completion_cache.py # TTL store for completer fetches; invalidated after every command
 │       ├── context.py          # Context, ContextManager, ContextState
 │       ├── history.py          # history storage and search
-│       ├── lineedit.py         # DIY raw-mode line editor, History, TAB completion glue
+│       ├── lineedit.py         # DIY raw-mode line editor, History (+ directory side table), TAB completion glue
 │       ├── parsing.py          # line tokenization, quote handling, var expansion
 │       ├── pipeline.py         # quote-aware operator parser: parse_line(), expand_globs(), decorator extraction, Pipeline.run()
 │       ├── process.py          # PTY subprocess slots, output buffering, terminal-mode tracking
@@ -887,6 +906,7 @@ cshell2/
 ~/.cshell2/
 ├── config.py           # user configuration (commands, completers, recipes)
 ├── history             # persistent command history
+├── history.dirs        # JSON: which directories each history line was run in
 ├── recipes/            # user-defined recipes (loaded by enable("<name>"))
 │   └── <name>.py       # must define register()
 └── decorators/         # user-defined decorators (loaded by enable("<name>"))

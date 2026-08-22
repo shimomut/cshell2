@@ -7,7 +7,7 @@ every context.
 
 from pathlib import Path
 
-from cshell2.lineedit import History, LineEditor
+from cshell2.lineedit import History, LineEditor, _norm_dir
 
 
 def _make_editor(history, local_list):
@@ -82,3 +82,103 @@ def test_no_local_fn_falls_back_to_global(tmp_path):
     ed._buf = ""
     ed._hist_back()
     assert ed._buf == "g2"
+
+
+# ---------------------------------------------------------------------------
+# Directory side table (history.dirs) — where each line was run
+# ---------------------------------------------------------------------------
+
+def test_add_records_the_directory_the_line_ran_in(tmp_path):
+    hist = History(tmp_path / "history")
+
+    hist.add("make test", cwd="/repo/a")
+
+    assert hist.ran_here("make test", cwd="/repo/a")
+    assert not hist.ran_here("make test", cwd="/repo/b")
+    # A line nobody has run anywhere is not "from here" either.
+    assert not hist.ran_here("make lint", cwd="/repo/a")
+
+
+def test_directory_defaults_to_the_process_cwd(tmp_path, monkeypatch):
+    hist = History(tmp_path / "history")
+    monkeypatch.chdir(tmp_path)
+
+    hist.add("make test")
+
+    assert hist.ran_here("make test")
+
+
+def test_directories_survive_a_restart(tmp_path):
+    path = tmp_path / "history"
+    History(path).add("make test", cwd="/repo/a")
+
+    reloaded = History(path)
+
+    assert reloaded.entries == ["make test"]
+    assert reloaded.ran_here("make test", cwd="/repo/a")
+    assert not reloaded.ran_here("make test", cwd="/repo/b")
+
+
+def test_a_repeated_line_records_the_new_directory(tmp_path):
+    """The line is a consecutive duplicate, the directory is not."""
+    hist = History(tmp_path / "history")
+
+    hist.add("make test", cwd="/repo/a")
+    hist.add("make test", cwd="/repo/b")
+
+    assert hist.entries == ["make test"]          # still deduplicated on disk
+    assert hist.ran_here("make test", cwd="/repo/a")
+    assert hist.ran_here("make test", cwd="/repo/b")
+    assert History(path=tmp_path / "history").ran_here("make test", cwd="/repo/b")
+
+
+def test_directory_list_per_line_is_capped(tmp_path):
+    from cshell2.lineedit import MAX_DIRS_PER_LINE
+
+    hist = History(tmp_path / "history")
+    for i in range(MAX_DIRS_PER_LINE + 5):
+        hist.add("make test", cwd=f"/repo/d{i}")
+
+    dirs = hist.dirs_for("make test")
+    assert len(dirs) == MAX_DIRS_PER_LINE
+    # The oldest directories are the ones dropped.
+    assert not hist.ran_here("make test", cwd="/repo/d0")
+    assert hist.ran_here("make test", cwd=f"/repo/d{MAX_DIRS_PER_LINE + 4}")
+
+
+def test_repeating_a_directory_refreshes_rather_than_duplicates(tmp_path):
+    hist = History(tmp_path / "history")
+
+    hist.add("make test", cwd="/repo/a")
+    hist.add("make lint", cwd="/repo/b")
+    hist.add("make test", cwd="/repo/b")
+    hist.add("make test", cwd="/repo/a")
+
+    assert hist.dirs_for("make test") == [_norm_dir("/repo/b"), _norm_dir("/repo/a")]
+
+
+def test_side_table_drops_lines_the_history_file_no_longer_has(tmp_path):
+    """Hand-trimming ``history`` prunes ``history.dirs`` on the next write."""
+    path = tmp_path / "history"
+    hist = History(path)
+    hist.add("make test", cwd="/repo/a")
+    hist.add("make lint", cwd="/repo/a")
+
+    path.write_text("make lint\n")                # user trimmed the file
+    trimmed = History(path)
+    assert trimmed.ran_here("make test", cwd="/repo/a")   # still in the side table
+    trimmed.add("make docs", cwd="/repo/a")               # ... until the next save
+
+    assert not History(path).ran_here("make test", cwd="/repo/a")
+    assert History(path).ran_here("make lint", cwd="/repo/a")
+
+
+def test_a_corrupt_side_table_is_ignored(tmp_path):
+    path = tmp_path / "history"
+    path.write_text("make test\n")
+    (tmp_path / "history.dirs").write_text("{not json")
+
+    hist = History(path)
+
+    assert hist.entries == ["make test"]
+    assert not hist.ran_here("make test", cwd="/repo/a")

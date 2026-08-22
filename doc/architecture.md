@@ -230,7 +230,7 @@ User presses TAB
               → Check completers[None] for OptionsCompleter (if prefix starts with "-")
               → Check completers[arg_index] for positional completer
               → No completer registered? → FileCompleter fallback
-      → HistoryCompleter (current context's history, tail from the anchor)
+      → HistoryCompleter (current context's history, cwd-scoped, tail from the anchor)
           → prepended, unless the base result is a flag picker or an arg-hint
     → Single token completion → _apply() directly
     → All multi_select completions → InlineMultiPicker
@@ -279,7 +279,7 @@ cshell2/
 │       ├── completion.py       # Completer ABC, CompletionContext, built-in completers, cobra/argcomplete fallbacks
 │       ├── context.py          # Context, ContextManager, ContextState
 │       ├── history.py          # history storage and search
-│       ├── lineedit.py         # DIY raw-mode line editor, TAB completion glue
+│       ├── lineedit.py         # DIY raw-mode line editor, History (+ history.dirs side table), TAB completion glue
 │       ├── parsing.py          # line tokenization, quote handling, var expansion
 │       ├── pipeline.py         # quote-aware operator parser: parse_line(), expand_globs(), decorator extraction, Pipeline.run()
 │       ├── process.py          # PTY subprocess slots, output buffering, terminal-mode tracking

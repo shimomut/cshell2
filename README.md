@@ -16,7 +16,7 @@ A lightweight but powerful terminal shell environment with rich tab completion a
 - **Protocol fallbacks** — automatic completion for cobra-based tools (`docker`, `kubectl`, `helm`, `gh`, …) and argcomplete-based Python CLIs (`pipx`, `conda`, `pre-commit`, `tox`, …) — no recipe needed
 - **System command fallback** — anything not a registered command runs through the system shell
 - **Cross-platform** — interactive shell, completion, pipelines, redirects, contexts, and history all work on POSIX and Windows; PTY-backed multiplexing of running native processes is POSIX-only
-- **History** — persistent history with up/down navigation, `Ctrl+R` search, and past command lines offered as multi-argument TAB candidates
+- **History** — persistent history with up/down navigation, `Ctrl+R` search, and past command lines offered as multi-argument TAB candidates, scoped to the context and directory you're in
 
 ## Installation
 
@@ -113,6 +113,20 @@ including pipelines (`ls | grep fo<TAB>`) — and draws on the current context's
 history, the same list `↑`/`↓` walks (`Ctrl+R` searches every context). A
 history candidate is never inserted without being shown in the picker first, and
 a unique ordinary completion still applies on the first TAB as before.
+
+Candidates are also scoped to the **directory** you're in: cshell2 records where
+each command was run (`~/.cshell2/history.dirs`) and offers only the lines you
+ran here, so another checkout's `make deploy` stays out of the way. When nothing
+you've typed matches anything run in this directory, the matches from elsewhere
+are offered instead, labelled `history (elsewhere)` so it's clear why:
+
+```
+~/other-project> make deploy <TAB>
+┌────────────────────────────────────────────────┐
+│ staging --dry-run       history (elsewhere)    │
+│ prod                    history (elsewhere)    │
+└────────────────────────────────────────────────┘
+```
 
 **Flag completion** — when flags are available, TAB opens a multi-select checkbox picker:
 - Navigate with arrows; **Space** toggles a flag; **Enter** confirms
@@ -360,7 +374,7 @@ The function is called each time the prompt is displayed, so it reflects dynamic
 | `DirCompleter()` | Complete directory paths only |
 | `OptionsCompleter(options, args)` | Complete flags with multi-select TUI; `args` declares value-taking flags |
 | `ConditionalCompleter(mapping)` | Pick a sub-completer based on preceding args |
-| `HistoryCompleter(history_fn, limit)` | Continue the typed line from past command lines (may span several arguments) |
+| `HistoryCompleter(history_fn, limit, ran_here_fn)` | Continue the typed line from past command lines (may span several arguments), scoped to the ones run in the cwd |
 
 ### Completion Recipes
 
@@ -481,6 +495,7 @@ registry.command(
 |------|---------|
 | `~/.cshell2/config.py` | User configuration |
 | `~/.cshell2/history` | Command history |
+| `~/.cshell2/history.dirs` | Directories each history line was run in (scopes history TAB candidates) |
 | `~/.cshell2/recipes/<name>.py` | User-defined completion recipes (loaded by `enable("<name>")`) |
 | `~/.cshell2/decorators/<name>.py` | User-defined pipeline decorators (loaded by `enable("<name>")`) |
 

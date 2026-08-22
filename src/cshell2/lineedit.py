@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import sys
@@ -145,10 +146,46 @@ def _resize_debug(msg: str) -> None:
 # ── History ──────────────────────────────────────────────────────────────────
 
 
+# Enough to cover the handful of places a given command actually gets run,
+# without letting one much-repeated line grow an unbounded directory list.
+MAX_DIRS_PER_LINE = 8
+
+
+def _norm_dir(path: str) -> str:
+    """Canonical form used to compare directories.
+
+    ``normcase`` matters on Windows, where the shell's cwd and a previously
+    recorded one can differ only by drive-letter or separator case.
+    """
+    return os.path.normcase(os.path.abspath(path))
+
+
 class History:
+    """The global on-disk command history, plus where each line was run.
+
+    Two files, both under ``~/.cshell2/``:
+
+    ``history``
+        One command line per entry, in the order they were run — appended to as
+        the shell runs.  This is what ``Ctrl+R`` searches and what seeds the
+        ``default`` context's Up/Down list at startup.
+
+    ``history.dirs``
+        A JSON side table mapping each line to the directories it was run in
+        (most recent last, capped at :data:`MAX_DIRS_PER_LINE`).  It scopes TAB
+        completion's history candidates to the current directory (see
+        :class:`completion.HistoryCompleter`).  A *side* table rather than an
+        extra field in ``history`` so that file's format — and every reader of
+        :attr:`entries` — stays exactly as it was.  A missing, unreadable or
+        stale side table degrades to "no directory is known for this line",
+        which the completer handles as "not from here".
+    """
+
     def __init__(self, path: Path):
         self._path = path
+        self._dirs_path = path.with_name(path.name + ".dirs")
         self._entries: list[str] = []
+        self._dirs: dict[str, list[str]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -158,12 +195,30 @@ class History:
             ]
         except FileNotFoundError:
             pass
+        self._load_dirs()
 
-    def add(self, line: str) -> None:
+    def _load_dirs(self) -> None:
+        try:
+            raw = json.loads(self._dirs_path.read_text())
+        except (OSError, ValueError):
+            return  # absent, unreadable or corrupt — no directories are known
+        if not isinstance(raw, dict):
+            return
+        for line, dirs in raw.items():
+            if isinstance(line, str) and isinstance(dirs, list):
+                self._dirs[line] = [d for d in dirs if isinstance(d, str)]
+
+    def add(self, line: str, cwd: str | None = None) -> None:
+        """Record *line* as run in *cwd* (the process's cwd by default)."""
         line = line.rstrip()
         if not line:
             return
+        dirs_changed = self._note_dir(line, os.getcwd() if cwd is None else cwd)
         if self._entries and self._entries[-1] == line:
+            # The line itself is already stored, but re-running it after a `cd`
+            # is new information, so the directory still has to be recorded.
+            if dirs_changed:
+                self._save_dirs()
             return
         self._entries.append(line)
         try:
@@ -172,6 +227,45 @@ class History:
                 f.write(line + "\n")
         except OSError:
             pass
+        self._save_dirs()
+
+    def _note_dir(self, line: str, cwd: str) -> bool:
+        """Record *cwd* against *line*. Returns True when anything changed."""
+        norm = _norm_dir(cwd)
+        dirs = self._dirs.setdefault(line, [])
+        if dirs and dirs[-1] == norm:
+            return False
+        if norm in dirs:
+            dirs.remove(norm)          # keep it, but as the most recent
+        dirs.append(norm)
+        del dirs[:-MAX_DIRS_PER_LINE]
+        return True
+
+    def _save_dirs(self) -> None:
+        # Drop lines the history file no longer holds, so hand-trimming
+        # ``history`` prunes the side table on the next write as well.
+        known = set(self._entries)
+        self._dirs = {ln: dirs for ln, dirs in self._dirs.items() if ln in known}
+        try:
+            self._dirs_path.parent.mkdir(parents=True, exist_ok=True)
+            self._dirs_path.write_text(json.dumps(self._dirs, ensure_ascii=False))
+        except OSError:
+            pass   # same policy as the history file: never fail a command over it
+
+    def dirs_for(self, line: str) -> list[str]:
+        """Directories *line* was run in, most recent last (may be empty)."""
+        return list(self._dirs.get(line.rstrip(), ()))
+
+    def ran_here(self, line: str, cwd: str | None = None) -> bool:
+        """True when *line* was recorded as run in *cwd* (default: the cwd).
+
+        Entries stored before the side table existed have no directory at all,
+        so they answer False everywhere — they reach the user through the
+        completer's "nothing matched here" fallback rather than as local
+        candidates.
+        """
+        cwd = os.getcwd() if cwd is None else cwd
+        return _norm_dir(cwd) in self._dirs.get(line.rstrip(), ())
 
     @property
     def entries(self) -> list[str]:

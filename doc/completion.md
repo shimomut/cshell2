@@ -155,7 +155,7 @@ an ordinary anchored candidate — the entry from `raw_token_start(ctx.line)`
 onwards — flagged `verbatim=True` because that tail can span several tokens.
 
 ```python
-HistoryCompleter(history_fn, limit=10)
+HistoryCompleter(history_fn, limit=10, ran_here_fn=None)
 ```
 
 `history_fn` returns the entries to search — the shell passes the **current
@@ -167,6 +167,41 @@ Candidates are most-recent-first, deduplicated, and capped at `limit`. Entries
 are skipped when they add nothing (an exact match, or one differing only by
 trailing whitespace) and when they contain a newline — the value is inserted
 verbatim, so a newline would submit the line on insert.
+
+**Directory scoping.** `ran_here_fn(entry)` answers "was this line run in the
+current directory?" — the shell passes `History.ran_here`, backed by the
+`~/.cshell2/history.dirs` side table (see below). Only entries that answer True
+are offered, so a `make deploy prod` from another checkout stays out of the way
+in this one. Strict scoping would turn a directory you have never run the command
+in into a dead end, so when *no* match was run here the completer falls back to
+the matches from elsewhere and labels them `history (elsewhere)`:
+
+```
+~/other-project> make deploy <TAB>
+┌────────────────────────────────────────────────┐
+│ staging --dry-run       history (elsewhere)    │
+│ prod                    history (elsewhere)    │
+└────────────────────────────────────────────────┘
+```
+
+Two consequences worth knowing:
+
+- Entries recorded before the side table existed (or copied from another
+  machine without it) have no directory at all, so they only ever surface
+  through the fallback until they are run again.
+- The scope is the directory the command was *typed* in, matched exactly. `cd`
+  into a subdirectory of a repo and the root's entries move to the fallback.
+
+**Where the directories come from.** `lineedit.History` appends each executed
+line to `~/.cshell2/history` as before, and records the cwd it was typed in
+against that line in `~/.cshell2/history.dirs` — a JSON map of line → recent
+directories (most recent last, capped at `MAX_DIRS_PER_LINE`). It is a *side*
+table so the main history file's format, and every reader of `History.entries`
+(`Ctrl+R`, the `default` context's seed), stay untouched. A consecutive duplicate
+line still records its directory (re-running a command after a `cd` is new
+information even when the line is not), and each write prunes lines the history
+file no longer holds. Missing, corrupt, or unreadable: no directory is known for
+any line, and every candidate arrives via the fallback.
 
 Anchoring means the picker shows what a candidate would *add*, so a history row
 reads like the token rows next to it: `git com<TAB>` offers `commit` (the
@@ -198,6 +233,7 @@ The rules that keep the merge from degrading the existing UX:
 | Rule | Why |
 |------|-----|
 | History rows are listed **first** | "What I ran before" is the most likely intent |
+| Scoped to the current directory, with a fallback | The lines you ran *here* are the relevant ones; falling back to elsewhere (labelled) keeps a new directory from being a dead end |
 | Suppressed when nothing is typed | A bare TAB should list available commands; Up/Down and `Ctrl+R` already cover recall with an empty line |
 | Suppressed on the flag picker (all candidates `multi_select`) | One history candidate would demote the Space-to-toggle checkbox picker to a plain list |
 | Suppressed on the arg-hint (a lone `is_arg_hint`) | The editor renders that lone candidate as a hint line; a second candidate turns it into a picker |
