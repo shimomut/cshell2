@@ -11,7 +11,12 @@ import pytest
 
 from cshell2.commands import arg, registry as command_registry
 from cshell2.completion import Completion, CompletionContext, HistoryCompleter
-from cshell2.lineedit import History, LineEditor, _picker_col_offset
+from cshell2.lineedit import (
+    History,
+    LineEditor,
+    _align_verbatim_rows,
+    _picker_col_offset,
+)
 from cshell2.shell import Shell
 from cshell2.tui import InlinePicker
 
@@ -367,6 +372,84 @@ def test_picker_alignment_falls_back_to_token_rows_for_a_quoted_token():
     assert _picker_col_offset(
         "My Do", [_history_completion("'My Documents/notes.txt'")]
     ) == 0
+
+
+def _aws_dir_rows():
+    """``cat ~/.aws/<TAB>``: FileCompleter displays bare basenames, so the
+    picker cannot align under the token and opens at the caret instead."""
+    return [
+        _history_completion("~/.aws/config"),
+        Completion(value="~/.aws/amazonq/", display="amazonq/"),
+        Completion(value="~/.aws/config", display="config"),
+    ]
+
+
+def test_verbatim_display_is_trimmed_to_the_picker_column():
+    """A caret-aligned picker must not repeat the token the user can already see."""
+    rows = _align_verbatim_rows("cat ~/.aws/", _aws_dir_rows(), 0)
+
+    assert [r.display for r in rows] == ["config", "amazonq/", "config"]
+    # Only the display moved: the value still starts at the anchor, which is
+    # where _apply splices it in.
+    assert rows[0].value == "~/.aws/config"
+
+
+def test_verbatim_display_keeps_the_token_when_the_picker_aligns_under_it():
+    """The `make jo` case: the picker opens under the "jo", so it belongs on the row."""
+    rows = _align_verbatim_rows("make jo", [_history_completion("job JOB=alpha-1")], 2)
+
+    assert [r.display for r in rows] == ["job JOB=alpha-1"]
+
+
+def test_verbatim_display_is_trimmed_to_a_partial_overlap():
+    """The token rows agreed on a column mid-token; the history row follows them."""
+    rows = [
+        _history_completion("doc/completion.md --dry-run"),
+        Completion(value="doc/completion.md", display="completion.md"),
+        Completion(value="doc/context.md", display="context.md"),
+    ]
+    offset = _picker_col_offset("doc/co", rows)
+    assert offset == 2                      # under the "co" of "doc/co"
+
+    assert _align_verbatim_rows("cat doc/co", rows, offset)[0].display == (
+        "completion.md --dry-run"
+    )
+
+
+def test_picker_rows_all_start_at_the_picker_column(monkeypatch, tmp_path, capsys):
+    def completions_for(line):
+        return (_aws_dir_rows(), "~/.aws/", "")
+
+    ed = _editor(monkeypatch, tmp_path, completions_for)
+    ed._buf, ed._cursor = "cat ~/.aws/", len("cat ~/.aws/")
+    _StubPicker.script = [{"selected": None}]
+
+    ed._complete(0)
+    capsys.readouterr()
+
+    picker = _StubPicker.instances[0]
+    assert [c.display for c in picker.items] == ["config", "amazonq/", "config"]
+    # Narrowing on a keystroke re-applies the same trim.
+    items, _ = picker.kwargs["refresh_fn"]("")
+    assert items[0].display == "config"
+
+
+def test_selecting_a_trimmed_row_still_inserts_the_whole_value(
+    monkeypatch, tmp_path, capsys
+):
+    """Trimming is cosmetic — the row still replaces the token it was anchored at."""
+    def completions_for(line):
+        return (_aws_dir_rows(), "~/.aws/", "")
+
+    ed = _editor(monkeypatch, tmp_path, completions_for)
+    ed._buf, ed._cursor = "cat ~/.aws/", len("cat ~/.aws/")
+    _StubPicker.script = [{"selected": None}]
+    ed._complete(0)
+    capsys.readouterr()
+
+    ed._apply(_StubPicker.instances[0].items[0], "~/.aws/")
+
+    assert ed._buf == "cat ~/.aws/config"
 
 
 # ---------------------------------------------------------------------------

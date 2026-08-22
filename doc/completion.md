@@ -272,11 +272,22 @@ the whole computation to the `extend_fn(items, typed)` callback `_complete`
 supplies (`InlinePicker`'s simpler `value_fn` + `completion_prefix` pair still
 serves the flag-value picker, where the value space is fixed).
 
-Picker column alignment (`_picker_col_offset`) measures history rows *with*
+**Picker column alignment.** `_picker_col_offset` measures history rows *with*
 everything else, since anchored values normally do start with the typed token —
 that is what opens a history-only picker under the token instead of at the caret.
 Only when including them shares nothing (again, the quoted token) does it fall
 back to measuring the token rows alone.
+
+Whatever column it lands on, `_align_verbatim_rows` then trims the verbatim rows'
+`display` so every row on screen *starts* at that column. A history display
+begins at the raw anchor, but a token row's begins wherever its completer chose:
+`FileCompleter` shows only the last path segment, so `cat ~/.aws/<TAB>` lists
+`config`, and the picker has to open at the caret. Left untrimmed, the history
+row would render there as `~/.aws/config` — the same `~/.aws/` the user is
+looking at one line above, apparently duplicated. Trimming is purely cosmetic:
+the `value` still starts at the anchor, because that is where `_apply` splices it
+in. The partial-overlap case falls out of the same rule — with `cat doc/co<TAB>`
+aligned under the `co`, a history row shows `completion.md --dry-run`.
 
 ## How TAB Completion Works
 

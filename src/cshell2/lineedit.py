@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import unicodedata
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -97,6 +98,36 @@ def _picker_col_offset(prefix: str, completions: list[Completion]) -> int:
     if not aligned or len(aligned) == len(completions):
         return offset
     return _display_col_offset(prefix, aligned)
+
+
+def _align_verbatim_rows(line: str, completions: list[Completion],
+                         display_offset: int) -> list[Completion]:
+    """Trim verbatim displays so every picker row starts at the same column.
+
+    A verbatim (history) *value* starts at the raw anchor, so its display
+    repeats the whole partial token; a token row's display starts wherever its
+    completer chose to put it — ``FileCompleter`` shows only the last path
+    segment, for instance, so ``cat ~/.aws/<TAB>`` lists ``config``, not
+    ``~/.aws/config``.  The picker opens ``display_offset`` columns left of the
+    caret, which is the column those rows agree on; a verbatim row must
+    therefore show only its last ``display_offset`` columns of already-typed
+    text or it renders shifted right, reading as though it were duplicating
+    what the user has already typed.
+
+    Only the display changes.  The value still starts at the anchor, because
+    that is where :meth:`LineEditor._apply` splices it in.
+    """
+    typed = line[raw_token_start(line):]
+    drop = 0
+    while drop < len(typed) and _wcswidth(typed[drop:]) > display_offset:
+        drop += 1
+    if not drop:
+        return completions
+    return [
+        replace(c, display=c.display[drop:])
+        if c.verbatim and c.display.startswith(typed) else c
+        for c in completions
+    ]
 
 
 def _pending_wrap_row(char_count: int, cols: int) -> int:
@@ -934,6 +965,7 @@ class LineEditor:
             rows_above = end_row - caret_row + 1
             display_offset = _picker_col_offset(prefix, completions)
             col = caret_col - display_offset
+            rows = _align_verbatim_rows(self._buf[: self._cursor], completions, display_offset)
 
             cols_from_end = _wcswidth(self._buf[self._cursor:])
             if cols_from_end > 0:
@@ -949,13 +981,15 @@ class LineEditor:
             live = {"prefix": prefix}
 
             def refresh(typed: str) -> tuple[list[Completion], int]:
-                new_completions, new_prefix, _ = self._get_completions(buf_at_tab + typed)
+                line = buf_at_tab + typed
+                new_completions, new_prefix, _ = self._get_completions(line)
                 live["prefix"] = new_prefix
                 new_caret_col = _pending_wrap_col(
                     caret_char_at_tab + len(typed), self._cols  # typed is always ASCII
                 )
-                new_col = new_caret_col - _picker_col_offset(new_prefix, new_completions)
-                return new_completions, new_col
+                new_offset = _picker_col_offset(new_prefix, new_completions)
+                new_rows = _align_verbatim_rows(line, new_completions, new_offset)
+                return new_rows, new_caret_col - new_offset
 
             def extend(items: list[Completion], typed: str) -> str:
                 """Common prefix of *items*, minus the text already typed.
@@ -991,7 +1025,7 @@ class LineEditor:
                 return _common_prefix(values)[typed_len:]
 
             picker = InlinePicker(
-                completions,
+                rows,
                 display_fn=lambda c: c.display or c.value,
                 meta_fn=lambda c: c.description,
                 max_height=10,

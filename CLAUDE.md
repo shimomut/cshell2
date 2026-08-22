@@ -405,11 +405,14 @@ suggestion can span several arguments (`git commit <TAB>` → `-m "fix typo"`).
 This is the one completer that *matches* in **line** space instead of token
 space: an entry qualifies when it starts with `ctx.line` (everything before the
 caret), not merely with `ctx.prefix`. What it returns is anchored like any other
-candidate — the entry from `parsing.raw_token_start(ctx.line)` onwards — so the
-picker shows only what would be added. The values carry `verbatim=True` because
-they can run past the current token, and `lineedit._apply` splices them in at the
-anchor as-is: no shell-quoting, no trailing space, text after the caret
-preserved.
+candidate — the entry from `parsing.raw_token_start(ctx.line)` onwards. The values
+carry `verbatim=True` because they can run past the current token, and
+`lineedit._apply` splices them in at the anchor as-is: no shell-quoting, no
+trailing space, text after the caret preserved. On the way to the picker,
+`lineedit._align_verbatim_rows` trims each row's *display* (never its value) to
+start at the column the picker opens in, so a history row never re-shows text the
+user is already looking at — `cat ~/.aws/<TAB>` lists `config` beside the
+directory entries, not `~/.aws/config`.
 
 `Shell._get_completions` is a thin wrapper that prepends these to the
 completer-driven candidates from `Shell._get_base_completions` (history first —
