@@ -73,6 +73,7 @@ console_pages: dict[str, str] = {
     "iam":            "https://console.aws.amazon.com/iam/home",
     "cloudformation": "https://console.aws.amazon.com/cloudformation/home",
     "cost":           "https://console.aws.amazon.com/costmanagement/home#/cost-explorer?granularity=Daily&historicalRelativeRange=LAST_7_DAYS",
+    "sagemaker":      "https://console.aws.amazon.com/sagemaker/home",
     "hyperpod":       "https://console.aws.amazon.com/sagemaker/home#/cluster-management",
 }
 
