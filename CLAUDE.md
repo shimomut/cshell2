@@ -876,6 +876,13 @@ cshell2/
 │       ├── recipes/
 │       │   ├── __init__.py     # enable(*names) helper
 │       │   ├── aws.py
+│       │   ├── awsut.py
+│       │   ├── _awsut_sagemaker/  # `awsut sagemaker` group (subpackage, so
+│       │   │   │                  # enable("*") doesn't glob it as a recipe)
+│       │   │   ├── __init__.py    # register_sagemaker(awsut) — called by awsut.register()
+│       │   │   ├── render.py      # shared tables / document rendering / ARN shapes
+│       │   │   ├── jobs.py        # jobs list|describe|watch|stop
+│       │   │   └── hub.py         # hub hubs|list|versions|describe|files|trace
 │       │   ├── df.py
 │       │   ├── du.py
 │       │   ├── find.py

@@ -1,0 +1,826 @@
+"""``awsut sagemaker jobs`` — SageMaker Job resources at the service-API level.
+
+Talks to ListJobs / DescribeJob / StopJob through the ``awsut`` boto3 client
+factory, so what you see is the raw service response rather than an SDK
+rendering of it.
+
+Deliberate differences from the SDK's own status panel:
+
+* Identifiers print in full, never wrapped or ellipsized, so they can be
+  copied into other commands and tickets.  ``list`` is one line per job with
+  a header row; column widths come from the data.
+* ``describe`` always prints ``JobConfigDocument``, reformatted YAML-style.
+  That document is where a job's S3 paths and model choices actually live —
+  DescribeJob has no input/output members, only an opaque JSON string — so
+  hiding it behind a flag would hide the most-wanted part of the response.
+  ``--raw-config`` gives the string verbatim; ``--raw`` gives the whole API
+  response as JSON.
+* ``watch`` prints only on change, so a long job leaves a readable timeline
+  rather than a repainted frame.  With no ``JOB_NAME`` it watches every job
+  matching the ``list`` filters and reports each status change, printing a
+  ``.`` heartbeat every 5s while nothing moves — so silence is visibly "still
+  polling", not "hung".  ``Ctrl+C`` detaches.
+
+``JobCategory`` is **required** by both ListJobs and DescribeJob, so a job
+cannot be looked up by name alone.  When ``--category`` is omitted,
+``describe`` / ``watch`` / ``stop`` probe the known categories and report
+which one matched, and ``list`` queries all of them.
+
+The queried set is the loaded botocore model's ListJobs enum, unioned with
+any category named in :data:`EXTRA_JOB_CATEGORIES` (empty by default;
+configurable — see that constant).  ``--category extra`` narrows to the
+latter.
+
+Neither kind of category failure is fatal, and the two are told apart (see
+:func:`category_not_offered`): a category the endpoint does not offer at all
+is reported once as a compact "not offered by this endpoint" note, while a
+category that should have worked and didn't (no permission, throttling) gets a
+stderr line naming the service's own message.
+"""
+
+from __future__ import annotations
+
+import concurrent.futures
+import sys
+import time
+from datetime import datetime, timezone
+
+import botocore.exceptions
+
+from ...completion import ChoiceCompleter, Completer, Completion, CompletionContext
+from ...commands import arg
+from ...completion_cache import aws_env_key, get_or_fetch
+from ...shell import passthrough_input
+from .. import awsut
+from .render import (
+    DOT_INTERVAL,
+    Heartbeat,
+    SmError,
+    age,
+    elapsed_of,
+    error_code,
+    flag_value,
+    fmt_dur,
+    fmt_time,
+    guard,
+    model_enum,
+    NOT_FOUND_CODES,
+    print_table,
+    parse_since,
+    region_label,
+    require_operation,
+    show_document,
+    sleep_with_dots,
+    sm_client,
+)
+
+# Categories to query in addition to the ones the loaded botocore model declares.
+#
+# Empty by default: the model is the source of truth, and a value absent from it
+# may not exist at the endpoint.  It is a list rather than a constant because
+# botocore treats an enum as documentation and does not reject a value absent
+# from it — so an endpoint whose model this botocore release does not carry can
+# still be queried by naming its categories from ``~/.cshell2/config.py``:
+#
+#     from cshell2.recipes._awsut_sagemaker import jobs
+#     jobs.EXTRA_JOB_CATEGORIES = ["SomeCategory", "SomeOtherCategory"]
+#
+# Kept apart from :func:`declared_categories` because the two fail differently: a
+# rejection from an undeclared category means "this endpoint does not offer it"
+# and is reported as such, where the same rejection from a declared one is a real
+# error.  ``--category extra`` narrows to this list.
+EXTRA_JOB_CATEGORIES: list[str] = []
+
+TERMINAL_OK = {"Completed"}
+TERMINAL_BAD = {"Failed", "Stopped", "DeleteFailed"}
+TERMINAL = TERMINAL_OK | TERMINAL_BAD | {"Deleting"}
+
+JOB_STATUSES = sorted(TERMINAL | {"InProgress", "Stopping"})
+
+# Group selectors accepted anywhere a category is: they stand for a set of
+# categories rather than one, and probing narrows over that set.
+CATEGORY_GROUPS = {
+    "all": "every category this shell knows",
+    "extra": "only the categories added via EXTRA_JOB_CATEGORIES",
+}
+
+
+def declared_categories() -> list[str]:
+    """The categories the loaded botocore model declares. Offline — no API call.
+
+    Resolved per call rather than at registration time because
+    ``var sagemaker_service_name=`` can swap the model underneath us.
+    """
+    return list(model_enum(awsut.sagemaker_service_name, "ListJobs", "JobCategory"))
+
+
+def job_categories() -> list[str]:
+    """Every JobCategory this shell knows how to list.
+
+    The model's enum unioned with :data:`EXTRA_JOB_CATEGORIES`, so a refreshed
+    service model contributes new categories without a code change here — and
+    graduates a configured extra out of "extra" by declaring it.
+    """
+    found = declared_categories()
+    return found + [c for c in EXTRA_JOB_CATEGORIES if c not in found]
+
+
+def category_not_offered(category: str, exc) -> bool:
+    """True when a ListJobs/DescribeJob failure just means "no such category here".
+
+    A ``ValidationException`` on a category the loaded model does not declare is
+    the *expected* answer from an endpoint that does not offer it.  Reporting each
+    one as a failure would put a stderr line per configured extra under every
+    `jobs list`.  The same code on a declared category, or any other code
+    (``AccessDeniedException``) on any category, is a genuine failure and stays
+    loud.
+    """
+    return (error_code(exc) == "ValidationException"
+            and category not in declared_categories())
+
+
+def resolve_categories(selector: str | None) -> list[str]:
+    """Map a ``--category`` value to the list of categories to query."""
+    categories = job_categories()
+    if selector in (None, "all"):
+        return categories
+    if selector == "extra":
+        return [c for c in categories if c in EXTRA_JOB_CATEGORIES]
+    return [selector]
+
+
+# ─── API calls ──────────────────────────────────────────────────────────────
+
+def describe_job(cli, name: str, category: str) -> dict:
+    require_operation(cli, "describe_job", "DescribeJob")
+    return cli.describe_job(JobName=name, JobCategory=category)
+
+
+def resolve_job(cli, name: str, category: str | None) -> tuple[dict, str]:
+    """``(description, category)``, probing categories when none is given.
+
+    ``all`` / ``extra`` are group selectors rather than categories, so they
+    probe too — just over a narrowed set.
+    """
+    candidates = resolve_categories(category)
+    if not candidates:
+        raise SmError(f"no categories to search for {category!r}")
+    if len(candidates) == 1:
+        return describe_job(cli, name, candidates[0]), candidates[0]
+
+    tried = []
+    not_offered = []
+    for cat in candidates:
+        try:
+            return describe_job(cli, name, cat), cat
+        except botocore.exceptions.ClientError as exc:
+            if error_code(exc) in NOT_FOUND_CODES:
+                # A category this endpoint rejects outright never had a chance to
+                # hold the job, so saying "not found in it" would be misleading.
+                (not_offered if category_not_offered(cat, exc) else tried).append(cat)
+                continue
+            raise
+    message = f"no job named {name!r} in any of: {', '.join(tried) or '(none)'}"
+    if not_offered:
+        message += (f"\n       not offered by this endpoint, so not searched: "
+                    f"{', '.join(not_offered)}")
+    message += ("\n       (JobCategory is required by DescribeJob; pass --category "
+                "if it is a category this shell does not know about)")
+    raise SmError(message)
+
+
+def fetch_jobs(cli, categories, after, *, status=None, contains=None,
+               limit=25, sort="CreationTime", asc=False, warn=True):
+    """ListJobs across *categories* → ``(rows, skipped, not_offered)``.
+
+    Rows come back in service order, unsorted and untruncated; callers decide
+    how to present them.
+
+    The two failure lists are kept apart because they mean different things to
+    the user: *skipped* is a category that should have worked and didn't (no
+    permission, throttling) and gets a stderr line, while *not_offered* is a
+    category this endpoint simply does not have (see
+    :func:`category_not_offered`) and is worth only a compact note.
+    ``warn=False`` suppresses the stderr lines, so a polling loop reports an
+    unauthorized category once rather than on every pass.
+    """
+    require_operation(cli, "list_jobs", "ListJobs")
+    rows = []
+    skipped = []
+    not_offered = []
+    for cat in categories:
+        params = {"JobCategory": cat, "MaxResults": min(limit, 100)}
+        if status:
+            params["StatusEquals"] = status
+        if contains:
+            params["NameContains"] = contains
+        if after:
+            params["CreationTimeAfter"] = after
+        if sort:
+            params["SortBy"] = sort
+            params["SortOrder"] = "Ascending" if asc else "Descending"
+
+        # --max is a per-category page budget, not a shared one: sharing it lets
+        # the first category consume the whole allowance and silently starve the
+        # rest.
+        got = 0
+        token = None
+        while got < limit:
+            if token:
+                params["NextToken"] = token
+            try:
+                resp = cli.list_jobs(**params)
+            except botocore.exceptions.ClientError as exc:
+                if category_not_offered(cat, exc):
+                    not_offered.append(cat)
+                else:
+                    if warn:
+                        msg = exc.response["Error"].get("Message", str(exc))
+                        print(f"  ! {cat}: {msg}", file=sys.stderr)
+                    skipped.append(cat)
+                break
+            page = resp.get("JobSummaries", [])
+            rows.extend(page)
+            got += len(page)
+            token = resp.get("NextToken")
+            if not token:
+                break
+    return rows, skipped, not_offered
+
+
+def _category_notes(skipped, not_offered) -> list[str]:
+    """Footer lines for the categories a listing could not cover.
+
+    Coverage is never trimmed silently, but the two reasons read differently: a
+    category the endpoint does not have is a fact about the endpoint, not
+    something the user can act on, so it gets one line naming the categories
+    rather than a stderr line each.
+    """
+    notes = []
+    if skipped:
+        notes.append(f"not queried (see stderr): {', '.join(skipped)}")
+    if not_offered:
+        notes.append(f"not offered by this endpoint: {', '.join(not_offered)} "
+                     f"(absent from the {awsut.sagemaker_service_name!r} model "
+                     "and rejected by the service)")
+    return notes
+
+
+def transitions(desc):
+    """``SecondaryStatusTransitions`` as ``(status, start, end, secs, running, msg)``.
+
+    The service does not populate ``EndTime`` on these transitions — not even
+    on a completed job — so a step's duration has to be derived from the *next*
+    transition's ``StartTime``, falling back to the job's ``EndTime`` for the
+    last step.  Deriving it this way means a finished step's duration stops
+    changing, which is the whole point: reading ``StartTime`` alone gives an
+    ever-growing age rather than a duration.
+
+    Only the final transition of a job that has not reached a terminal state is
+    reported as running.
+    """
+    steps = desc.get("SecondaryStatusTransitions", []) or []
+    job_end = desc.get("EndTime")
+    terminal = desc.get("JobStatus") in TERMINAL
+    out = []
+
+    for i, t in enumerate(steps):
+        start = t.get("StartTime")
+        end = t.get("EndTime")  # honoured if the service ever starts populating it
+        if end is None:
+            if i + 1 < len(steps):
+                end = steps[i + 1].get("StartTime")
+            elif terminal:
+                end = job_end
+
+        last = i + 1 == len(steps)
+        running = last and not terminal
+        if start and end:
+            secs = (end - start).total_seconds()
+        elif start:
+            secs = age(start)
+        else:
+            secs = None
+        out.append((t.get("Status", "?"), start, end, secs, running,
+                    t.get("StatusMessage", "")))
+    return out
+
+
+def mark_for(status: str) -> str:
+    return "✓" if status in TERMINAL_OK else ("✗" if status in TERMINAL_BAD else "…")
+
+
+def state_of(summary) -> tuple[str, str]:
+    """``(status, secondary)`` from a ListJobs summary.
+
+    ListJobs names the secondary field ``JobSecondaryStatus``; DescribeJob
+    calls the same thing ``SecondaryStatus``.
+    """
+    return (summary.get("JobStatus") or "?",
+            summary.get("JobSecondaryStatus") or "-")
+
+
+def fmt_state(state) -> str:
+    status, secondary = state
+    return f"{status} / {secondary}" if secondary and secondary != "-" else status
+
+
+# ─── completers ─────────────────────────────────────────────────────────────
+
+class _JobCategoryCompleter(Completer):
+    """Categories plus the ``all`` / ``extra`` group selectors."""
+
+    def complete(self, ctx: CompletionContext) -> list[Completion]:
+        out = [Completion(value=name, description=desc)
+               for name, desc in CATEGORY_GROUPS.items()
+               if name.startswith(ctx.prefix)]
+        declared = declared_categories()
+        for cat in job_categories():
+            if not cat.startswith(ctx.prefix):
+                continue
+            # Flag an undeclared category before the call, not after: an endpoint
+            # that does not offer it answers ValidationException.
+            out.append(Completion(
+                value=cat,
+                description="" if cat in declared else
+                            "from EXTRA_JOB_CATEGORIES — not in this model, "
+                            "may be rejected",
+            ))
+        return out
+
+
+class _JobNameCompleter(Completer):
+    """Job names, narrowed by an already-typed ``--category``.
+
+    Fans ListJobs out over the categories in one pass — a job cannot be listed
+    without naming its category, so completing a name means asking every
+    category that could hold it.  Results are cached (TTL + invalidated after
+    every command) so the fan-out happens once per typed token, not once per
+    keystroke.
+    """
+
+    def complete(self, ctx: CompletionContext) -> list[Completion]:
+        selector = flag_value(ctx.args, "--category")
+        try:
+            summaries = get_or_fetch(
+                ("awsut.sagemaker_jobs", aws_env_key(), awsut.sagemaker_endpoint,
+                 awsut.sagemaker_service_name, selector),
+                lambda: _list_jobs_for_completion(selector),
+            )
+        except Exception:
+            return []
+        return [
+            Completion(
+                value=s["JobName"],
+                description=" · ".join(p for p in (
+                    s.get("JobCategory") or "",
+                    fmt_state(state_of(s)),
+                ) if p),
+            )
+            for s in summaries
+            if s.get("JobName", "").startswith(ctx.prefix)
+        ]
+
+
+def _list_jobs_for_completion(selector: str | None) -> list[dict]:
+    """One newest-first page of jobs per category, fetched in parallel.
+
+    One client shared across the pool, as ``awsut``'s HyperPod hostname lookup
+    already does: boto3 clients are thread-safe once constructed, and building
+    one per thread would dominate the latency this fan-out exists to hide.
+    """
+    cli = sm_client()
+    require_operation(cli, "list_jobs", "ListJobs")
+    categories = resolve_categories(selector)
+
+    def one(category):
+        try:
+            resp = cli.list_jobs(JobCategory=category, MaxResults=100,
+                                 SortBy="CreationTime", SortOrder="Descending")
+        except Exception:
+            return []          # unauthorized / unknown category — just skip it
+        return resp.get("JobSummaries", [])
+
+    rows: list[dict] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        for page in pool.map(one, categories):
+            rows.extend(page)
+    rows.sort(key=_creation_key, reverse=True)
+    return rows
+
+
+def _creation_key(row):
+    return row.get("CreationTime") or datetime.min.replace(tzinfo=timezone.utc)
+
+
+_SINCE_HINTS = ChoiceCompleter(["30m", "1h", "6h", "24h", "7d"])
+
+
+def _filter_params(*, for_watch: bool) -> list:
+    """The ``list`` filter flags, shared with ``watch``'s all-jobs mode.
+
+    Declared here rather than on the ``jobs`` group so ``describe`` and
+    ``stop`` — which cannot use them — don't offer them in completion.
+    """
+    prefix = "all-jobs mode: " if for_watch else ""
+    return [
+        arg("--status", metavar="STATUS", completer=ChoiceCompleter(JOB_STATUSES),
+            help=f"{prefix}only jobs in this status"),
+        arg("--contains", metavar="TEXT",
+            help=f"{prefix}NameContains filter"),
+        arg("--since", metavar="AGE", completer=_SINCE_HINTS,
+            help=f"{prefix}only jobs created within e.g. 30m, 24h, 7d"),
+        arg("--max", type=int, default=25, dest="limit", metavar="N",
+            help="per-category cap on jobs fetched (default 25)"),
+    ]
+
+
+# ─── command tree ───────────────────────────────────────────────────────────
+
+def register_jobs(sagemaker) -> None:
+    jobs = sagemaker.command(
+        "jobs",
+        help="Job resources — ListJobs / DescribeJob / StopJob",
+        params=[
+            # Declared once here and inherited by every leaf: JobCategory is
+            # required by the API, so all four sub-commands need it.
+            arg("--category", metavar="CATEGORY", completer=_JobCategoryCompleter(),
+                help="one category, or 'all' / 'extra' (default: all known)"),
+        ],
+    )
+
+    @jobs.command(
+        "list", help="List jobs across categories",
+        params=_filter_params(for_watch=False) + [
+            arg("--sort", choices=["Name", "CreationTime", "Status"],
+                default="CreationTime", help="service-side sort key"),
+            arg("--asc", action="store_true", help="oldest first"),
+        ],
+    )
+    @guard
+    def _jobs_list(category, status, contains, since, limit, sort, asc):
+        cli = sm_client()
+        categories = resolve_categories(category)
+        rows, skipped, not_offered = fetch_jobs(
+            cli, categories, parse_since(since), status=status, contains=contains,
+            limit=limit, sort=sort, asc=asc)
+        queried = [c for c in categories if c not in not_offered]
+        if not rows:
+            print(f"no jobs matched · region {region_label()} · "
+                  f"categories: {', '.join(queried) or '(none)'}")
+            for note in _category_notes(skipped, not_offered):
+                print(note)
+            return
+
+        rows.sort(key=_creation_key, reverse=not asc)
+        dropped = max(0, len(rows) - limit)
+        rows = rows[:limit]
+
+        cells = []
+        for r in rows:
+            started, ended = r.get("CreationTime"), r.get("EndTime")
+            status_text = r.get("JobStatus", "?")
+            cells.append([
+                mark_for(status_text),
+                r.get("JobName") or "?",
+                r.get("JobCategory") or "?",
+                status_text,
+                r.get("JobSecondaryStatus") or "-",
+                fmt_time(started),
+                fmt_dur(elapsed_of(started, ended)) + ("" if ended else "+"),
+            ])
+
+        plural = "y" if len(queried) == 1 else "ies"
+        print(f"{len(rows)} job(s) · region {region_label()} · "
+              f"{len(queried)} categor{plural} queried\n")
+
+        notes = ["DURATION '+' = still running.  Times are local."]
+        # Never cap coverage silently — a short list must not read as a
+        # complete one.  'at least' because --max also bounded the per-category
+        # fetch, so there may be more beyond these.
+        if dropped:
+            notes.append(f"at least {dropped} more job(s) matched but were cut by "
+                         f"--max {limit}; raise --max or narrow with "
+                         "--category/--since/--contains.")
+        notes.extend(_category_notes(skipped, not_offered))
+
+        print_table(
+            ["", "JOB NAME", "CATEGORY", "STATUS", "SECONDARY", "CREATED", "DURATION"],
+            cells,
+            note="\n".join(notes),
+        )
+
+    @jobs.command(
+        "describe", help="Describe one job, including its config document",
+        params=[
+            arg("job_name", help="job to describe",
+                completer=_JobNameCompleter()),
+            arg("--raw", action="store_true", help="Show the raw API response as JSON"),
+            arg("--raw-config", action="store_true",
+                help="Print JobConfigDocument verbatim instead of reformatted"),
+        ],
+    )
+    @guard
+    def _jobs_describe(job_name, category, raw, raw_config):
+        cli = sm_client()
+        desc, resolved = resolve_job(cli, job_name, category)
+        if raw:
+            awsut._print_json(desc)
+            return
+        _render_job(desc, resolved, raw_config=raw_config)
+
+    @jobs.command(
+        "watch",
+        help="Poll a job and log changes; with no JOB_NAME, watch every matching job",
+        params=[
+            arg("job_name", nargs="?", default=None, completer=_JobNameCompleter(),
+                help="omit to watch every job matching the filters"),
+            arg("-n", "--interval", type=float, default=15.0, metavar="SEC",
+                help="poll seconds (default 15)"),
+            arg("--timeout", type=float, default=0.0, metavar="SEC",
+                help="give up after this long; 0 = no limit"),
+            arg("--until-done", action="store_true",
+                help="all-jobs mode: stop once every tracked job is terminal"),
+        ] + _filter_params(for_watch=True),
+    )
+    @guard
+    def _jobs_watch(job_name, category, interval, timeout, until_done,
+                    status, contains, since, limit):
+        if job_name:
+            _watch_one(job_name, category, interval, timeout)
+        else:
+            _watch_all(category, interval, timeout, until_done,
+                       status, contains, since, limit)
+
+    @jobs.command(
+        "stop", help="Stop a running job",
+        params=[
+            arg("job_name", help="job to stop",
+                completer=_JobNameCompleter()),
+            arg("-y", "--yes", action="store_true", help="Skip confirmation"),
+        ],
+    )
+    @guard
+    def _jobs_stop(job_name, category, yes):
+        cli = sm_client()
+        require_operation(cli, "stop_job", "StopJob")
+        desc, resolved = resolve_job(cli, job_name, category)
+        status = desc.get("JobStatus")
+        if status in TERMINAL:
+            print(f"job is already {status}; nothing to stop")
+            return
+        if not yes:
+            try:
+                answer = passthrough_input(
+                    f"Stop job [{desc.get('JobName')}] "
+                    f"({resolved}, currently {status})? [y/N] : ")
+            except RuntimeError:
+                # No terminal to prompt on (piped / decorator body).
+                raise SmError("cannot confirm without a terminal — re-run with -y/--yes")
+            if answer.strip().lower() not in ("y", "yes"):
+                print("not stopped")
+                return
+        cli.stop_job(JobName=desc.get("JobName"), JobCategory=resolved)
+        print(f"StopJob sent for {desc.get('JobName')}")
+
+
+# ─── describe rendering ─────────────────────────────────────────────────────
+
+def _render_job(desc, category, raw_config=False):
+    started, ended = desc.get("CreationTime"), desc.get("EndTime")
+    elapsed = elapsed_of(started, ended)
+    status = desc.get("JobStatus", "?")
+
+    # Identifiers first, one per line, unwrapped — these are the copy targets.
+    print(f"JobName      {desc.get('JobName')}")
+    print(f"JobArn       {desc.get('JobArn')}")
+    print(f"JobCategory  {category}")
+    if desc.get("RoleArn"):
+        print(f"RoleArn      {desc['RoleArn']}")
+    print()
+    secondary = desc.get("SecondaryStatus")
+    print(f"Status       {status}" + (f" / {secondary}" if secondary else ""))
+    print(f"Created      {fmt_time(started)}")
+    print(f"Modified     {fmt_time(desc.get('LastModifiedTime'))}")
+    if ended:
+        print(f"Ended        {fmt_time(ended)}")
+    print(f"Elapsed      {fmt_dur(elapsed)}" + ("" if ended else " (running)"))
+    if desc.get("FailureReason"):
+        print(f"\nFailureReason\n  {desc['FailureReason']}")
+
+    steps = transitions(desc)
+    if steps:
+        print("\nSecondaryStatusTransitions  "
+              "(durations derived — service leaves EndTime unset)")
+        for st, start, _end, secs, running, msg in steps:
+            mark = "…" if running else "✓"
+            duration = fmt_dur(secs) + ("+" if running else "")
+            print(f"  {mark} {st:<14} {duration:<9} {fmt_time(start)}")
+            for line in (msg or "").splitlines():
+                print(f"       {line}")
+
+    show_document("JobConfigDocument", desc.get("JobConfigDocument"),
+                  desc.get("JobConfigSchemaVersion"), raw=raw_config)
+
+    if desc.get("Tags"):
+        print("\nTags")
+        for t in desc["Tags"]:
+            print(f"  {t.get('Key')}={t.get('Value')}")
+
+
+# ─── watch: one job ─────────────────────────────────────────────────────────
+
+def _watch_one(job_name, category, interval, timeout):
+    cli = sm_client()
+    desc, resolved = resolve_job(cli, job_name, category)
+
+    print(f"watching {desc.get('JobName')}")
+    print(f"  {desc.get('JobArn')}")
+    print(f"  category {resolved} · region {region_label()} · poll {interval}s · "
+          f"heartbeat {DOT_INTERVAL}s")
+    print("  Ctrl+C to detach\n")
+
+    seen = None            # last (status, secondary) pair printed
+    seen_steps = set()     # transitions already reported
+    beat = Heartbeat()
+    deadline = time.monotonic() + timeout if timeout else None
+
+    while True:
+        status = desc.get("JobStatus", "?")
+        secondary = desc.get("SecondaryStatus")
+        stamp = datetime.now().strftime("%H:%M:%S")
+
+        for st, _start, end, secs, _running, msg in transitions(desc):
+            # Keyed on "has it finished" as well as the name, so a step is
+            # reported once when it starts and once when it ends.
+            key = (st, end is not None)
+            if key in seen_steps:
+                continue
+            seen_steps.add(key)
+            beat.clear()
+            if end:
+                print(f"[{stamp}] ✓ {st} finished in {fmt_dur(secs)}")
+            else:
+                print(f"[{stamp}] → {st} started")
+                for line in (msg or "").splitlines():
+                    print(f"           {line}")
+
+        if (status, secondary) != seen:
+            seen = (status, secondary)
+            beat.clear()
+            print(f"[{stamp}] status {status}"
+                  + (f" / {secondary}" if secondary else ""))
+
+        if status in TERMINAL:
+            elapsed = None
+            if desc.get("CreationTime"):
+                end = desc.get("EndTime") or datetime.now(timezone.utc)
+                elapsed = (end - desc["CreationTime"]).total_seconds()
+            beat.clear()
+            print(f"\n[{stamp}] terminal: {status} after {fmt_dur(elapsed)}")
+            if desc.get("FailureReason"):
+                print(f"FailureReason: {desc['FailureReason']}")
+            return
+
+        if deadline and time.monotonic() > deadline:
+            beat.clear()
+            print(f"\n[{stamp}] timeout after {fmt_dur(timeout)}; job still {status}")
+            return
+
+        try:
+            sleep_with_dots(interval, beat)
+        except KeyboardInterrupt:
+            beat.clear()
+            print(f"\ndetached; job is still {status}. Re-attach with:")
+            print(f"  awsut sagemaker jobs watch {desc.get('JobName')} "
+                  f"--category {resolved}")
+            return
+
+        try:
+            desc = describe_job(cli, job_name, resolved)
+        except botocore.exceptions.ClientError as exc:
+            beat.clear()
+            msg = exc.response["Error"].get("Message", str(exc))
+            print(f"  ! poll failed: {msg}", file=sys.stderr)
+
+
+# ─── watch: every matching job ──────────────────────────────────────────────
+
+def _watch_all(category, interval, timeout, until_done,
+               status_filter, contains, since, limit):
+    """Watch every job matching the ``list`` filters and log each status change.
+
+    Polls ListJobs per category (not DescribeJob per job) so the cost is
+    O(categories) regardless of fleet size, and jobs that appear after the
+    watch starts are picked up.
+
+    The filters are re-evaluated every pass, so a relative ``--since`` is a
+    sliding window and a job can drop out of it.  When one does — including
+    because ``--status InProgress`` stopped matching the moment it finished —
+    it gets one DescribeJob so its final state is reported rather than
+    silently vanishing.
+    """
+    cli = sm_client()
+    categories = resolve_categories(category)
+    beat = Heartbeat()
+    parse_since(since)   # validate the format before printing the header
+
+    filters = [f"category {category or 'all'}"]
+    for label, value in (("status", status_filter), ("contains", contains),
+                         ("since", since)):
+        if value:
+            filters.append(f"{label} {value}")
+    print(f"watching all jobs · region {region_label()} · poll {interval}s · "
+          f"heartbeat {DOT_INTERVAL}s")
+    print(f"  filters: {', '.join(filters)} · max {limit}/category")
+    print("  Ctrl+C to detach\n")
+
+    known = {}       # JobName -> {"state": (status, secondary), "category": str}
+    ever_seen = False
+    first = True
+    deadline = time.monotonic() + timeout if timeout else None
+
+    while True:
+        # Re-derived every pass so a relative --since slides forward with time.
+        after = parse_since(since)
+        rows, skipped, not_offered = fetch_jobs(
+            cli, categories, after, status=status_filter, contains=contains,
+            limit=limit, sort="CreationTime", asc=False, warn=first)
+        if first:
+            for note in _category_notes(skipped, not_offered):
+                print(f"{note}\n")
+        stamp = datetime.now().strftime("%H:%M:%S")
+
+        seen = set()
+        for r in rows:
+            name = r.get("JobName")
+            if not name:
+                continue
+            seen.add(name)
+            state = state_of(r)
+            entry = known.get(name)
+            if entry is None:
+                known[name] = {"state": state, "category": r.get("JobCategory")}
+                ever_seen = True
+                beat.clear()
+                # '·' for the baseline pass, '+' for a job that showed up later.
+                lead = "·" if first else "+"
+                print(f"[{stamp}] {lead} {mark_for(state[0])} {name}  "
+                      f"{fmt_state(state)}")
+            elif entry["state"] != state:
+                beat.clear()
+                print(f"[{stamp}]   {mark_for(state[0])} {name}  "
+                      f"{fmt_state(entry['state'])} → {fmt_state(state)}")
+                entry["state"] = state
+
+        # Departures: confirm the final state instead of letting a job just
+        # disappear off the end of the timeline.
+        for name in [n for n in known if n not in seen]:
+            entry = known.pop(name)
+            final = None
+            if entry["category"]:
+                try:
+                    d = describe_job(cli, name, entry["category"])
+                    final = (d.get("JobStatus") or "?",
+                             d.get("SecondaryStatus") or "-")
+                except botocore.exceptions.ClientError:
+                    pass
+            beat.clear()
+            if final and final != entry["state"]:
+                print(f"[{stamp}]   {mark_for(final[0])} {name}  "
+                      f"{fmt_state(entry['state'])} → {fmt_state(final)}  "
+                      "(left filter)")
+            else:
+                print(f"[{stamp}] - {name}  no longer matches the filter "
+                      f"(last seen {fmt_state(entry['state'])})")
+
+        if first:
+            beat.clear()
+            if not rows:
+                print(f"[{stamp}] no jobs match yet; waiting for one to appear")
+            print()
+        first = False
+
+        if until_done and ever_seen and all(
+                e["state"][0] in TERMINAL for e in known.values()):
+            beat.clear()
+            print(f"[{stamp}] all {len(known)} tracked job(s) terminal; done")
+            return
+
+        if deadline and time.monotonic() > deadline:
+            beat.clear()
+            running = sum(1 for e in known.values()
+                          if e["state"][0] not in TERMINAL)
+            print(f"[{stamp}] timeout after {fmt_dur(timeout)}; "
+                  f"{running} job(s) still running")
+            return
+
+        try:
+            sleep_with_dots(interval, beat)
+        except KeyboardInterrupt:
+            beat.clear()
+            running = [n for n, e in known.items()
+                       if e["state"][0] not in TERMINAL]
+            print(f"\ndetached; {len(running)} job(s) still running"
+                  + (": " + ", ".join(running) if running else ""))
+            return

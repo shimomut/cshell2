@@ -63,3 +63,47 @@ exits the shell.** `exit > log` exits the shell because the redirect
 path on `_execute_stage` runs synchronously on the main thread. The
 pipeline path catches and absorbs `SystemExit` per stage; matching
 that behaviour for the redirect path is a separate, smaller change.
+
+## `awsut sagemaker jobs` — a category the loaded model doesn't declare costs a round-trip
+
+`JobCategory` is required by ListJobs and DescribeJob, so a job cannot be
+looked up by name alone: with no `--category`, the commands query every
+category they know about. That set is the loaded botocore model's
+`ListJobs` enum plus anything in `jobs.EXTRA_JOB_CATEGORIES` (empty by
+default — see the docstring there for how to add one from
+`~/.cshell2/config.py`).
+
+botocore treats an enum as documentation and does not reject a value
+absent from it, so an undeclared category reaches the service and the
+service decides. `jobs.category_not_offered` classifies the resulting
+`ValidationException` as "this endpoint does not have that category" and
+reports the set once as a compact note, rather than one stderr line per
+category on every `jobs list`. What remains is the wasted call: an
+undeclared category is still *tried*, so `list` / `describe` / `watch`
+spend one extra round-trip per such category per pass, and the job-name
+completer one per typed token. Caching keeps the completer cost off the
+keystroke path but does not remove it. A category that graduates into the
+model stops costing anything, with no code change.
+
+## Python commands cannot report an exit status
+
+A `@registry.command` handler's return value is ignored.
+`PythonCommandSlot._compute_exit_code` derives the status purely from
+what escaped the handler: `SystemExit` → its code, `KeyboardInterrupt`
+→ 130, any other exception → 1, clean return → 0. So a handler has no
+way to say "I ran fine but the thing I was asked about failed", and
+`my_cmd && other` treats an unhappy-but-clean run as success.
+
+Raising `SystemExit` is not a workaround: per the entry above, the
+redirect path re-raises it on the main thread and would take the shell
+down.
+
+Consequence for ported tools: `awsut sagemaker`'s commands
+(`_awsut_sagemaker/`) print `error: …` to stderr and return normally
+where the standalone `sm_jobs.py` / `sm_hub.py` scripts exited 1 or 2.
+The distinction is visible to a human reading the output but not to
+`&&` / `||`. Fixing this properly means threading a return value (or a
+sentinel exception the slot understands) from `Command.invoke` through
+`_run_python_command_sync` and `PythonCommandSlot` into
+`_compute_exit_code` — worth doing, but it changes the contract for
+every Python command, not just these.

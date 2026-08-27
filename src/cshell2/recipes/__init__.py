@@ -11,8 +11,10 @@ Available recipes:
     aws       drives the AWS CLI v2 ``aws_completer`` binary; covers every
               service, operation, flag, and live AWS resource discovery
     awsut     AWS utility commands — console URL opening, recent cost report,
-              ec2 / cloudwatch logs / cloudformation, and SageMaker HyperPod
-              cluster operations under `awsut hyperpod ...`
+              ec2 / cloudwatch logs / cloudformation, SageMaker HyperPod
+              cluster operations under `awsut hyperpod ...`, and SageMaker
+              jobs + hub content (with ARN lineage tracing) under
+              `awsut sagemaker jobs|hub ...`
     chmod     mode operands (common octal + symbolic) and file completion
     chown     USER / USER:GROUP completion (system users + groups), files
     cp        copy flags (BSD/macOS vs GNU/Linux), file completion

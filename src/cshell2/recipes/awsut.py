@@ -11,6 +11,12 @@ Provides the ``awsut`` command tree:
   delete-nodes|reboot-nodes|replace-nodes|upgrade-ami|delete|
   list|describe|watch|log|ssm|ssh|run|search-capacity|
   kubeconfig|events``
+* ``awsut sagemaker jobs list|describe|watch|stop``
+* ``awsut sagemaker hub hubs|list|versions|describe|files|trace``
+
+The ``sagemaker`` group lives in the ``_awsut_sagemaker`` subpackage (this
+module is already long enough); it is attached from :func:`register` because
+``CommandRegistry`` roots cannot be re-opened from a second module.
 
 Profile and region switching live in the ``aws`` recipe as ``Var`` entries
 (``var aws_profile=...``, ``var aws_region=...``).  The SageMaker endpoint
@@ -1062,6 +1068,11 @@ def register() -> None:
     _register_logs(awsut)
     _register_cf(awsut)
     _register_hyperpod(awsut)
+
+    # Lazy: the subpackage does `from .. import awsut`, so it can only be
+    # imported once this module is fully loaded.
+    from ._awsut_sagemaker import register_sagemaker
+    register_sagemaker(awsut)
 
     var_registry.register(_SagemakerEndpointVar())
     var_registry.register(_SagemakerServiceNameVar())
