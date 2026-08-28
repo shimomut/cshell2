@@ -24,6 +24,7 @@ Makefile target              this group
 ``make logs``                ``logs [SPACE]``
 ``make launch-private``      ``start [SPACE]``      — ResourceSpec from DescribeSpace
 ``make url-private``         ``url [SPACE]``        — profile from the space's owner
+(open that URL by hand)      ``open [SPACE]``       — the same URL, spent here
 ``make stop-private``        ``stop [SPACE]``
 ``make stop-all``            ``stop --all``
 ===========================  ====================================================
@@ -37,12 +38,17 @@ The Makefile's ``launch`` → ``url`` ordering is enforced rather than documente
 ``url`` lands on the space's *app*, so with no app running it refuses and points
 at ``start`` instead of minting a link that fails in the recipient's browser.
 
+``url`` and ``open`` mint the identical link (one ``mint_url``, one flag set)
+and differ only in where it is spent: printed for someone else, or handed to
+this machine's browser.
+
 Naming follows the rest of ``awsut``: a plural noun lists that resource type
 (as ``hub`` does with ``hubs`` / ``versions`` / ``files``, because a group
 holding several resource types has no single thing a bare ``list`` could mean),
-and the state-changing pair is ``start`` / ``stop`` — the same pair as
+the state-changing pair is ``start`` / ``stop`` — the same pair as
 ``awsut ec2 start`` / ``awsut ec2 stop``, and for the same reason: compute goes
-away, storage stays.
+away, storage stays — and ``open`` opens a browser, the same leaf name
+``awsut cloudformation open`` already uses.
 
 Two resolution rules, applied everywhere in this module:
 
@@ -572,6 +578,33 @@ def _wait_flags(what: str):
     ]
 
 
+def _url_flags():
+    """The flags that describe *which* URL to mint — shared by ``url``/``open``.
+
+    One list rather than two, because the two leaves differ only in what they
+    do with the URL afterwards: every knob that changes the link itself has to
+    read the same way on both, or the pair becomes two subtly different
+    commands.  A fresh list per call — each leaf gets its own ``Arg`` objects.
+    """
+    return [
+        _space_arg("space to land in (omit together with --user-profile "
+                   "for the domain's Studio home)"),
+        _domain_flag(),
+        arg("--user-profile", metavar="NAME", completer=_UserProfileCompleter(),
+            help="default: the space's owner profile"),
+        arg("--landing-uri", metavar="URI",
+            help="default: app:<app type>: for a space, none for the domain"),
+        arg("--expires", type=int, default=300, metavar="SEC",
+            help="how long the URL itself is usable (default 300)"),
+        arg("--session-duration", type=int, default=43200, metavar="SEC",
+            help="how long the session it opens lasts (default 43200)"),
+        arg("--app-type", metavar="TYPE", completer=_AppTypeCompleter(),
+            help="default: the space's own AppType (picks the landing URI)"),
+        arg("--no-app-check", action="store_true",
+            help="mint the URL even with no app running in the space"),
+    ]
+
+
 # ─── command tree ───────────────────────────────────────────────────────────
 
 def register_studio(sagemaker) -> None:
@@ -859,89 +892,47 @@ def register_studio(sagemaker) -> None:
 
     @studio.command(
         "url", help="Presigned URL into a space, as a user profile",
-        params=[
-            _space_arg("space to land in (omit together with --user-profile "
-                       "for the domain's Studio home)"),
-            _domain_flag(),
-            arg("--user-profile", metavar="NAME", completer=_UserProfileCompleter(),
-                help="default: the space's owner profile"),
-            arg("--landing-uri", metavar="URI",
-                help="default: app:<app type>: for a space, none for the domain"),
-            arg("--expires", type=int, default=300, metavar="SEC",
-                help="how long the URL itself is usable (default 300)"),
-            arg("--session-duration", type=int, default=43200, metavar="SEC",
-                help="how long the session it opens lasts (default 43200)"),
-            arg("--open", action="store_true", dest="open_browser",
-                help="open it in a browser instead of only printing it"),
-            arg("--app-type", metavar="TYPE", completer=_AppTypeCompleter(),
-                help="default: the space's own AppType (picks the landing URI)"),
-            arg("--no-app-check", action="store_true",
-                help="mint the URL even with no app running in the space"),
-        ],
+        params=_url_flags(),
     )
     @guard
     def _url(space, domain, user_profile, landing_uri, expires, session_duration,
-             open_browser, app_type, no_app_check):
-        """A URL a person without an AWS identity can use.
+             app_type, no_app_check):
+        """Print the URL — the leaf for a link that goes to someone else.
 
-        Two members are what make it land *inside a space*: ``SpaceName`` and
-        ``LandingUri``.  Both are optional to the API and recent enough that an
-        old botocore lacks them, which is why they are checked against the model
-        rather than sent hopefully.
-
-        Because the default landing URI aims at the space's *app*, the app has
-        to exist for the URL to be worth handing over — see
-        :func:`_require_live_app`.
+        ``open`` is the same URL opened here; see :func:`mint_url` for what
+        makes one.
         """
-        cli = sm_client()
-        require_operation(cli, "create_presigned_domain_url",
-                          "CreatePresignedDomainUrl")
-        resolved = resolve_domain(cli, domain)
-        domain_id = resolved["DomainId"]
-
-        params = {"DomainId": domain_id,
-                  "ExpiresInSeconds": expires,
-                  "SessionExpirationDurationInSeconds": session_duration}
-        target = f"domain {domain_label(resolved)}"
-
-        if space is None and user_profile:
-            # An explicit profile with no space: the domain's Studio home.
-            params["UserProfileName"] = user_profile
-        else:
-            space_desc = resolve_space(cli, domain_id, space)
-            space_name = space_desc.get("SpaceName")
-            profile = user_profile or space_owner(space_desc)
-            if not profile:
-                raise SmError(f"space {space_name} records no owner profile; "
-                              "pass --user-profile")
-            require_input_member("CreatePresignedDomainUrl", "SpaceName",
-                                 "a URL cannot be pointed at a space")
-            params["UserProfileName"] = profile
-            params["SpaceName"] = space_name
-            resolved_type = space_app_type(space_desc, app_type)
-            if not landing_uri and not no_app_check:
-                # Only for the default landing URI: an explicit --landing-uri is
-                # the caller aiming somewhere of their own choosing, which may
-                # legitimately not be an app.
-                _require_live_app(cli, domain_id, space_name, resolved_type)
-            uri = landing_uri or f"app:{resolved_type}:"
-            if uri:
-                require_input_member("CreatePresignedDomainUrl", "LandingUri",
-                                     "the URL cannot land on an app")
-                params["LandingUri"] = uri
-            target = f"space {space_name} as {profile}"
-
-        if landing_uri and "LandingUri" not in params:
-            require_input_member("CreatePresignedDomainUrl", "LandingUri",
-                                 "--landing-uri cannot be honoured")
-            params["LandingUri"] = landing_uri
-
-        url = cli.create_presigned_domain_url(**params).get("AuthorizedUrl")
-        print(f"{target} · valid {fmt_dur(expires)} · "
-              f"session {fmt_dur(session_duration)}")
+        url, target = mint_url(space, domain, user_profile, landing_uri, expires,
+                               session_duration, app_type, no_app_check)
+        print(_url_header(target, expires, session_duration))
         print(url)
-        if open_browser:
-            webbrowser.open(url)
+
+    @studio.command(
+        "open", help="Mint a presigned URL and open it in a browser",
+        params=_url_flags(),
+    )
+    @guard
+    def _open(space, domain, user_profile, landing_uri, expires, session_duration,
+              app_type, no_app_check):
+        """The same URL as ``url``, spent here instead of handed over.
+
+        Its own leaf rather than ``url --open`` because that flag made the
+        command's *subject* a flag: minting a link to paste into a chat and
+        opening one's own workspace are two things to ask for, and opening is a
+        whole word elsewhere in ``awsut`` (``awsut cloudformation open``,
+        ``awsut console``).
+
+        The URL is still printed.  ``--expires`` is short by design, and a
+        browser that opens the wrong identity's window — the usual failure with
+        a presigned URL — leaves the reader needing the link itself.
+        """
+        url, target = mint_url(space, domain, user_profile, landing_uri, expires,
+                               session_duration, app_type, no_app_check)
+        print(_url_header(target, expires, session_duration))
+        print(url)
+        if not webbrowser.open(url):
+            raise SmError("no browser could be opened here — the URL above is "
+                          f"good for {fmt_dur(expires)}, open it yourself")
 
     @studio.command(
         "stop", help="Stop a space's app — ends its compute charges",
@@ -1020,6 +1011,78 @@ def register_studio(sagemaker) -> None:
             for space_name, a_type, a_name in targets:
                 _wait_for_app(cli, domain_id, space_name, a_type, a_name,
                               {"Deleted", "Failed"}, timeout, gone_is_done=True)
+
+
+# ─── minting a presigned URL ────────────────────────────────────────────────
+
+def mint_url(space, domain, user_profile, landing_uri, expires, session_duration,
+             app_type, no_app_check) -> tuple[str, str]:
+    """One CreatePresignedDomainUrl call — a URL a person without an AWS
+    identity can use — and a label saying what it lands on.
+
+    Two members are what make it land *inside a space*: ``SpaceName`` and
+    ``LandingUri``.  Both are optional to the API and recent enough that an old
+    botocore lacks them, which is why they are checked against the model rather
+    than sent hopefully.
+
+    Because the default landing URI aims at the space's *app*, the app has to
+    exist for the URL to be worth minting at all — see
+    :func:`_require_live_app`.
+
+    Shared by ``url`` and ``open`` so that the two cannot drift into producing
+    different links from the same flags; each caller only decides what to do
+    with the one it gets.
+    """
+    cli = sm_client()
+    require_operation(cli, "create_presigned_domain_url",
+                      "CreatePresignedDomainUrl")
+    resolved = resolve_domain(cli, domain)
+    domain_id = resolved["DomainId"]
+
+    params = {"DomainId": domain_id,
+              "ExpiresInSeconds": expires,
+              "SessionExpirationDurationInSeconds": session_duration}
+    target = f"domain {domain_label(resolved)}"
+
+    if space is None and user_profile:
+        # An explicit profile with no space: the domain's Studio home.
+        params["UserProfileName"] = user_profile
+    else:
+        space_desc = resolve_space(cli, domain_id, space)
+        space_name = space_desc.get("SpaceName")
+        profile = user_profile or space_owner(space_desc)
+        if not profile:
+            raise SmError(f"space {space_name} records no owner profile; "
+                          "pass --user-profile")
+        require_input_member("CreatePresignedDomainUrl", "SpaceName",
+                             "a URL cannot be pointed at a space")
+        params["UserProfileName"] = profile
+        params["SpaceName"] = space_name
+        resolved_type = space_app_type(space_desc, app_type)
+        if not landing_uri and not no_app_check:
+            # Only for the default landing URI: an explicit --landing-uri is
+            # the caller aiming somewhere of their own choosing, which may
+            # legitimately not be an app.
+            _require_live_app(cli, domain_id, space_name, resolved_type)
+        uri = landing_uri or f"app:{resolved_type}:"
+        if uri:
+            require_input_member("CreatePresignedDomainUrl", "LandingUri",
+                                 "the URL cannot land on an app")
+            params["LandingUri"] = uri
+        target = f"space {space_name} as {profile}"
+
+    if landing_uri and "LandingUri" not in params:
+        require_input_member("CreatePresignedDomainUrl", "LandingUri",
+                             "--landing-uri cannot be honoured")
+        params["LandingUri"] = landing_uri
+
+    return cli.create_presigned_domain_url(**params).get("AuthorizedUrl"), target
+
+
+def _url_header(target: str, expires: int, session_duration: int) -> str:
+    """What the link is for and how long it lasts — both leaves print this."""
+    return (f"{target} · valid {fmt_dur(expires)} · "
+            f"session {fmt_dur(session_duration)}")
 
 
 # ─── the app a URL lands on ─────────────────────────────────────────────────

@@ -884,7 +884,8 @@ cshell2/
 │       │   │   ├── jobs.py        # jobs list|describe|watch|stop
 │       │   │   ├── hub.py         # hub hubs|list|versions|describe|files|trace
 │       │   │   └── studio.py      # studio domains|spaces|apps|profiles|logs|
-│       │   │                      #        start|url|stop   (Domain/Space/App)
+│       │   │                      #        start|url|open|stop
+│       │   │                      #        (Domain/Space/App)
 │       │   ├── df.py
 │       │   ├── du.py
 │       │   ├── find.py

@@ -1334,6 +1334,47 @@ def test_url_still_works_when_apps_cannot_be_listed(
     assert "could not check for a running app" in out.err
 
 
+def test_open_mints_the_same_url_url_would_and_hands_it_to_the_browser(
+        sagemaker_tree, studio_sm, monkeypatch, capsys):
+    """`open` is `url` plus the browser — same call, same printed link."""
+    cli = studio_sm(_presigning_client(apps=[_app("data-prep-space")]))
+    opened = []
+
+    def fake_open(url):
+        opened.append(url)
+        return True
+
+    monkeypatch.setattr(studio.webbrowser, "open", fake_open)
+    run_studio(sagemaker_tree, "open")
+    params, = calls_of(cli, "create_presigned_domain_url")
+    assert params["LandingUri"] == "app:JupyterLab:"
+    assert opened == ["https://example/x"]
+    # Printed as well: a browser can open the wrong identity's window.
+    assert "https://example/x" in capsys.readouterr().out
+
+
+def test_open_refuses_to_start_an_app_it_would_land_on_nothing(
+        sagemaker_tree, studio_sm, monkeypatch, capsys):
+    """The app check is in the shared minter, so it guards both leaves."""
+    cli = studio_sm(_presigning_client(apps=[]))
+    monkeypatch.setattr(studio.webbrowser, "open",
+                        lambda url: pytest.fail("should not have opened"))
+    run_studio(sagemaker_tree, "open")
+    assert calls_of(cli, "create_presigned_domain_url") == []
+    assert "would open on nothing" in capsys.readouterr().err
+
+
+def test_open_says_so_when_there_is_no_browser_to_open(
+        sagemaker_tree, studio_sm, monkeypatch, capsys):
+    """A headless host must not report success — the URL expires in minutes."""
+    studio_sm(_presigning_client(apps=[_app("data-prep-space")]))
+    monkeypatch.setattr(studio.webbrowser, "open", lambda url: False)
+    run_studio(sagemaker_tree, "open")
+    out = capsys.readouterr()
+    assert "https://example/x" in out.out
+    assert "no browser could be opened" in out.err
+
+
 def test_stop_confirms_before_deleting(sagemaker_tree, studio_sm, monkeypatch,
                                        capsys):
     cli = studio_sm(studio_client(
@@ -1678,7 +1719,8 @@ def test_the_tree_has_all_three_groups(sagemaker_tree):
     assert set(sagemaker_tree.children["hub"].children) == {
         "hubs", "list", "versions", "describe", "files", "trace"}
     assert set(sagemaker_tree.children["studio"].children) == {
-        "domains", "spaces", "apps", "profiles", "logs", "start", "url", "stop"}
+        "domains", "spaces", "apps", "profiles", "logs", "start", "url", "open",
+        "stop"}
 
 
 def _flags(node):
@@ -1726,7 +1768,8 @@ def test_hub_flag_is_not_offered_where_there_is_no_hub_to_pick(sagemaker_tree):
 def test_domain_flag_is_not_offered_where_there_is_no_domain_to_pick(sagemaker_tree):
     leaves = sagemaker_tree.children["studio"].children
     assert "--domain" not in _flags(leaves["domains"])
-    for name in ("spaces", "apps", "profiles", "logs", "start", "url", "stop"):
+    for name in ("spaces", "apps", "profiles", "logs", "start", "url", "open",
+                 "stop"):
         assert "--domain" in _flags(leaves[name]), name
 
 
@@ -1734,7 +1777,7 @@ def test_app_and_wait_flags_are_only_where_an_app_is_addressed(sagemaker_tree):
     leaves = sagemaker_tree.children["studio"].children
     for name in ("logs", "start", "stop"):
         assert "--app-name" in _flags(leaves[name]), name
-    for name in ("domains", "spaces", "apps", "profiles", "url"):
+    for name in ("domains", "spaces", "apps", "profiles", "url", "open"):
         assert "--app-name" not in _flags(leaves[name]), name
     # Waiting only means something for the two leaves that change an app's state.
     assert {"--wait", "--timeout"} <= _flags(leaves["start"])
@@ -1746,7 +1789,8 @@ def test_only_the_stopping_leaf_takes_yes(sagemaker_tree):
     """-y is a confirmation bypass; offering it elsewhere would imply a prompt."""
     leaves = sagemaker_tree.children["studio"].children
     assert "-y" in _flags(leaves["stop"])
-    for name in ("domains", "spaces", "apps", "profiles", "logs", "start", "url"):
+    for name in ("domains", "spaces", "apps", "profiles", "logs", "start", "url",
+                 "open"):
         assert "-y" not in _flags(leaves[name]), name
 
 
