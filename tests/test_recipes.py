@@ -155,3 +155,48 @@ class TestAddRecipePath:
         recipes_pkg.enable("ls")
 
         assert _result_module.results == []
+
+
+class TestEnableAll:
+    """``enable("*")`` — discovery must only ever offer real recipes.
+
+    ``enable()`` calls ``register()`` on whatever discovery returns, so a
+    module without one turns a user's ``enable("*")`` into an
+    ``AttributeError`` at config-load time.  That is not hypothetical: adding
+    the support module ``_awsut_common.py`` next to the recipes broke exactly
+    this, because the glob excluded only ``__init__``.
+    """
+
+    def test_every_discovered_builtin_has_a_register(self, monkeypatch):
+        """The invariant enable("*") depends on, checked against the real package."""
+        _reset_search_path(monkeypatch, [])
+
+        names = recipes_pkg._discover_all_recipes()
+
+        assert "ls" in names           # discovery still finds actual recipes
+        for name in names:
+            module = recipes_pkg._load_recipe(name)
+            assert callable(getattr(module, "register", None)), (
+                f"recipe {name!r} was discovered but has no register()"
+            )
+
+    def test_support_modules_are_not_discovered(self, monkeypatch):
+        """A leading underscore means "imported by a recipe", not "is a recipe"."""
+        _reset_search_path(monkeypatch, [])
+
+        names = recipes_pkg._discover_all_recipes()
+
+        assert "_awsut_common" not in names
+        assert [n for n in names if n.startswith("_")] == []
+
+    def test_user_helper_beside_a_user_recipe_is_skipped(
+            self, tmp_path, monkeypatch, _result_module):
+        """The same rule applies to a user's own shared helper module."""
+        _make_recipe(tmp_path, "my_tool")
+        (tmp_path / "_shared.py").write_text("# helper imported by my_tool\n")
+        _reset_search_path(monkeypatch, [tmp_path])
+
+        names = recipes_pkg._discover_all_recipes()
+
+        assert "my_tool" in names
+        assert "_shared" not in names

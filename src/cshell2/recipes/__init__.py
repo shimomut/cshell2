@@ -99,21 +99,23 @@ def enable(*recipe_names: str) -> None:
 
 
 def _discover_all_recipes() -> list[str]:
-    """Return sorted list of all available recipe names (built-in + search path)."""
+    """Return sorted list of all available recipe names (built-in + search path).
+
+    A leading underscore means "not a recipe": a recipe is a module with a
+    ``register()`` function, and support modules a recipe imports
+    (``_awsut_common.py``, a user's own ``_helpers.py``) have none, so globbing
+    them in would make ``enable("*")`` fail on an ``AttributeError``.  The
+    ``_awsut_sagemaker`` subpackage is skipped for the same reason and already
+    escaped by being a directory rather than a ``.py`` file.
+    """
     found: set[str] = set()
 
-    # Built-in recipes: .py files in this package's directory (excluding __init__).
-    builtin_dir = Path(__file__).parent
-    for p in builtin_dir.glob("*.py"):
-        if p.stem != "__init__":
-            found.add(p.stem)
-
-    # User/extra recipes from search path.
-    for directory in recipe_search_path:
-        if directory.is_dir():
-            for p in directory.glob("*.py"):
-                if p.stem != "__init__":
-                    found.add(p.stem)
+    for directory in [Path(__file__).parent, *recipe_search_path]:
+        if not directory.is_dir():
+            continue
+        for p in directory.glob("*.py"):
+            if not p.stem.startswith("_"):
+                found.add(p.stem)
 
     return sorted(found)
 
