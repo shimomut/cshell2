@@ -31,6 +31,7 @@ class Completion:
     value: str              # the text inserted on selection
     display: str = ""       # label shown in completion menu (defaults to value)
     description: str = ""   # metadata shown beside the completion
+    fields: tuple[str, ...] = ()  # description split into columns (aligned across rows)
     multi_select: bool = False   # True → opens InlineMultiPicker instead of InlinePicker
     combinable: bool = False     # True for single-char flags that can be merged (-a -l → -al)
     arg_hint: str = ""           # non-empty when flag requires a following argument (e.g. "N")
@@ -45,6 +46,38 @@ token (today: history suggestions — see
 [History candidates](#history-candidates)); because such a value is already
 shell syntax, the editor inserts it without shell-quoting it and without
 appending a trailing space.
+
+#### Metadata columns (`fields`)
+
+A completer whose metadata is several facts rather than one sentence hands them
+over as `fields` instead of gluing them into `description`. The picker pads each
+cell to the widest one in that column (2-space gap, via
+`tui._meta_col_widths` / `tui._compose_meta`), so the facts line up down the
+list; `Completion.meta` is what the picker reads — `fields` when set, the plain
+`description` otherwise, which counts as a single column.
+
+```python
+Completion(value="data-prep-space", fields=("Private", "JupyterLab", "no app"))
+```
+
+```
+data-prep-space         Private  JupyterLab  app InService     ← aligned columns
+data-prep-space-shared  Shared   JupyterLab  no app
+```
+
+A column that is empty in **every** row is dropped entirely, so an optional
+field (a status worth showing only when it is unusual) costs nothing on the
+lists that don't use it. A row that leaves it empty while another row fills it
+pads through, keeping the later columns aligned.
+
+Two properties come out of this that a separator inside `description` cannot
+give: the eye can scan one fact down the list, and the separator's own width
+(`" · "` = 3 columns on every row, on a line already sharing space with the
+command being typed) is gone. Alongside it, the rule for *what* goes in the
+metadata at all: a fact no leaf branches on is a column of noise — the space
+completer drops the owner profile for that reason, and a description that would
+read the same on every row (`"log stream"` under `--stream`) is left out
+entirely.
 
 ### Completer Protocol
 

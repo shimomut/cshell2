@@ -1,17 +1,22 @@
 """TAB-completion picker behaviour: no default selection, no invisible picker.
 
-Two rules are pinned here:
+Three rules are pinned here:
 
 1. The completion pickers open with *nothing* highlighted, so Enter dismisses
    the list instead of inserting the first candidate.
 2. A picker never stays open with zero candidates (it would render no rows
    while still eating keystrokes), and whatever the user typed while the
    picker was up is committed to the line buffer on every exit path.
+3. Metadata handed over as ``Completion.fields`` is laid out in columns that
+   align across rows, and a column no row fills takes up no width at all.
 """
+
+import re
 
 from cshell2.completion import Completion
 from cshell2.lineedit import History, LineEditor
-from cshell2.tui import InlineMultiPicker, InlinePicker
+from cshell2.tui import (InlineMultiPicker, InlinePicker, _compose_meta,
+                         _meta_col_widths)
 
 
 # ── InlinePicker: selection state ────────────────────────────────────────────
@@ -145,6 +150,89 @@ def test_multipicker_jump_works_from_no_selection():
     p = InlineMultiPicker(["-a", "-b"], select_first=False)
     p._jump_to("b")
     assert p._selected == 1
+
+
+# ── Metadata columns: aligned across rows, empty ones cost nothing ───────────
+
+
+def _visible(row: str) -> str:
+    """A rendered row with the escape sequences and the leading \\r stripped."""
+    return re.sub(r"\033\[[0-9;]*[A-Za-z]", "", row).lstrip("\r")
+
+
+def _metas(rows: list[Completion]) -> dict[str, str]:
+    widths = _meta_col_widths(rows, lambda c: c.meta)
+    return {c.value: _compose_meta(c.meta, widths) for c in rows}
+
+
+def test_meta_columns_are_padded_to_the_widest_cell():
+    got = _metas([
+        Completion(value="a", fields=("Private", "JupyterLab", "app InService")),
+        Completion(value="b", fields=("Shared", "CodeEditor", "no app")),
+    ])
+    assert got["a"] == "Private  JupyterLab  app InService"
+    assert got["b"] == "Shared   CodeEditor  no app"
+
+
+def test_a_column_no_row_fills_is_dropped_entirely():
+    """An optional field must not leave a gap on the rows that omit it."""
+    got = _metas([
+        Completion(value="a", fields=("Private", "", "no app")),
+        Completion(value="b", fields=("Shared", "", "app InService")),
+    ])
+    assert got["a"] == "Private  no app"
+    assert got["b"] == "Shared   app InService"
+
+
+def test_a_row_that_omits_an_optional_field_keeps_the_later_ones_aligned():
+    got = _metas([
+        Completion(value="a", fields=("Private", "space Pending", "no app")),
+        Completion(value="b", fields=("Private", "", "no app")),
+    ])
+    assert got["a"] == "Private  space Pending  no app"
+    assert got["b"] == "Private                 no app"
+
+
+def test_a_plain_description_is_rendered_as_the_one_column_it_is():
+    got = _metas([
+        Completion(value="a", description="d-1234 · InService"),
+        Completion(value="b", description="short"),
+    ])
+    assert got["a"] == "d-1234 · InService"
+    assert got["b"] == "short"
+
+
+def test_fields_win_over_description_for_the_picker():
+    c = Completion(value="a", description="ignored", fields=("x", "y"))
+    assert c.meta == ("x", "y")
+    assert Completion(value="a", description="plain").meta == "plain"
+
+
+def test_the_picker_starts_every_meta_column_at_the_same_screen_column():
+    rows = [
+        Completion(value="data-prep-space", fields=("Private", "JupyterLab", "no app")),
+        Completion(value="ml", fields=("Shared", "CodeEditor", "app InService")),
+    ]
+    p = InlinePicker(rows, display_fn=lambda c: c.display,
+                     meta_fn=lambda c: c.meta)
+    p._cols, p._height = 120, len(rows)
+    label_col, meta_col, panel_w, widths = p._compute_layout()
+    drawn = [_visible(p._format_row(c, selected=False, label_col=label_col,
+                                    meta_col=meta_col, panel_w=panel_w,
+                                    meta_widths=widths)) for c in rows]
+    assert [r.index("JupyterLab") for r in drawn[:1]] == \
+           [drawn[1].index("CodeEditor")]
+    assert drawn[0].index("no app") == drawn[1].index("app InService")
+
+
+def test_the_flag_picker_composes_columns_too():
+    rows = [Completion(value="-a", fields=("all", "boolean")),
+            Completion(value="--number", fields=("n", "takes N"))]
+    p = InlineMultiPicker(rows, display_fn=lambda c: c.display,
+                          meta_fn=lambda c: c.meta)
+    drawn = [_visible(p._format_row(c, checked=False, selected=False,
+                                    panel_w=60)) for c in rows]
+    assert drawn[0].index("boolean") == drawn[1].index("takes N")
 
 
 # ── LineEditor._complete: typed chars survive every exit path ────────────────

@@ -423,24 +423,32 @@ class _DomainCompleter(Completer):
         out = []
         for d in domains:
             status = d.get("Status") or "?"
-            for value, description in ((d.get("DomainName"), f"{d.get('DomainId')} · {status}"),
-                                       (d.get("DomainId"), f"{d.get('DomainName')} · {status}")):
+            # The other spelling of the same domain, then its status — two
+            # columns, so ids line up under ids and statuses under statuses.
+            for value, other in ((d.get("DomainName"), d.get("DomainId")),
+                                 (d.get("DomainId"), d.get("DomainName"))):
                 if value and value.startswith(ctx.prefix):
-                    out.append(Completion(value=value, description=description))
+                    out.append(Completion(value=value, fields=(other or "", status)))
         return out
 
 
 class _SpaceCompleter(Completer):
     """Spaces in the domain named on the line, described by what they are.
 
-    The description says whether an **app** is live, because that is what the
-    leaves taking a space actually branch on: ``start`` wants a space with none,
-    ``stop`` and ``url`` want one with something running.  A space's own
-    ``Status`` is *not* that answer — it reads ``InService`` from the moment the
-    space exists — so it is shown only when it is something other than
-    ``InService`` and is labelled ``space …`` when it is.  An unlabelled
-    ``InService`` here would contradict the ``apps`` listing for a space whose
-    app has been stopped.
+    Three aligned columns — sharing, app type, what is running — plus a fourth
+    that appears only for a space whose own ``Status`` is worth reading.  The
+    owner profile is deliberately *not* among them: no leaf taking a space asks
+    the user to choose by owner, so on the keystroke path it is a column of
+    noise between the two answers that do decide the pick (``url``'s default
+    profile does come from the owner, but that is derived, not typed).
+
+    Whether an **app** is live is the column the leaves actually branch on:
+    ``start`` wants a space with none, ``stop`` and ``url`` want one with
+    something running.  A space's own ``Status`` is *not* that answer — it reads
+    ``InService`` from the moment the space exists — so it is shown only when it
+    is something other than ``InService`` and is labelled ``space …`` when it
+    is.  An unlabelled ``InService`` here would contradict the ``apps`` listing
+    for a space whose app has been stopped.
     """
 
     def complete(self, ctx: CompletionContext) -> list[Completion]:
@@ -463,16 +471,14 @@ class _SpaceCompleter(Completer):
             if not name.startswith(ctx.prefix):
                 continue
             summary = s.get("SpaceSettingsSummary") or {}
-            owner = (s.get("OwnershipSettingsSummary") or {}).get(
-                "OwnerUserProfileName")
+            sharing = sharing_type(s)
             status = s.get("Status") or ""
-            out.append(Completion(value=name, description=" · ".join(p for p in (
-                sharing_type(s),
+            out.append(Completion(value=name, fields=(
+                "" if sharing == "-" else sharing,
                 summary.get("AppType") or "",
-                f"owner {owner}" if owner else "",
                 f"space {status}" if status and status != "InService" else "",
                 _app_note(live, name),
-            ) if p and p != "-")))
+            )))
         return out
 
 
@@ -535,7 +541,9 @@ class _StreamCompleter(Completer):
         for s in streams:
             tail = s["logStreamName"][len(prefix):]
             if tail.startswith(ctx.prefix):
-                out.append(Completion(value=tail, description="log stream"))
+                # No description: every row here is a log stream, so saying so
+                # would only be a column of the same word down the list.
+                out.append(Completion(value=tail))
         return out
 
 

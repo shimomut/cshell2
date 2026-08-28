@@ -892,8 +892,12 @@ class _HyperpodInstanceGroupNameCompleter(Completer):
                 count = str(current)
             else:
                 count = ""
-            desc = " ".join(p for p in (instance_type, f"({count})" if count else "") if p)
-            result.append(Completion(value=name, description=desc))
+            # Columns, so the counts line up under each other instead of
+            # starting wherever the instance type happened to end.
+            result.append(Completion(
+                value=name,
+                fields=(instance_type, f"({count})" if count else ""),
+            ))
         return result
 
 
@@ -950,8 +954,7 @@ class _HyperpodSubnetIdCompleter(Completer):
                     break
             az_id = subnet.get("AvailabilityZoneId", "")
             cidr = subnet.get("CidrBlock", "")
-            desc = " ".join(p for p in (az_id, cidr, name) if p)
-            result.append(Completion(value=sid, description=desc))
+            result.append(Completion(value=sid, fields=(az_id, cidr, name)))
         return result
 
 

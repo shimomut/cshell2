@@ -38,6 +38,7 @@ class Completion:
     value: str
     display: str = ""
     description: str = ""
+    fields: tuple[str, ...] = ()   # description split into picker columns (aligned across rows)
     multi_select: bool = False
     combinable: bool = False  # True for single-char flags that can be merged (-a -l → -al)
     arg_hint: str = ""        # non-empty when the flag requires a following argument (e.g. "N")
@@ -47,6 +48,17 @@ class Completion:
     def __post_init__(self):
         if not self.display:
             self.display = self.value
+
+    @property
+    def meta(self) -> str | tuple[str, ...]:
+        """What the picker draws beside the value.
+
+        ``fields`` when the completer split its metadata into columns — the
+        picker pads those so they line up across rows, which a separator baked
+        into one ``description`` string can't do — and the plain string
+        otherwise.
+        """
+        return self.fields or self.description
 
 
 class Completer(ABC):

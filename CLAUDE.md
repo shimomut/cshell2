@@ -321,12 +321,22 @@ class Completion:
     value: str              # the completion text (inserted into buffer)
     display: str = ""       # optional display label (shown in menu; defaults to value)
     description: str = ""   # optional description (shown beside completion)
+    fields: tuple[str, ...] = ()  # description split into picker columns (aligned across rows)
     multi_select: bool = False   # True → opens InlineMultiPicker instead of InlinePicker
     combinable: bool = False     # True for single-char flags that can be merged (-a -l → -al)
     arg_hint: str = ""           # non-empty when flag requires a following argument (e.g. "N")
     is_arg_hint: bool = False    # True when this completion IS the hint for a preceding flag's value
     verbatim: bool = False       # True → value may span several tokens; inserted as-is (history)
 ```
+
+**Metadata columns.** A completer with several facts to show per candidate
+returns them as `fields` instead of joining them into one `description` string.
+The picker pads each cell to the widest in its column (`Completion.meta` is what
+it reads; `tui._meta_col_widths` / `tui._compose_meta` do the layout), so the
+facts align down the list and no separator burns width on every row. A column
+empty in every row is dropped, so an optional field is free when unused. Facts
+that no leaf branches on don't belong here at all — see
+[doc/completion.md](doc/completion.md#metadata-columns-fields).
 
 #### Built-in Completers
 
@@ -596,7 +606,7 @@ The single place that touches OS-specific terminal APIs. `lineedit.py`, `tui.py`
 
 No alternate screen; all rendering anchored with DECSC/DECRC (`ESC 7` / `ESC 8`). On POSIX a resize arrives via SIGWINCH; on Windows it is detected by polling `terminal.terminal_size()` between key reads. Either way the picker cancels (redrawing without an alt-screen is unreliable — the user presses TAB again).
 
-- **`InlinePicker`** — single-select list rendered inline below the current line. Supports narrowing by typing, TAB-extend common prefix (via `value_fn` + `completion_prefix`, or an `extend_fn(items, typed)` callback when the caller must recompute the value space per press), scrollbar, optional `meta_fn` for right-aligned labels. `select_first=False` (used by the completion pickers) opens with no row highlighted, so Enter returns `None`; `closed_empty` signals "narrowing left zero candidates, I closed myself"; `typed` exposes the characters the picker echoed so the caller can commit them to its buffer.
+- **`InlinePicker`** — single-select list rendered inline below the current line. Supports narrowing by typing, TAB-extend common prefix (via `value_fn` + `completion_prefix`, or an `extend_fn(items, typed)` callback when the caller must recompute the value space per press), scrollbar, optional `meta_fn` for the labels beside each row (returning either one string or a sequence of cells, which the picker lays out as columns aligned across rows). `select_first=False` (used by the completion pickers) opens with no row highlighted, so Enter returns `None`; `closed_empty` signals "narrowing left zero candidates, I closed myself"; `typed` exposes the characters the picker echoed so the caller can commit them to its buffer.
 - **`InlineMultiPicker`** — multi-select list with Space to toggle checkboxes. Jump-to by typing a letter. Returns checked items (or the highlighted item if nothing is checked, or `None` when nothing is checked *and* nothing is highlighted). Takes the same `select_first` flag.
 - **`InlineArgPrompt`** — single-line text prompt for a flag's argument. Shows an optional description line above.
 

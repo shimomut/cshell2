@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import unicodedata
-from typing import Callable, Generic, TypeVar
+from typing import Callable, Generic, Sequence, TypeVar
 
 from . import terminal
 from .colors import _bg, _fg, get_color_scheme
@@ -57,6 +57,60 @@ def _wcs_clip(s: str, max_cols: int) -> str:
 def _wcs_ljust(s: str, width: int) -> str:
     """Left-justify s in a field of width terminal columns, padding with spaces."""
     return s + " " * max(0, width - _wcswidth(s))
+
+
+# ─── metadata columns ───────────────────────────────────────────────────────
+#
+# ``meta_fn`` may return one string (rendered as-is) or a sequence of cells,
+# in which case the cells are padded so they line up across every row of the
+# picker.  Columns are what a separator inside the string cannot be: aligned,
+# and free — a run of two spaces reads as a column break, where a " · " glued
+# between fields costs three columns on every row and still leaves the eye to
+# do the aligning.
+
+_META_GAP = "  "
+
+
+def _meta_cells(meta: str | Sequence[str]) -> tuple[str, ...]:
+    """Normalize a ``meta_fn`` return value into a tuple of column cells."""
+    if isinstance(meta, str):
+        return (meta,) if meta else ()
+    return tuple(meta)
+
+
+def _meta_col_widths(items: list[T], meta_fn: Callable[[T], str | Sequence[str]] | None) -> list[int]:
+    """Widest cell per column across *items* (0 for a column no row fills).
+
+    A width of 0 means the column is dropped by ``_compose_meta``, so an
+    optional field (a status shown only when it is interesting) costs nothing
+    on the rows — and in the runs — that leave it empty.
+    """
+    if meta_fn is None:
+        return []
+    widths: list[int] = []
+    for item in items:
+        for i, cell in enumerate(_meta_cells(meta_fn(item))):
+            if i >= len(widths):
+                widths.extend([0] * (i + 1 - len(widths)))
+            widths[i] = max(widths[i], _wcswidth(cell))
+    return widths
+
+
+def _meta_total(widths: list[int]) -> int:
+    """Display width of a fully populated meta area laid out in *widths*."""
+    live = [w for w in widths if w]
+    return sum(live) + len(_META_GAP) * (len(live) - 1) if live else 0
+
+
+def _compose_meta(meta: str | Sequence[str], widths: list[int]) -> str:
+    """Render one row's cells padded into *widths* so columns align."""
+    cells = _meta_cells(meta)
+    parts = [
+        _wcs_ljust(cells[i] if i < len(cells) else "", w)
+        for i, w in enumerate(widths)
+        if w
+    ]
+    return _META_GAP.join(parts).rstrip() if parts else ""
 
 
 def _statusbar(label: str, hints: str, cols: int) -> str:
@@ -132,7 +186,7 @@ class InlinePicker(Generic[T]):
         self,
         items: list[T],
         display_fn: Callable[[T], str] = str,
-        meta_fn: Callable[[T], str] | None = None,
+        meta_fn: Callable[[T], str | Sequence[str]] | None = None,
         max_height: int = 10,
         col: int = 0,
         initial_offset: int = 0,
@@ -307,7 +361,7 @@ class InlinePicker(Generic[T]):
         visible = self._items[self._offset : self._offset + self._height]
         out: list[str] = ["\0338\r\033[J"]  # restore to anchor, clear to end
 
-        label_col, meta_col, panel_w = self._compute_layout()
+        label_col, meta_col, panel_w, meta_widths = self._compute_layout()
         has_scrollbar = len(self._items) > self._height
         sb_cells = self._scrollbar_cells() if has_scrollbar else []
         for i, item in enumerate(visible):
@@ -319,6 +373,7 @@ class InlinePicker(Generic[T]):
                     label_col=label_col,
                     meta_col=meta_col,
                     panel_w=panel_w,
+                    meta_widths=meta_widths,
                 )
             )
             if i < len(visible) - 1:
@@ -390,22 +445,23 @@ class InlinePicker(Generic[T]):
             track=s.scroll_track,
         )
 
-    def _compute_layout(self) -> tuple[int, int, int]:
-        """Return (label_col, meta_col, panel_w).
+    def _compute_layout(self) -> tuple[int, int, int, list[int]]:
+        """Return (label_col, meta_col, panel_w, meta_widths).
 
         ``label_col`` is the width every label is padded to so meta columns
         align across rows. ``meta_col`` is the cap applied to descriptions —
         what fits after labels and the 2-space gap inside ``avail``.
+        ``meta_widths`` sizes the columns *within* the meta area (see
+        ``_meta_col_widths``); a single-string ``meta_fn`` yields one column.
         """
         has_scrollbar = len(self._items) > self._height
         avail = max(1, self._cols - self._col - (1 if has_scrollbar else 0))
 
         max_label = 0
-        max_meta = 0
+        meta_widths = _meta_col_widths(self._items, self._meta_fn)
+        max_meta = _meta_total(meta_widths)
         for item in self._items:
             max_label = max(max_label, _wcswidth(self._display_fn(item)))
-            if self._meta_fn:
-                max_meta = max(max_meta, _wcswidth(self._meta_fn(item)))
 
         if max_meta:
             # Reserve at least 2 cols for the gap; squeeze label first if tight.
@@ -417,7 +473,7 @@ class InlinePicker(Generic[T]):
 
         panel_w = label_col + (2 + meta_col if meta_col else 0)
         panel_w = max(panel_w, self._min_width)
-        return label_col, meta_col, min(panel_w, avail)
+        return label_col, meta_col, min(panel_w, avail), meta_widths
 
     def _format_row(
         self,
@@ -428,9 +484,13 @@ class InlinePicker(Generic[T]):
         label_col: int = 0,
         meta_col: int = 0,
         panel_w: int = 0,
+        meta_widths: list[int] | None = None,
     ) -> str:
         label = self._display_fn(item)
-        meta = self._meta_fn(item) if self._meta_fn else ""
+        meta = (
+            _compose_meta(self._meta_fn(item), meta_widths or [])
+            if self._meta_fn else ""
+        )
 
         label = _wcs_clip(label, label_col)
         # Pad the label to label_col only when there's a meta column to align to.
@@ -741,7 +801,7 @@ class InlineMultiPicker(Generic[T]):
         self,
         items: list[T],
         display_fn: Callable[[T], str] = str,
-        meta_fn: Callable[[T], str] | None = None,
+        meta_fn: Callable[[T], str | Sequence[str]] | None = None,
         max_height: int = 12,
         rows_above: int = 1,
         caret_col: int = 0,
@@ -764,6 +824,7 @@ class InlineMultiPicker(Generic[T]):
         self._height = min(max_height, len(items))
         self._cancelled = False
         self._label_col_w = max((_wcswidth(display_fn(item)) for item in items), default=4)
+        self._meta_widths = _meta_col_widths(items, meta_fn)
 
     def run(self) -> list[T] | None:
         """Return checked items (or [highlighted] if none), or None on cancel."""
@@ -840,10 +901,7 @@ class InlineMultiPicker(Generic[T]):
         content_avail = max(0, avail - check_w)
         # label_col_w is already in display columns (computed via _wcswidth in __init__)
         label_col = min(self._label_col_w, content_avail)
-        max_meta = 0
-        if self._meta_fn:
-            for item in self._items:
-                max_meta = max(max_meta, _wcswidth(self._meta_fn(item)))
+        max_meta = _meta_total(self._meta_widths)
         meta_cap = min(max_meta, max(0, content_avail - label_col - 2))
         panel_w = check_w + label_col + (2 + meta_cap if meta_cap else 0)
         return min(panel_w, avail)
@@ -896,7 +954,10 @@ class InlineMultiPicker(Generic[T]):
 
     def _format_row(self, item: T, *, checked: bool, selected: bool, scrollbar_cell: str = "", panel_w: int = 0) -> str:
         label = self._display_fn(item)
-        meta = self._meta_fn(item) if self._meta_fn else ""
+        meta = (
+            _compose_meta(self._meta_fn(item), self._meta_widths)
+            if self._meta_fn else ""
+        )
 
         check = self._CHECK_ON if checked else self._CHECK_OFF
         content_avail = max(1, panel_w - len(check))

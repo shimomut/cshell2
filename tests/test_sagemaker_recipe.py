@@ -24,6 +24,7 @@ from cshell2.commands import registry as command_registry
 from cshell2.completion import CompletionContext
 from cshell2.recipes import awsut as awsut_recipe
 from cshell2.recipes._awsut_sagemaker import hub, jobs, render, studio
+from cshell2.tui import _compose_meta, _meta_col_widths
 
 
 # ---------------------------------------------------------------------------
@@ -1504,9 +1505,14 @@ def no_completion_cache(monkeypatch):
 
 
 def space_descriptions(prefix=""):
-    """``{space name: the description the picker shows beside it}``."""
-    return {c.value: c.description
-            for c in studio._SpaceCompleter().complete(ctx(prefix))}
+    """``{space name: the metadata strip the picker draws beside it}``.
+
+    Composed through the picker's own column layout, so what these tests read
+    is what lands on screen — padding, dropped-empty columns and all.
+    """
+    rows = studio._SpaceCompleter().complete(ctx(prefix))
+    widths = _meta_col_widths(rows, lambda c: c.meta)
+    return {c.value: _compose_meta(c.meta, widths) for c in rows}
 
 
 def test_the_space_completer_reports_the_app_not_the_spaces_own_status(
@@ -1524,10 +1530,17 @@ def test_the_space_completer_reports_the_app_not_the_spaces_own_status(
               _app("data-prep-space-shared", status="Deleted")],
     ))
     got = space_descriptions()
-    assert got["data-prep-space"] == \
-        "Private · JupyterLab · owner data-prep-user · app InService"
-    assert got["data-prep-space-shared"] == \
-        "Shared · JupyterLab · owner annotator-a · no app"
+    # Aligned columns, no owner: the sharing cell is padded to the width of the
+    # widest one so the app answers start at the same screen column.
+    assert got["data-prep-space"] == "Private  JupyterLab  app InService"
+    assert got["data-prep-space-shared"] == "Shared   JupyterLab  no app"
+
+
+def test_the_space_completer_leaves_the_owner_out(studio_sm, no_completion_cache):
+    """Nothing picks a space by owner, so the column is only noise here."""
+    studio_sm(studio_client(
+        spaces=[_space_summary("data-prep-space", owner="annotator-a")], apps=[]))
+    assert "annotator-a" not in space_descriptions()["data-prep-space"]
 
 
 def test_the_space_completer_labels_a_space_status_worth_seeing(

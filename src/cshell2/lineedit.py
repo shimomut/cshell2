@@ -1027,7 +1027,7 @@ class LineEditor:
             picker = InlinePicker(
                 rows,
                 display_fn=lambda c: c.display or c.value,
-                meta_fn=lambda c: c.description,
+                meta_fn=lambda c: c.meta,
                 max_height=10,
                 col=col,
                 initial_offset=display_offset,
@@ -1099,7 +1099,7 @@ class LineEditor:
         picker = InlineMultiPicker(
             completions,
             display_fn=lambda c: f"{c.display or c.value} <{c.arg_hint}>" if c.arg_hint else (c.display or c.value),
-            meta_fn=lambda c: c.description,
+            meta_fn=lambda c: c.meta,
             max_height=12,
             rows_above=rows_above,
             caret_col=caret_col,
@@ -1378,7 +1378,7 @@ class LineEditor:
             picker = InlinePicker(
                 completions,
                 display_fn=lambda c: c.display or c.value,
-                meta_fn=lambda c: c.description,
+                meta_fn=lambda c: c.meta,
                 max_height=10,
                 col=col,
                 initial_offset=display_offset,

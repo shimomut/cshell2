@@ -372,10 +372,9 @@ class _JobNameCompleter(Completer):
         return [
             Completion(
                 value=s["JobName"],
-                description=" · ".join(p for p in (
-                    s.get("JobCategory") or "",
-                    fmt_state(state_of(s)),
-                ) if p),
+                # Category and state as columns: with one category per column
+                # width, the states line up in a single readable strip.
+                fields=(s.get("JobCategory") or "", fmt_state(state_of(s))),
             )
             for s in summaries
             if s.get("JobName", "").startswith(ctx.prefix)
