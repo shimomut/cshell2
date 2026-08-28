@@ -226,6 +226,7 @@ The rules that keep the merge from degrading the existing UX:
 | Rule | Why |
 |------|-----|
 | History rows are listed **first** | "What I ran before" is the most likely intent |
+| Dropped when a completer already offers the same single token | Both rows insert the same text, and the completer's is the one carrying the description. `awsut sagemaker studio <TAB>` listed `spaces` twice — once tagged `history`, once as `List the spaces in a domain`. Compared after unquoting, so `'My Documents/'` and `My Documents/` count as one token; anything spanning more (`spaces --max 5`) survives, since no per-argument completer can produce it |
 | Scoped to the current directory | The lines you ran *here* are the relevant ones; another checkout's `make deploy prod` is noise. Up/Down and `Ctrl+R` remain unscoped for the rest |
 | Suppressed when nothing is typed | A bare TAB should list available commands; Up/Down and `Ctrl+R` already cover recall with an empty line |
 | Suppressed on the flag picker (all candidates `multi_select`) | One history candidate would demote the Space-to-toggle checkbox picker to a plain list |
@@ -275,9 +276,13 @@ Whatever column it lands on, `_align_verbatim_rows` then trims the verbatim rows
 `display` so every row on screen *starts* at that column. A history display
 begins at the raw anchor, but a token row's begins wherever its completer chose:
 `FileCompleter` shows only the last path segment, so `cat ~/.aws/<TAB>` lists
-`config`, and the picker has to open at the caret. Left untrimmed, the history
-row would render there as `~/.aws/config` — the same `~/.aws/` the user is
-looking at one line above, apparently duplicated. Trimming is purely cosmetic:
+`config`, and the picker has to open at the caret. Left untrimmed, a history row
+for `cat ~/.aws/config ~/.aws/credentials` would render there as
+`~/.aws/config ~/.aws/credentials` — leading with the same `~/.aws/` the user is
+looking at one line above, apparently duplicated; trimmed, it reads
+`config ~/.aws/credentials`. (A history row that stopped at `~/.aws/config`
+never reaches the picker at all — the file candidate offers that token already,
+so the merge step drops it.) Trimming is purely cosmetic:
 the `value` still starts at the anchor, because that is where `_apply` splices it
 in. The partial-overlap case falls out of the same rule — with `cat doc/co<TAB>`
 aligned under the `co`, a history row shows `completion.md --dry-run`.
@@ -290,7 +295,8 @@ The line editor (`lineedit.py`) calls `_get_completions(line_before_cursor)` on 
 _get_completions(line_before_cursor)
   → _get_base_completions(line_before_cursor)   ← the dispatch chain below
   → HistoryCompleter, unless the base result is a flag picker or an arg-hint
-      → prepend the matching entries' tails from the anchor (verbatim=True)
+      → drop the tails the base result already offers as a single token
+      → prepend what is left, anchored (verbatim=True)
 
 _get_base_completions(line_before_cursor)
   → _split_on_operators() → isolate current pipeline stage

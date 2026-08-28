@@ -232,6 +232,7 @@ User presses TAB
               → No completer registered? → FileCompleter fallback
       → HistoryCompleter (current context's history, cwd-scoped, tail from the anchor)
           → prepended, unless the base result is a flag picker or an arg-hint
+          → minus the tails the base result already offers as a single token
     → Single token completion → _apply() directly
     → All multi_select completions → InlineMultiPicker
     → Otherwise → InlinePicker (narrows as user types)

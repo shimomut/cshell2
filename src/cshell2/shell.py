@@ -8,6 +8,7 @@ import io
 import os
 import re
 import select
+import shlex
 import signal
 import struct
 import subprocess
@@ -1028,6 +1029,53 @@ def _positional_label(cmd, pos_idx: int, command_name: str, args: list[str]) -> 
     return f"arg {pos_idx + 1}"
 
 
+def _one_token(value: str) -> str:
+    """*value* as the single token it holds, unquoted — ``""`` if it holds more.
+
+    Used to compare a history candidate with a completer's candidates, which
+    live in the same anchored space but are stored unquoted (``lineedit._apply``
+    quotes them on insert, where a verbatim history value is already shell
+    syntax).  So ``'My Documents/'`` and ``My Documents/`` are recognised as the
+    same one token, while ``spaces --max 5`` is not one token at all.
+    """
+    try:
+        parts = shlex.split(value)
+    except ValueError:          # unbalanced quote — compare the raw text
+        return value.strip()
+    return parts[0] if len(parts) == 1 else ""
+
+
+def _drop_history_duplicates(
+    history: list[Completion], completions: list[Completion]
+) -> list[Completion]:
+    """Drop history rows that only repeat a candidate the completer offers.
+
+    Both lists are anchored at :func:`parsing.raw_token_start`, so a one-token
+    history entry and the command's own candidate for that token insert the very
+    same text — ``awsut sagemaker studio <TAB>`` listed ``spaces`` twice, once
+    tagged ``history``, for two rows that did the same thing.  The history row is
+    the one to lose: it is the derived one, and the completer's carries the
+    description (``List the spaces in a domain``) that makes the row worth
+    reading.
+
+    Only *exact* duplicates go.  ``spaces --max 5`` keeps its row, because no
+    per-argument completer can produce it — spanning several arguments is the
+    whole reason history is in the list.
+    """
+    if not history or not completions:
+        return history
+    offered = {c.value for c in completions if not c.verbatim}
+    if not offered:
+        return history
+    def duplicate(value: str) -> bool:
+        if value in offered:
+            return True
+        token = _one_token(value)
+        return bool(token) and token in offered
+
+    return [h for h in history if not duplicate(h.value)]
+
+
 class PipelineSlot(PythonCommandSlot):
     """Background slot whose work unit is a parsed pipeline, not a single Python command.
 
@@ -1467,6 +1515,9 @@ class Shell:
         * the arg-hint (a lone ``is_arg_hint``) — the editor renders that as a
           hint line below the prompt instead of opening a picker at all.
 
+        A history row that only repeats a candidate the command's own completer
+        already offers is dropped — see :func:`_drop_history_duplicates`.
+
         A unique token candidate still auto-applies without showing the picker
         (that check lives in ``lineedit._complete`` and counts only non-history
         candidates), so history stays one more TAB away in that case rather
@@ -1487,6 +1538,7 @@ class Shell:
             line=line_before_cursor,
             shell_context=self.context_manager.current(),
         ))
+        history = _drop_history_duplicates(history, completions)
         if not history:
             return completions, prefix, label
         # With no completer candidates the picker is showing history and nothing

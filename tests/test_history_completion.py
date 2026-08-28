@@ -17,7 +17,7 @@ from cshell2.lineedit import (
     _align_verbatim_rows,
     _picker_col_offset,
 )
-from cshell2.shell import Shell
+from cshell2.shell import Shell, _drop_history_duplicates
 from cshell2.tui import InlinePicker
 
 
@@ -201,6 +201,39 @@ def test_history_is_kept_out_of_the_flag_picker(shell):
     assert not any(c.verbatim for c in completions)
 
 
+def test_a_history_row_the_completer_already_offers_is_dropped(shell):
+    """One row per insertion: the completer's own is the one with a description."""
+    command_registry.command(
+        "_t_dup",
+        help="test command",
+        params=[arg("subcommand", choices=["spaces", "domains"])],
+    )
+    _set_history(shell, ["_t_dup domains", "_t_dup spaces"])
+
+    completions, _, label = shell._get_completions("_t_dup ")
+
+    assert [c.value for c in completions] == ["spaces", "domains"]
+    assert not any(c.verbatim for c in completions)
+    # Nothing from history survived, so the label stays the command's own.
+    assert label != "history"
+
+
+def test_a_history_row_that_spans_more_than_the_token_survives(shell):
+    """Only exact duplicates go — spanning arguments is why history is here."""
+    command_registry.command(
+        "_t_keep",
+        help="test command",
+        params=[arg("subcommand", choices=["spaces"])],
+    )
+    _set_history(shell, ["_t_keep spaces --max 5"])
+
+    completions, _, _ = shell._get_completions("_t_keep ")
+
+    assert completions[0].value == "spaces --max 5"
+    assert completions[0].verbatim
+    assert any(c.value == "spaces" and not c.verbatim for c in completions)
+
+
 def test_history_is_kept_out_of_the_arg_hint(shell):
     """A lone is_arg_hint renders as a hint line, not a picker — keep it lone."""
     command_registry.command(
@@ -213,6 +246,31 @@ def test_history_is_kept_out_of_the_arg_hint(shell):
     assert len(completions) == 1
     assert completions[0].is_arg_hint
     assert not completions[0].verbatim
+
+
+# ---------------------------------------------------------------------------
+# _drop_history_duplicates — the two candidate spaces compared
+# ---------------------------------------------------------------------------
+
+def test_a_quoted_history_row_duplicates_the_unquoted_candidate():
+    """``lineedit._apply`` quotes a token candidate, so both insert the same text."""
+    assert _drop_history_duplicates(
+        [_history_completion("'My Documents/'")],
+        [Completion(value="My Documents/")],
+    ) == []
+
+
+def test_dedupe_compares_whole_values_not_prefixes():
+    """A candidate the completer offers is not a licence to drop what extends it."""
+    rows = [_history_completion("config.old"), _history_completion("config --list")]
+
+    assert _drop_history_duplicates(rows, [Completion(value="config")]) == rows
+
+
+def test_dedupe_leaves_history_alone_when_nothing_else_matched():
+    rows = [_history_completion("deploy prod")]
+
+    assert _drop_history_duplicates(rows, []) == rows
 
 
 # ---------------------------------------------------------------------------
@@ -371,9 +429,13 @@ def test_picker_alignment_falls_back_to_token_rows_for_a_quoted_token():
 
 def _aws_dir_rows():
     """``cat ~/.aws/<TAB>``: FileCompleter displays bare basenames, so the
-    picker cannot align under the token and opens at the caret instead."""
+    picker cannot align under the token and opens at the caret instead.
+
+    The history row spans a second argument — a row that stopped at
+    ``~/.aws/config`` would be dropped as a duplicate of the file candidate
+    before it ever reached the picker (:func:`_drop_history_duplicates`)."""
     return [
-        _history_completion("~/.aws/config"),
+        _history_completion("~/.aws/config ~/.aws/credentials"),
         Completion(value="~/.aws/amazonq/", display="amazonq/"),
         Completion(value="~/.aws/config", display="config"),
     ]
@@ -383,10 +445,11 @@ def test_verbatim_display_is_trimmed_to_the_picker_column():
     """A caret-aligned picker must not repeat the token the user can already see."""
     rows = _align_verbatim_rows("cat ~/.aws/", _aws_dir_rows(), 0)
 
-    assert [r.display for r in rows] == ["config", "amazonq/", "config"]
+    assert [r.display for r in rows] == [
+        "config ~/.aws/credentials", "amazonq/", "config"]
     # Only the display moved: the value still starts at the anchor, which is
     # where _apply splices it in.
-    assert rows[0].value == "~/.aws/config"
+    assert rows[0].value == "~/.aws/config ~/.aws/credentials"
 
 
 def test_verbatim_display_keeps_the_token_when_the_picker_aligns_under_it():
@@ -423,10 +486,11 @@ def test_picker_rows_all_start_at_the_picker_column(monkeypatch, tmp_path, capsy
     capsys.readouterr()
 
     picker = _StubPicker.instances[0]
-    assert [c.display for c in picker.items] == ["config", "amazonq/", "config"]
+    assert [c.display for c in picker.items] == [
+        "config ~/.aws/credentials", "amazonq/", "config"]
     # Narrowing on a keystroke re-applies the same trim.
     items, _ = picker.kwargs["refresh_fn"]("")
-    assert items[0].display == "config"
+    assert items[0].display == "config ~/.aws/credentials"
 
 
 def test_selecting_a_trimmed_row_still_inserts_the_whole_value(
@@ -444,7 +508,7 @@ def test_selecting_a_trimmed_row_still_inserts_the_whole_value(
 
     ed._apply(_StubPicker.instances[0].items[0], "~/.aws/")
 
-    assert ed._buf == "cat ~/.aws/config"
+    assert ed._buf == "cat ~/.aws/config ~/.aws/credentials"
 
 
 # ---------------------------------------------------------------------------

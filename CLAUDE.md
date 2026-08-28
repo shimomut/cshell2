@@ -411,14 +411,24 @@ carry `verbatim=True` because they can run past the current token, and
 trailing space, text after the caret preserved. On the way to the picker,
 `lineedit._align_verbatim_rows` trims each row's *display* (never its value) to
 start at the column the picker opens in, so a history row never re-shows text the
-user is already looking at — `cat ~/.aws/<TAB>` lists `config` beside the
-directory entries, not `~/.aws/config`.
+user is already looking at — for `cat ~/.aws/<TAB>` a past
+`cat ~/.aws/config ~/.aws/credentials` reads `config ~/.aws/credentials` beside
+the directory entries, not the whole line over again.
 
 `Shell._get_completions` is a thin wrapper that prepends these to the
 completer-driven candidates from `Shell._get_base_completions` (history first —
 "what I ran before" is the most likely intent). It draws on the **current
 context's** Up/Down history list, so TAB recall matches arrow recall in scope
 while `Ctrl+R` stays global.
+
+A history row that would insert exactly what a completer already offers is
+dropped in that merge (`shell._drop_history_duplicates`): two rows doing the same
+thing is noise, and the completer's is the one carrying a description, so
+`awsut sagemaker studio <TAB>` lists `spaces` once (with `List the spaces in a
+domain`) instead of twice. The comparison unquotes, so `'My Documents/'` and
+`My Documents/` count as the same single token; a tail spanning more than the
+token (`spaces --max 5`) is never a duplicate, since spanning arguments is the
+whole reason history is in the list.
 
 Candidates are scoped to the **current directory** as well as the current
 context. `ran_here_fn(entry)` — wired to `History.ran_here` — answers "was this
