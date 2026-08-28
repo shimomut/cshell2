@@ -79,6 +79,7 @@ from .. import awsut
 from .render import (
     DOT_INTERVAL,
     Heartbeat,
+    INSTANCE_TYPE_CHOICES,
     NOT_FOUND_CODES,
     SmError,
     api_message,
@@ -840,7 +841,7 @@ def register_studio(sagemaker) -> None:
             _space_arg("space to start an app in"),
             _domain_flag(),
             arg("--instance-type", metavar="TYPE",
-                completer=ChoiceCompleter(awsut._instance_type_choices),
+                completer=ChoiceCompleter(INSTANCE_TYPE_CHOICES),
                 help="override the space's own DefaultResourceSpec instance type"),
             arg("--no-resource-spec", action="store_true",
                 help="send no ResourceSpec — let the service pick, not the space"),

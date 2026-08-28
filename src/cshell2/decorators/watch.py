@@ -341,8 +341,8 @@ def register() -> None:
     )
     def watch(pipeline, *, interval: float, no_clear: bool) -> None:
         # Capture the *real* terminal stdout up front.  When ``@watch``
-        # wraps a registered Python command (e.g. ``awsut hyperpod
-        # describe``), the shell's redirect path rebinds ``sys.stdout``
+        # wraps a registered Python command (e.g. ``awsut sagemaker
+        # hyperpod describe``), the shell's redirect path rebinds ``sys.stdout``
         # process-wide to the temp file we use to capture each
         # iteration's output — so writes via ``sys.stdout`` from this
         # function would land in that file, not on screen, and the

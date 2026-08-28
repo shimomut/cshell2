@@ -1,4 +1,4 @@
-"""Tests for the ``awsut sagemaker`` recipe (jobs, hub content, trace, Studio).
+"""Tests for the ``awsut sagemaker`` recipe (jobs, hub content, Studio, HyperPod).
 
 Nothing here touches AWS.  The four things worth pinning are:
 
@@ -1725,8 +1725,8 @@ def sagemaker_tree():
     return command_registry.get("awsut").children["sagemaker"]
 
 
-def test_the_tree_has_all_three_groups(sagemaker_tree):
-    assert set(sagemaker_tree.children) == {"jobs", "hub", "studio"}
+def test_the_tree_has_every_group(sagemaker_tree):
+    assert set(sagemaker_tree.children) == {"jobs", "hub", "studio", "hyperpod"}
     assert set(sagemaker_tree.children["jobs"].children) == {
         "list", "describe", "watch", "stop"}
     assert set(sagemaker_tree.children["hub"].children) == {
@@ -1734,6 +1734,16 @@ def test_the_tree_has_all_three_groups(sagemaker_tree):
     assert set(sagemaker_tree.children["studio"].children) == {
         "domains", "spaces", "apps", "profiles", "logs", "start", "url", "open",
         "stop"}
+    assert set(sagemaker_tree.children["hyperpod"].children) == {
+        "create", "update", "scale", "add-ig", "remove-ig", "delete-nodes",
+        "reboot-nodes", "replace-nodes", "upgrade-ami", "delete", "list",
+        "describe", "watch", "log", "ssm", "ssh", "run", "search-capacity",
+        "kubeconfig", "events"}
+
+
+def test_hyperpod_is_a_sagemaker_group_not_a_root_of_its_own():
+    """A HyperPod cluster is a SageMaker resource; `hp` pays the depth."""
+    assert "hyperpod" not in command_registry.get("awsut").children
 
 
 def _flags(node):
@@ -1866,7 +1876,7 @@ def test_studio_names_follow_the_conventions_the_rest_of_awsut_uses(sagemaker_tr
     """The two idioms in this tree, and the one it does not use.
 
     Across ``awsut``, a listing is either a bare ``list`` (where the group has
-    one obvious resource: ``ec2``, ``logs``, ``hyperpod``, ``sagemaker jobs``)
+    one obvious resource: ``ec2``, ``logs``, ``sagemaker jobs`` / ``hyperpod``)
     or a plural noun (where it has several: ``hub hubs`` / ``versions`` /
     ``files``).  Nothing anywhere is spelled ``list-<noun>``, and state changes
     are ``start`` / ``stop`` — so ``studio`` must not introduce a third style.

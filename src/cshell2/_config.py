@@ -178,13 +178,13 @@ enable("*")
 #
 # Aliases expand the first token of a command line (bash-style):
 #
-#     hp create ...   →  awsut hyperpod create ...
+#     hp create ...   →  awsut sagemaker hyperpod create ...
 #     la /tmp         →  ls -la /tmp
 #
 # They participate in TAB completion: typing the alias name and pressing TAB
 # completes the rest as if the expansion had been typed.
 
-command_registry.alias("hp", "awsut hyperpod")
+command_registry.alias("hp", "awsut sagemaker hyperpod")
 command_registry.alias("la", "ls -la")
 
 

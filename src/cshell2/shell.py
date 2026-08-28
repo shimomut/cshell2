@@ -1742,7 +1742,7 @@ class Shell:
 
         # Expand the leading token if it is an alias, so the status bar for
         # `hp <args>` resolves against the alias's expansion (e.g.
-        # `awsut hyperpod`).  Mirrors the alias handling in
+        # `awsut sagemaker hyperpod`).  Mirrors the alias handling in
         # _get_base_completions.
         expansion = self.registry.get_alias(command_name)
         if expansion is not None:
@@ -1954,7 +1954,8 @@ class Shell:
                 "  alias NAME             show the expansion of NAME\n"
                 "  alias NAME=EXPANSION   define NAME as a shorthand for EXPANSION\n\n"
                 "Aliases expand the first token of a command line.  Quote the\n"
-                "expansion if it contains spaces:  alias hp='awsut hyperpod'."
+                "expansion if it contains spaces:\n"
+                "  alias hp='awsut sagemaker hyperpod'"
             ),
             params=[arg("assignments", nargs="*", metavar="NAME[=EXPANSION]")],
         )
@@ -2286,8 +2287,8 @@ class Shell:
                 last_exit = self._execute_pipeline(pipeline)
         finally:
             # User-run commands may have mutated remote state (e.g.
-            # ``awsut hyperpod scale``); drop cached completer fetches so the
-            # next TAB session re-queries.
+            # ``awsut sagemaker hyperpod scale``); drop cached completer
+            # fetches so the next TAB session re-queries.
             from . import completion_cache
             completion_cache.invalidate_all()
 

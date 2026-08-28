@@ -42,6 +42,17 @@ from .. import awsut
 # down when --interval grows.
 DOT_INTERVAL = 5
 
+# TAB candidates for the ``--instance-type`` flags.  A completion list, not a
+# validation list — the service accepts far more than this, so nothing checks
+# a typed value against it.  Shared because ``studio start`` and ``hyperpod``
+# offer the same flag and should offer the same shortlist.
+INSTANCE_TYPE_CHOICES = [
+    "ml.trn1.32xlarge", "ml.p5.48xlarge", "ml.p5e.48xlarge",
+    "ml.p5en.48xlarge", "ml.p4d.24xlarge", "ml.t3.xlarge",
+    "ml.trn2.48xlarge", "ml.c4.large", "ml.c6i.large",
+    "ml.t3.2xlarge", "ml.t3.large", "ml.c7g.medium",
+]
+
 
 class SmError(Exception):
     """A user-facing failure — printed as ``error: <message>``, no traceback."""

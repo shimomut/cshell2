@@ -77,7 +77,9 @@ def test_alias_listed_in_command_name_completion():
 #
 # The status bar should resolve aliases the same way completion does so the
 # user gets meaningful help when they type, e.g., `hp create <TAB>` where
-# `hp` is `alias hp='awsut hyperpod'`.
+# `hp` is `alias hp='awsut sagemaker hyperpod'` (the fixtures below use a
+# shorter two-token stand-in — what is under test is the expansion, not the
+# tree it lands in).
 # ---------------------------------------------------------------------------
 
 def test_arg_info_on_alias_command_name_shows_expansion():

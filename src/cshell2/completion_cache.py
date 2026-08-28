@@ -12,7 +12,8 @@ Two primitives:
   simply propagates and leaves the cache untouched.
 * :func:`invalidate_all` — wipe every entry. The shell calls this after
   each pipeline finishes so a freshly-mutated cluster (e.g. after
-  ``awsut hyperpod scale``) doesn't return stale completions on the next
+  ``awsut sagemaker hyperpod scale``) doesn't return stale completions on
+   the next
   TAB.
 
 Also exposes :func:`aws_env_key` so all AWS-style completers can salt

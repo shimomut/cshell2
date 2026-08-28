@@ -903,9 +903,14 @@ cshell2/
 │       │   │   ├── render.py      # shared tables / document rendering / ARN shapes
 │       │   │   ├── jobs.py        # jobs list|describe|watch|stop
 │       │   │   ├── hub.py         # hub hubs|list|versions|describe|files|trace
-│       │   │   └── studio.py      # studio domains|spaces|apps|profiles|logs|
-│       │   │                      #        start|url|open|stop
-│       │   │                      #        (Domain/Space/App)
+│       │   │   ├── studio.py      # studio domains|spaces|apps|profiles|logs|
+│       │   │   │                  #        start|url|open|stop
+│       │   │   │                  #        (Domain/Space/App)
+│       │   │   └── hyperpod.py    # hyperpod create|update|scale|add-ig|
+│       │   │                      #        remove-ig|delete-nodes|reboot-nodes|
+│       │   │                      #        replace-nodes|upgrade-ami|delete|
+│       │   │                      #        list|describe|watch|log|ssm|ssh|run|
+│       │   │                      #        search-capacity|kubeconfig|events
 │       │   ├── df.py
 │       │   ├── du.py
 │       │   ├── find.py
@@ -1016,4 +1021,4 @@ The thread-local routing (`_ThreadLocalStdin` / `_ThreadLocalStdout` / `_ThreadL
 
 10. **Decorators as a sigil-prefixed grammar, not a built-in command** — `@name [flags] body` is parsed *before* the normal pipeline grammar runs (`pipeline.py::_extract_decorator_prefix`), so the syntax is unambiguous to the parser and can never collide with a POSIX command name. Borrowed from IPython's magics (`%name args`); see [doc/decorators.md](doc/decorators.md). The `{...}` body delimiter is required when the wrapped pipeline contains operators, which makes the decorator's scope visible at a glance and side-steps the `watch -n 5 ls | grep abc` ambiguity that POSIX `watch` is famous for. `Pipeline.run()` lets a decorator body re-enter `Shell._execute_pipeline` so redirects/pipes/Python-stage routing all work the same as at the top level.
 
-11. **TTL cache + command-boundary invalidation for completer fetches** — TAB completion runs the completer on every keystroke while the picker is open (see `lineedit.py::refresh_fn`). Completers that hit AWS APIs (e.g. `aws_completer`, `_HyperpodNodeIdCompleter`) would otherwise issue the same boto3 call four or five times for a single typed token. `completion_cache.py` provides `get_or_fetch(key, fn, ttl=60)` with a process-global store. Keys are tuples that include the active `(AWS_PROFILE, AWS_REGION)` via `aws_env_key()` so the cache doesn't bleed across profiles. `Shell._execute()` calls `completion_cache.invalidate_all()` after each pipeline finishes, so a freshly-mutated resource (e.g. after `awsut hyperpod scale`) is re-fetched on the next TAB — TTL handles the within-session repeats, the invalidation hook handles correctness across commands.
+11. **TTL cache + command-boundary invalidation for completer fetches** — TAB completion runs the completer on every keystroke while the picker is open (see `lineedit.py::refresh_fn`). Completers that hit AWS APIs (e.g. `aws_completer`, `_HyperpodNodeIdCompleter`) would otherwise issue the same boto3 call four or five times for a single typed token. `completion_cache.py` provides `get_or_fetch(key, fn, ttl=60)` with a process-global store. Keys are tuples that include the active `(AWS_PROFILE, AWS_REGION)` via `aws_env_key()` so the cache doesn't bleed across profiles. `Shell._execute()` calls `completion_cache.invalidate_all()` after each pipeline finishes, so a freshly-mutated resource (e.g. after `awsut sagemaker hyperpod scale`) is re-fetched on the next TAB — TTL handles the within-session repeats, the invalidation hook handles correctness across commands.

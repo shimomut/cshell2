@@ -760,7 +760,8 @@ class CommandRegistry:
         """Register *name* as a shorthand that expands to *expansion*.
 
         Expansion is applied to the first token of a command line (bash-style)
-        so ``hp create`` becomes ``awsut hyperpod create``.  The expansion text
+        so ``hp create`` becomes ``awsut sagemaker hyperpod create``.  The
+        expansion text
         is tokenized at use time, so it may contain multiple words and flags.
 
         Aliases do not chain — the first token of the expansion is never itself

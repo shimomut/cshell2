@@ -3,7 +3,7 @@
 ## Goal
 
 Provide a single, uniform mechanism for declaring nested command structures
-such as `awsut hyperpod cluster create`, `git stash pop`, or arbitrary-depth
+such as `awsut sagemaker hyperpod create`, `git stash pop`, or arbitrary-depth
 user trees like `deploy ec2 instances list`.
 
 The mechanism must:
@@ -74,7 +74,8 @@ returned object is a normal `Command` node — everything else uses
 Same method, used **bare** (no decorator):
 
 ```python
-hyperpod = awsut.command("hyperpod", help="SageMaker HyperPod operations")
+sagemaker = awsut.command("sagemaker", help="SageMaker resources")
+hyperpod = sagemaker.command("hyperpod", help="SageMaker HyperPod operations")
 cluster = hyperpod.command("cluster", help="cluster management")
 ```
 
@@ -237,8 +238,9 @@ current node and walks up `parent` pointers, merging dictionaries. A flag
 defined at the root is always offered, no matter how deep the user is.
 
 A descendant's flag is **only** offered after its defining node is reached
-in the walk. So `awsut hyperpod --<TAB>` does not offer `--show-nodes`
-(defined at `awsut hyperpod cluster describe`); the user must type
+in the walk. So `awsut sagemaker hyperpod --<TAB>` does not offer
+`--show-nodes` (defined at `awsut sagemaker hyperpod cluster describe`);
+the user must type
 `cluster describe` first. This matches real CLI semantics — placing a
 deep flag before its defining sub-command would fail at runtime — and
 avoids dumping every flag from every leaf into the root's completion menu.
@@ -313,9 +315,9 @@ recipes at all — `CobraCompleter` handles them automatically.
 
 ## Open Questions
 
-1. **Help formatting at interior nodes.** Should `awsut hyperpod` print a
-   `git`-style sub-command list, or a `--help` block with usage? Initial
-   plan: short list of children with one-line `help=` per child.
+1. **Help formatting at interior nodes.** Should `awsut sagemaker hyperpod`
+   print a `git`-style sub-command list, or a `--help` block with usage?
+   Initial plan: short list of children with one-line `help=` per child.
 2. **Completing the value of an inherited value-taking flag** when the flag
    is typed before the defining node. Already works for ancestor-defined
    flags (root-level `--region` is always known); only matters if a
