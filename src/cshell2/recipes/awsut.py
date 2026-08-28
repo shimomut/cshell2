@@ -13,7 +13,7 @@ Provides the ``awsut`` command tree:
   kubeconfig|events``
 * ``awsut sagemaker jobs list|describe|watch|stop``
 * ``awsut sagemaker hub hubs|list|versions|describe|files|trace``
-* ``awsut sagemaker studio domains|spaces|apps|roles|logs|launch|url|stop``
+* ``awsut sagemaker studio domains|spaces|apps|profiles|logs|start|url|stop``
 
 The ``sagemaker`` group lives in the ``_awsut_sagemaker`` subpackage (this
 module is already long enough); it is attached from :func:`register` because

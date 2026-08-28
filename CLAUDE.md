@@ -883,8 +883,8 @@ cshell2/
 │       │   │   ├── render.py      # shared tables / document rendering / ARN shapes
 │       │   │   ├── jobs.py        # jobs list|describe|watch|stop
 │       │   │   ├── hub.py         # hub hubs|list|versions|describe|files|trace
-│       │   │   └── studio.py      # studio domains|spaces|apps|roles|logs|
-│       │   │                      #        launch|url|stop  (Domain/Space/App)
+│       │   │   └── studio.py      # studio domains|spaces|apps|profiles|logs|
+│       │   │                      #        start|url|stop   (Domain/Space/App)
 │       │   ├── df.py
 │       │   ├── du.py
 │       │   ├── find.py

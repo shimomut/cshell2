@@ -7,7 +7,7 @@ Nothing here touches AWS.  The four things worth pinning are:
 * category / content-type probing behaves the same whether the value came from
   a flag, a group selector, or an ARN (:mod:`jobs`, :mod:`hub`),
 * Studio's domain/space resolution never picks silently when it is ambiguous,
-  and what ``launch`` / ``url`` / ``stop`` send is read off the space rather
+  and what ``start`` / ``url`` / ``stop`` send is read off the space rather
   than assumed (:mod:`studio`),
 * the command tree offers each flag only where it applies.
 """
@@ -1144,14 +1144,14 @@ def test_sharing_type_reads_either_api_shape():
 
 
 # ---------------------------------------------------------------------------
-# studio — launch / url / stop send what the space says
+# studio — start / url / stop send what the space says
 # ---------------------------------------------------------------------------
 
 def run_studio(tree, *args):
     tree.children["studio"].invoke(list(args))
 
 
-def test_launch_sends_the_spaces_own_resource_spec(sagemaker_tree, studio_sm, capsys):
+def test_start_sends_the_spaces_own_resource_spec(sagemaker_tree, studio_sm, capsys):
     def never_existed(**p):
         raise client_error("ValidationException", "not found", "DescribeApp")
 
@@ -1159,7 +1159,7 @@ def test_launch_sends_the_spaces_own_resource_spec(sagemaker_tree, studio_sm, ca
         create_app={"AppArn": "arn:aws:sagemaker:us-west-2:1:app/d-aaa/s/JupyterLab/default"},
         describe_app=never_existed,
     ))
-    run_studio(sagemaker_tree, "launch")
+    run_studio(sagemaker_tree, "start")
     params, = calls_of(cli, "create_app")
     assert params == {
         "DomainId": "d-aaa", "SpaceName": "data-prep-space",
@@ -1171,29 +1171,29 @@ def test_launch_sends_the_spaces_own_resource_spec(sagemaker_tree, studio_sm, ca
     assert IMAGE_ARN in capsys.readouterr().out
 
 
-def test_launch_instance_type_overrides_only_the_instance(sagemaker_tree, studio_sm):
+def test_start_instance_type_overrides_only_the_instance(sagemaker_tree, studio_sm):
     cli = studio_sm(studio_client(
         create_app={"AppArn": "a"},
         describe_app=lambda **p: {"Status": "Deleted"},
     ))
-    run_studio(sagemaker_tree, "launch", "--instance-type", "ml.m5.xlarge")
+    run_studio(sagemaker_tree, "start", "--instance-type", "ml.m5.xlarge")
     params, = calls_of(cli, "create_app")
     assert params["ResourceSpec"] == {"InstanceType": "ml.m5.xlarge",
                                       "SageMakerImageArn": IMAGE_ARN}
 
 
-def test_launch_can_be_told_to_send_no_spec_at_all(sagemaker_tree, studio_sm):
+def test_start_can_be_told_to_send_no_spec_at_all(sagemaker_tree, studio_sm):
     cli = studio_sm(studio_client(
         create_app={"AppArn": "a"}, describe_app=lambda **p: {"Status": "Deleted"}))
-    run_studio(sagemaker_tree, "launch", "--no-resource-spec")
+    run_studio(sagemaker_tree, "start", "--no-resource-spec")
     params, = calls_of(cli, "create_app")
     assert "ResourceSpec" not in params
 
 
-def test_launch_does_not_start_a_second_app(sagemaker_tree, studio_sm, capsys):
+def test_start_does_not_start_a_second_app(sagemaker_tree, studio_sm, capsys):
     cli = studio_sm(studio_client(
         create_app={"AppArn": "a"}, describe_app=lambda **p: {"Status": "InService"}))
-    run_studio(sagemaker_tree, "launch")
+    run_studio(sagemaker_tree, "start")
     assert calls_of(cli, "create_app") == []
     assert "already InService" in capsys.readouterr().out
 
@@ -1203,6 +1203,7 @@ def test_url_defaults_to_the_spaces_owner_and_lands_on_the_app(
     cli = studio_sm(studio_client(
         space=_space("data-prep-space-shared", sharing="Shared", owner="annotator-a"),
         spaces=[_space_summary("data-prep-space-shared", sharing="Shared")],
+        apps=[_app("data-prep-space-shared")],
         create_presigned_domain_url={"AuthorizedUrl": "https://example/x"},
     ))
     run_studio(sagemaker_tree, "url")
@@ -1219,6 +1220,7 @@ def test_url_takes_another_profile_for_the_same_shared_space(
     cli = studio_sm(studio_client(
         space=_space("shared", sharing="Shared", owner="annotator-a"),
         spaces=[_space_summary("shared", sharing="Shared")],
+        apps=[_app("shared")],
         create_presigned_domain_url={"AuthorizedUrl": "https://example/x"},
     ))
     run_studio(sagemaker_tree, "url", "shared", "--user-profile", "annotator-b",
@@ -1236,6 +1238,8 @@ def test_url_with_a_profile_and_no_space_is_the_domain_home(
     params, = calls_of(cli, "create_presigned_domain_url")
     assert "SpaceName" not in params and "LandingUri" not in params
     assert calls_of(cli, "describe_space") == []
+    # No app is addressed, so there is no app to insist on.
+    assert calls_of(cli, "list_apps") == []
 
 
 def test_url_explains_a_model_that_cannot_point_at_a_space(
@@ -1247,6 +1251,87 @@ def test_url_explains_a_model_that_cannot_point_at_a_space(
     run_studio(sagemaker_tree, "url")
     err = capsys.readouterr().err
     assert "SpaceName" in err and "upgrade botocore" in err
+
+
+# ── studio — a URL is only worth minting if there is an app to land on ──────
+#
+# The URL goes to someone without an AWS identity and lasts minutes: a link to a
+# stopped app fails in their browser, looking exactly like an expired one. So the
+# caller — the only party who can start the app — hears about it here instead.
+
+def _presigning_client(**extra):
+    return studio_client(create_presigned_domain_url={
+        "AuthorizedUrl": "https://example/x"}, **extra)
+
+
+def test_url_refuses_when_nothing_is_running_in_the_space(
+        sagemaker_tree, studio_sm, capsys):
+    cli = studio_sm(_presigning_client(apps=[]))
+    run_studio(sagemaker_tree, "url")
+    err = capsys.readouterr().err
+    assert "no live JupyterLab app in data-prep-space" in err
+    assert "studio start data-prep-space" in err       # names the way out
+    assert calls_of(cli, "create_presigned_domain_url") == []
+
+
+def test_url_does_not_count_an_app_that_is_on_its_way_out(
+        sagemaker_tree, studio_sm, capsys):
+    """`Deleting` / `Deleted` / `Failed` are not something to land on."""
+    cli = studio_sm(_presigning_client(
+        apps=[_app("data-prep-space", status="Deleting"),
+              _app("data-prep-space", status="Failed", name="earlier")]))
+    run_studio(sagemaker_tree, "url")
+    assert "no live JupyterLab app" in capsys.readouterr().err
+    assert calls_of(cli, "create_presigned_domain_url") == []
+
+
+def test_url_wants_the_app_type_it_is_actually_landing_on(
+        sagemaker_tree, studio_sm, capsys):
+    """A live JupyterLab does not make `--app-type KernelGateway` reachable."""
+    cli = studio_sm(_presigning_client(apps=[_app("data-prep-space")]))
+    run_studio(sagemaker_tree, "url", "--app-type", "KernelGateway")
+    assert "no live KernelGateway app" in capsys.readouterr().err
+    assert calls_of(cli, "create_presigned_domain_url") == []
+
+
+def test_no_app_check_mints_the_url_anyway(sagemaker_tree, studio_sm):
+    """Studio's own space page can start the app, so the link is still useful."""
+    cli = studio_sm(_presigning_client(apps=[]))
+    run_studio(sagemaker_tree, "url", "--no-app-check")
+    params, = calls_of(cli, "create_presigned_domain_url")
+    assert params["LandingUri"] == "app:JupyterLab:"
+
+
+def test_an_explicit_landing_uri_is_left_alone(sagemaker_tree, studio_sm):
+    """--landing-uri is the caller aiming somewhere that need not be an app."""
+    cli = studio_sm(_presigning_client(apps=[]))
+    run_studio(sagemaker_tree, "url", "--landing-uri", "studio::/spaces")
+    params, = calls_of(cli, "create_presigned_domain_url")
+    assert params["LandingUri"] == "studio::/spaces"
+    assert calls_of(cli, "list_apps") == []
+
+
+def test_url_mints_for_a_pending_app_but_says_it_is_not_ready(
+        sagemaker_tree, studio_sm, capsys):
+    """Having the link ready while the app boots is the normal thing to want."""
+    cli = studio_sm(_presigning_client(
+        apps=[_app("data-prep-space", status="Pending")]))
+    run_studio(sagemaker_tree, "url")
+    assert calls_of(cli, "create_presigned_domain_url")
+    assert "is Pending, not InService yet" in capsys.readouterr().err
+
+
+def test_url_still_works_when_apps_cannot_be_listed(
+        sagemaker_tree, studio_sm, capsys):
+    """A missing ListApps permission is not evidence that nothing is running."""
+    def denied(**p):
+        raise client_error("AccessDeniedException", "not authorized", "ListApps")
+
+    cli = studio_sm(_presigning_client(list_apps=denied))
+    run_studio(sagemaker_tree, "url")
+    out = capsys.readouterr()
+    assert "https://example/x" in out.out
+    assert "could not check for a running app" in out.err
 
 
 def test_stop_confirms_before_deleting(sagemaker_tree, studio_sm, monkeypatch,
@@ -1322,34 +1407,138 @@ def test_apps_hides_the_dead_ones_unless_asked(sagemaker_tree, studio_sm, capsys
     assert "gone" in capsys.readouterr().out
 
 
-def test_roles_puts_all_three_role_sources_side_by_side(
+def test_profiles_lists_one_row_per_profile_with_the_role_it_assumes(
         sagemaker_tree, studio_sm, capsys):
     domain_role = "arn:aws:iam::1:role/domain-default"
     space_role = "arn:aws:iam::1:role/shared-space"
-    profile_role = "arn:aws:iam::1:role/annotator"
+    own_role = "arn:aws:iam::1:role/annotator"
     studio_sm(studio_client(
-        profiles=[{"UserProfileName": "annotator-a", "Status": "InService"}],
+        profiles=[{"UserProfileName": "annotator-a", "Status": "InService",
+                   "CreationTime": utc(2026, 2, 1)}],
         describe_domain={"AuthMode": "IAM",
                          "DefaultUserSettings": {"ExecutionRole": domain_role},
                          "DefaultSpaceSettings": {"ExecutionRole": space_role}},
-        describe_user_profile={"UserSettings": {"ExecutionRole": profile_role}},
+        describe_user_profile={"UserSettings": {"ExecutionRole": own_role}},
     ))
-    run_studio(sagemaker_tree, "roles")
+    run_studio(sagemaker_tree, "profiles")
     out = capsys.readouterr().out
-    for role in (domain_role, space_role, profile_role):
+    for role in (domain_role, space_role, own_role):
         assert role in out                       # in full, never truncated
-    assert "annotator-a" in out
+    # The domain's two defaults are its properties, so they head the output
+    # rather than sitting in the table as pseudo-profiles.
+    header, _, table = out.partition("USER PROFILE")
+    assert domain_role in header and space_role in header
+    assert own_role in table and "annotator-a" in table
 
 
-def test_roles_marks_a_profile_that_inherits_rather_than_showing_a_blank(
+def test_profiles_marks_one_that_inherits_rather_than_showing_a_blank(
         sagemaker_tree, studio_sm, capsys):
     studio_sm(studio_client(
         profiles=[{"UserProfileName": "data-prep-user"}],
         describe_domain={"AuthMode": "IAM"},
         describe_user_profile={"UserSettings": {}},
     ))
-    run_studio(sagemaker_tree, "roles")
+    run_studio(sagemaker_tree, "profiles")
     assert "inherits DefaultUserSettings" in capsys.readouterr().out
+
+
+def test_profiles_says_so_for_a_domain_with_none(
+        sagemaker_tree, studio_sm, capsys):
+    """A domain used only for shared spaces legitimately has no profiles."""
+    studio_sm(studio_client(profiles=[], describe_domain={"AuthMode": "IAM"}))
+    run_studio(sagemaker_tree, "profiles")
+    out = capsys.readouterr().out
+    assert "no user profiles" in out
+    assert "USER PROFILE" not in out
+
+
+# ---------------------------------------------------------------------------
+# studio — "is anything running here?" reads the same everywhere
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def no_completion_cache(monkeypatch):
+    """Bypass the TTL cache so each completer call sees its own fake client."""
+    monkeypatch.setattr(studio, "get_or_fetch", lambda key, fn, **kw: fn())
+
+
+def space_descriptions(prefix=""):
+    """``{space name: the description the picker shows beside it}``."""
+    return {c.value: c.description
+            for c in studio._SpaceCompleter().complete(ctx(prefix))}
+
+
+def test_the_space_completer_reports_the_app_not_the_spaces_own_status(
+        studio_sm, no_completion_cache):
+    """A stopped space is InService too — saying so unqualified misreads as live.
+
+    Regression: both rows of a two-space domain showed a bare ``InService``
+    while ``apps`` listed one live app, because the status came from ListSpaces.
+    """
+    studio_sm(studio_client(
+        spaces=[_space_summary("data-prep-space"),
+                _space_summary("data-prep-space-shared", sharing="Shared",
+                               owner="annotator-a")],
+        apps=[_app("data-prep-space"),
+              _app("data-prep-space-shared", status="Deleted")],
+    ))
+    got = space_descriptions()
+    assert got["data-prep-space"] == \
+        "Private · JupyterLab · owner data-prep-user · app InService"
+    assert got["data-prep-space-shared"] == \
+        "Shared · JupyterLab · owner annotator-a · no app"
+
+
+def test_the_space_completer_labels_a_space_status_worth_seeing(
+        studio_sm, no_completion_cache):
+    summary = _space_summary("pending-space")
+    summary["Status"] = "Pending"
+    studio_sm(studio_client(spaces=[summary], apps=[]))
+    assert "space Pending" in space_descriptions()["pending-space"]
+
+
+def test_the_space_completer_counts_several_live_apps(
+        studio_sm, no_completion_cache):
+    studio_sm(studio_client(
+        spaces=[_space_summary("busy")],
+        apps=[_app("busy", app_type="JupyterServer", name="default"),
+              _app("busy", app_type="KernelGateway", name="kg-1")],
+    ))
+    assert "2 apps live" in space_descriptions()["busy"]
+
+
+def test_the_space_completer_stays_silent_about_apps_it_cannot_list(
+        studio_sm, no_completion_cache):
+    """No ListApps permission must not render as "nothing is running"."""
+    def denied(**p):
+        raise client_error("AccessDeniedException", "no ListApps", "ListApps")
+
+    studio_sm(studio_client(spaces=[_space_summary("s")], list_apps=denied))
+    got = space_descriptions()["s"]
+    assert "s" in space_descriptions()      # still a usable candidate
+    assert "no app" not in got and "app " not in got
+
+
+def test_the_spaces_table_and_the_completer_read_the_same_source(
+        sagemaker_tree, studio_sm, no_completion_cache, capsys):
+    cli = studio_client(
+        spaces=[_space_summary("live-space"), _space_summary("idle-space")],
+        apps=[_app("live-space"), _app("idle-space", status="Deleting")],
+    )
+    studio_sm(cli)
+    run_studio(sagemaker_tree, "spaces")
+    out = capsys.readouterr().out
+    table = {ln.split()[0]: ln for ln in out.splitlines()
+             if ln.startswith(("live-space", "idle-space"))}
+    # Deleting counts as dead in both places, so neither calls it running.
+    assert "JupyterLab:InService" in table["live-space"]
+    assert "JupyterLab:" not in table["idle-space"]
+    described = space_descriptions()
+    assert described["live-space"].endswith("app InService")
+    assert described["idle-space"].endswith("no app")
+    # And the table says which STATUS its own column is, so the two cannot be
+    # confused for each other.
+    assert "STATUS is the space's own" in out
 
 
 # ---------------------------------------------------------------------------
@@ -1489,7 +1678,7 @@ def test_the_tree_has_all_three_groups(sagemaker_tree):
     assert set(sagemaker_tree.children["hub"].children) == {
         "hubs", "list", "versions", "describe", "files", "trace"}
     assert set(sagemaker_tree.children["studio"].children) == {
-        "domains", "spaces", "apps", "roles", "logs", "launch", "url", "stop"}
+        "domains", "spaces", "apps", "profiles", "logs", "start", "url", "stop"}
 
 
 def _flags(node):
@@ -1537,18 +1726,18 @@ def test_hub_flag_is_not_offered_where_there_is_no_hub_to_pick(sagemaker_tree):
 def test_domain_flag_is_not_offered_where_there_is_no_domain_to_pick(sagemaker_tree):
     leaves = sagemaker_tree.children["studio"].children
     assert "--domain" not in _flags(leaves["domains"])
-    for name in ("spaces", "apps", "roles", "logs", "launch", "url", "stop"):
+    for name in ("spaces", "apps", "profiles", "logs", "start", "url", "stop"):
         assert "--domain" in _flags(leaves[name]), name
 
 
 def test_app_and_wait_flags_are_only_where_an_app_is_addressed(sagemaker_tree):
     leaves = sagemaker_tree.children["studio"].children
-    for name in ("logs", "launch", "stop"):
+    for name in ("logs", "start", "stop"):
         assert "--app-name" in _flags(leaves[name]), name
-    for name in ("domains", "spaces", "apps", "roles", "url"):
+    for name in ("domains", "spaces", "apps", "profiles", "url"):
         assert "--app-name" not in _flags(leaves[name]), name
     # Waiting only means something for the two leaves that change an app's state.
-    assert {"--wait", "--timeout"} <= _flags(leaves["launch"])
+    assert {"--wait", "--timeout"} <= _flags(leaves["start"])
     assert {"--wait", "--timeout"} <= _flags(leaves["stop"])
     assert not _flags(leaves["logs"]) & {"--wait", "--timeout"}
 
@@ -1557,26 +1746,28 @@ def test_only_the_stopping_leaf_takes_yes(sagemaker_tree):
     """-y is a confirmation bypass; offering it elsewhere would imply a prompt."""
     leaves = sagemaker_tree.children["studio"].children
     assert "-y" in _flags(leaves["stop"])
-    for name in ("domains", "spaces", "apps", "roles", "logs", "launch", "url"):
+    for name in ("domains", "spaces", "apps", "profiles", "logs", "start", "url"):
         assert "-y" not in _flags(leaves[name]), name
 
 
 def test_studio_leaf_parsers_accept_the_documented_invocations(sagemaker_tree):
     leaves = sagemaker_tree.children["studio"].children
 
-    launch = _parser(leaves["launch"])
-    ns = launch.parse_args(["my-space", "--instance-type", "ml.m5.large", "--wait"])
+    start = _parser(leaves["start"])
+    ns = start.parse_args(["my-space", "--instance-type", "ml.m5.large", "--wait"])
     assert (ns.space, ns.instance_type, ns.wait, ns.app_name, ns.timeout) == \
         ("my-space", "ml.m5.large", True, "default", 900)
-    assert launch.parse_args([]).space is None
+    assert start.parse_args([]).space is None
 
     url = _parser(leaves["url"])
     ns = url.parse_args(["--user-profile", "me"])
     assert (ns.space, ns.user_profile, ns.expires, ns.session_duration) == \
         (None, "me", 300, 43200)
+    assert ns.no_app_check is False
+    assert url.parse_args(["--no-app-check"]).no_app_check is True
 
     logs = _parser(leaves["logs"])
-    ns = logs.parse_args(["my-space", "--follow"])
+    ns = logs.parse_args(["my-space", "-f"])       # -f, as `hyperpod watch` spells it
     assert (ns.space, ns.follow, ns.stream, ns.log_group) == \
         ("my-space", True, studio.LIFECYCLE_STREAM, studio.STUDIO_LOG_GROUP)
 
@@ -1612,6 +1803,35 @@ def test_leaf_parsers_accept_the_documented_invocations(sagemaker_tree):
     describe = _parser(sagemaker_tree.children["hub"].children["describe"])
     ns = describe.parse_args(["my-set", "--type", "DataSet"])
     assert ns.content_type == "DataSet"       # dest avoids shadowing `type`
+
+
+def test_studio_names_follow_the_conventions_the_rest_of_awsut_uses(sagemaker_tree):
+    """The two idioms in this tree, and the one it does not use.
+
+    Across ``awsut``, a listing is either a bare ``list`` (where the group has
+    one obvious resource: ``ec2``, ``logs``, ``hyperpod``, ``sagemaker jobs``)
+    or a plural noun (where it has several: ``hub hubs`` / ``versions`` /
+    ``files``).  Nothing anywhere is spelled ``list-<noun>``, and state changes
+    are ``start`` / ``stop`` — so ``studio`` must not introduce a third style.
+    """
+    root = command_registry.get("awsut")
+
+    def leaves(node, path=()):
+        if not node.children:
+            yield path, node
+        for name, child in node.children.items():
+            yield from leaves(child, path + (name,))
+
+    for path, _leaf in leaves(root):
+        assert not path[-1].startswith("list-"), " ".join(path)
+
+    studio_leaves = sagemaker_tree.children["studio"].children
+    assert {"start", "stop"} <= set(studio_leaves)   # the ec2 pair, not launch/stop
+    assert "launch" not in studio_leaves
+    # Every listing here is a plural noun, since the group holds three resource
+    # types and a bare `list` could mean any of them.
+    for name in ("domains", "spaces", "apps", "profiles"):
+        assert name.endswith("s") and name in studio_leaves
 
 
 def test_no_leaf_takes_region_or_profile_flags(sagemaker_tree):

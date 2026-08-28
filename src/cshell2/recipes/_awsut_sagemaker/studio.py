@@ -20,9 +20,9 @@ operations are derived from the resources themselves:
 Makefile target              this group
 ===========================  ====================================================
 ``make show-apps``           ``apps``
-``make show-roles``          ``roles``
+``make show-roles``          ``profiles``           — the roles are its columns
 ``make logs``                ``logs [SPACE]``
-``make launch-private``      ``launch [SPACE]``     — ResourceSpec from DescribeSpace
+``make launch-private``      ``start [SPACE]``      — ResourceSpec from DescribeSpace
 ``make url-private``         ``url [SPACE]``        — profile from the space's owner
 ``make stop-private``        ``stop [SPACE]``
 ``make stop-all``            ``stop --all``
@@ -32,6 +32,17 @@ So there is no ``-private`` / ``-shared`` pair of anything: the space is an
 argument, and what the Makefile had to hard-code per space (which image and
 instance type to launch, which user profile owns it, which app type it runs) is
 read from the space itself.
+
+The Makefile's ``launch`` → ``url`` ordering is enforced rather than documented:
+``url`` lands on the space's *app*, so with no app running it refuses and points
+at ``start`` instead of minting a link that fails in the recipient's browser.
+
+Naming follows the rest of ``awsut``: a plural noun lists that resource type
+(as ``hub`` does with ``hubs`` / ``versions`` / ``files``, because a group
+holding several resource types has no single thing a bare ``list`` could mean),
+and the state-changing pair is ``start`` / ``stop`` — the same pair as
+``awsut ec2 start`` / ``awsut ec2 stop``, and for the same reason: compute goes
+away, storage stays.
 
 Two resolution rules, applied everywhere in this module:
 
@@ -254,7 +265,7 @@ def default_resource_spec(space_desc: dict, app_type: str) -> dict:
     CreateApp's ResourceSpec is optional, but leaving it out asks the service
     for *its* default rather than the space's — which for a space pinned to a
     custom image version is a different image.  Reading the spec off the space
-    and sending it back is what makes ``launch`` equivalent to the launch
+    and sending it back is what makes ``start`` equivalent to the launch
     command a CloudFormation stack emits, without knowing anything about the
     stack.
     """
@@ -306,6 +317,46 @@ def list_apps(cli, domain_id: str, space: str | None = None,
     if space:
         params["SpaceNameEquals"] = space
     return paged(cli.list_apps, "Apps", max_items, **params)
+
+
+def live_apps_by_space(cli, domain_id: str) -> dict[str, list[dict]]:
+    """The domain's not-dead apps, grouped by space name.  One ListApps call.
+
+    "Is anything running in this space?" is the question both the ``spaces``
+    table and the space completer answer, and they read it from here so the two
+    cannot disagree — a space's own ``Status`` is ``InService`` as soon as the
+    space *exists*, which says nothing about whether an app is billing, and
+    showing that status unqualified next to an app listing invites exactly that
+    misreading.
+
+    A list per space, not one app: nothing stops a space from running a
+    JupyterLab *and* a KernelGateway app at once, and dropping one would
+    under-report what is billing.
+    """
+    grouped: dict[str, list[dict]] = {}
+    for app in list_apps(cli, domain_id):
+        space = app.get("SpaceName")
+        if space and app.get("Status") not in APP_DEAD:
+            grouped.setdefault(space, []).append(app)
+    return grouped
+
+
+def live_apps_in_space(cli, domain_id: str, space: str,
+                       app_type: str | None = None) -> list[dict]:
+    """One space's not-dead apps, optionally narrowed to a single app type.
+
+    Scoped server-side (``SpaceNameEquals``), unlike :func:`live_apps_by_space`,
+    which answers the same question for a whole domain in one call.  Use this
+    one when a single space is already named on the line.
+    """
+    return [a for a in list_apps(cli, domain_id, space)
+            if a.get("Status") not in APP_DEAD
+            and (app_type is None or a.get("AppType") == app_type)]
+
+
+def app_label(app: dict) -> str:
+    """``JupyterLab:InService`` — an app named by the two things that matter."""
+    return f"{app.get('AppType') or '?'}:{app.get('Status') or '?'}"
 
 
 def describe_app(cli, domain_id, space, app_type, app_name) -> dict:
@@ -374,14 +425,32 @@ class _DomainCompleter(Completer):
 
 
 class _SpaceCompleter(Completer):
-    """Spaces in the domain named on the line, described by what they are."""
+    """Spaces in the domain named on the line, described by what they are.
+
+    The description says whether an **app** is live, because that is what the
+    leaves taking a space actually branch on: ``start`` wants a space with none,
+    ``stop`` and ``url`` want one with something running.  A space's own
+    ``Status`` is *not* that answer — it reads ``InService`` from the moment the
+    space exists — so it is shown only when it is something other than
+    ``InService`` and is labelled ``space …`` when it is.  An unlabelled
+    ``InService`` here would contradict the ``apps`` listing for a space whose
+    app has been stopped.
+    """
 
     def complete(self, ctx: CompletionContext) -> list[Completion]:
+        requested = flag_value(ctx.args, "--domain")
         try:
-            spaces = _cached_in_domain("spaces", flag_value(ctx.args, "--domain"),
-                                       list_spaces)
+            spaces = _cached_in_domain("spaces", requested, list_spaces)
         except Exception:
             return []
+        # A second permission (ListApps), so its absence costs the app note
+        # rather than the candidate list.  `None` means "not known", which must
+        # not be rendered as "nothing is running".
+        try:
+            live = _cached_in_domain("live_apps", requested, live_apps_by_space)
+        except Exception:
+            live = None
+
         out = []
         for s in spaces:
             name = s.get("SpaceName") or ""
@@ -390,13 +459,27 @@ class _SpaceCompleter(Completer):
             summary = s.get("SpaceSettingsSummary") or {}
             owner = (s.get("OwnershipSettingsSummary") or {}).get(
                 "OwnerUserProfileName")
+            status = s.get("Status") or ""
             out.append(Completion(value=name, description=" · ".join(p for p in (
                 sharing_type(s),
                 summary.get("AppType") or "",
                 f"owner {owner}" if owner else "",
-                s.get("Status") or "",
+                f"space {status}" if status and status != "InService" else "",
+                _app_note(live, name),
             ) if p and p != "-")))
         return out
+
+
+def _app_note(live: dict[str, list[dict]] | None, space: str) -> str:
+    """What is running in *space*, or ``""`` when ListApps could not be read."""
+    if live is None:
+        return ""
+    apps = live.get(space) or []
+    if not apps:
+        return "no app"
+    if len(apps) == 1:
+        return f"app {apps[0].get('Status') or '?'}"
+    return f"{len(apps)} apps live"
 
 
 class _UserProfileCompleter(Completer):
@@ -542,12 +625,12 @@ def register_studio(sagemaker) -> None:
         # does not — so a refusal costs the column, not the listing.
         running = {}
         app_note = ("APP '-' means nothing is running in that space, so it is not "
-                    "billing compute. Its EBS volume is charged either way.")
+                    "billing compute. Its EBS volume is charged either way. "
+                    "STATUS is the space's own — it reads InService whether or "
+                    "not an app is running.")
         try:
-            for app in list_apps(cli, resolved["DomainId"]):
-                if app.get("Status") not in APP_DEAD and app.get("SpaceName"):
-                    running[app["SpaceName"]] = \
-                        f"{app.get('AppType')}:{app.get('Status')}"
+            for space, apps in live_apps_by_space(cli, resolved["DomainId"]).items():
+                running[space] = ",".join(app_label(a) for a in apps)
         except botocore.exceptions.ClientError as exc:
             print(f"  ! apps not listed: {api_message(exc)}", file=sys.stderr)
             app_note = "APP could not be filled in — see stderr."
@@ -623,18 +706,23 @@ def register_studio(sagemaker) -> None:
         )
 
     @studio.command(
-        "roles", help="Which execution role each space and profile is wired to",
+        "profiles", help="List a domain's user profiles and the role each assumes",
         params=[_domain_flag()],
     )
     @guard
-    def _roles(domain):
-        """Where a space's identity comes from, in the order the service resolves it.
+    def _profiles(domain):
+        """The domain's user profiles — the identities its spaces run as.
 
-        A private space runs as the *user profile*'s role; a shared space has no
-        profile at app level and runs as the domain's ``DefaultSpaceSettings``
-        role.  Three different roles can therefore be in play in one domain, and
-        the difference is invisible in the console — hence one command that puts
-        all three next to each other.
+        A profile is what ``url --user-profile`` takes and what a private space
+        records as its owner, so this is the listing that says which values those
+        accept.  The execution role travels with each row because that is the
+        non-obvious part: a private space runs as the *profile*'s role, a shared
+        space as the domain's ``DefaultSpaceSettings`` role, and a profile that
+        sets no role of its own inherits ``DefaultUserSettings`` — three
+        different roles can be in play in one domain and the console shows none
+        of it.  The two domain-level defaults print above the table rather than
+        as rows in it: they are properties of the domain, and what every row
+        falls back to.
         """
         cli = sm_client()
         resolved = resolve_domain(cli, domain)
@@ -642,18 +730,27 @@ def register_studio(sagemaker) -> None:
         desc = describe_domain(cli, domain_id)
 
         print(f"domain {domain_label(resolved)} · region {region_label()}")
-        print(f"AuthMode {desc.get('AuthMode') or '?'}\n")
-        rows = [
-            ["DefaultUserSettings", "private space / profile fallback",
-             (desc.get("DefaultUserSettings") or {}).get("ExecutionRole") or "-"],
-            ["DefaultSpaceSettings", "shared space",
-             (desc.get("DefaultSpaceSettings") or {}).get("ExecutionRole") or "-"],
-        ]
-        for p in list_user_profiles(cli, domain_id):
-            name = p.get("UserProfileName") or "?"
-            rows.append([f"profile {name}", "that profile's own apps",
-                         profile_role(cli, domain_id, name)])
-        print_table(["SETTING", "APPLIES TO", "EXECUTION ROLE"], rows,
+        print(f"AuthMode {desc.get('AuthMode') or '?'}")
+        print("domain defaults (what a space falls back to):")
+        for setting, applies in (("DefaultUserSettings", "private space"),
+                                 ("DefaultSpaceSettings", "shared space")):
+            role = (desc.get(setting) or {}).get("ExecutionRole") or "-"
+            print(f"  {setting} · {applies} · {role}")
+        print()
+
+        profiles = list_user_profiles(cli, domain_id)
+        if not profiles:
+            print("no user profiles in this domain")
+            return
+        rows = [[
+            p.get("UserProfileName") or "?",
+            p.get("Status") or "?",
+            fmt_time(p.get("CreationTime")),
+            profile_role(cli, domain_id, p.get("UserProfileName") or ""),
+        ] for p in profiles]
+        rows.sort(key=lambda r: r[0])
+        print(f"{len(rows)} user profile(s)\n")
+        print_table(["USER PROFILE", "STATUS", "CREATED", "EXECUTION ROLE"], rows,
                     note="What a running app ACTUALLY assumed is in its boot log: "
                          "`awsut sagemaker studio logs SPACE`.")
 
@@ -667,7 +764,7 @@ def register_studio(sagemaker) -> None:
                 help=f"last path segment of the stream (default {LIFECYCLE_STREAM})"),
             arg("--list", action="store_true", dest="list_streams",
                 help="list this space's streams instead of reading one"),
-            arg("--follow", action="store_true",
+            arg("-f", "--follow", action="store_true",
                 help="keep polling for new events (Ctrl+C to stop)"),
             arg("--lookback", type=int, default=0, metavar="MINUTES",
                 help="only events from the last N minutes (default: all)"),
@@ -697,7 +794,7 @@ def register_studio(sagemaker) -> None:
     # ── starts and stops billing ───────────────────────────────────────────
 
     @studio.command(
-        "launch", help="Start a space's app — THIS STARTS BILLING",
+        "start", help="Start a space's app — THIS STARTS BILLING",
         params=[
             _space_arg("space to start an app in"),
             _domain_flag(),
@@ -709,8 +806,8 @@ def register_studio(sagemaker) -> None:
         ] + _app_flags() + _wait_flags("InService or Failed"),
     )
     @guard
-    def _launch(space, domain, instance_type, no_resource_spec, app_type, app_name,
-                wait, timeout):
+    def _start(space, domain, instance_type, no_resource_spec, app_type, app_name,
+               wait, timeout):
         cli = sm_client()
         require_operation(cli, "create_app", "CreateApp")
         resolved = resolve_domain(cli, domain)
@@ -778,17 +875,23 @@ def register_studio(sagemaker) -> None:
                 help="open it in a browser instead of only printing it"),
             arg("--app-type", metavar="TYPE", completer=_AppTypeCompleter(),
                 help="default: the space's own AppType (picks the landing URI)"),
+            arg("--no-app-check", action="store_true",
+                help="mint the URL even with no app running in the space"),
         ],
     )
     @guard
     def _url(space, domain, user_profile, landing_uri, expires, session_duration,
-             open_browser, app_type):
+             open_browser, app_type, no_app_check):
         """A URL a person without an AWS identity can use.
 
         Two members are what make it land *inside a space*: ``SpaceName`` and
         ``LandingUri``.  Both are optional to the API and recent enough that an
         old botocore lacks them, which is why they are checked against the model
         rather than sent hopefully.
+
+        Because the default landing URI aims at the space's *app*, the app has
+        to exist for the URL to be worth handing over — see
+        :func:`_require_live_app`.
         """
         cli = sm_client()
         require_operation(cli, "create_presigned_domain_url",
@@ -815,7 +918,13 @@ def register_studio(sagemaker) -> None:
                                  "a URL cannot be pointed at a space")
             params["UserProfileName"] = profile
             params["SpaceName"] = space_name
-            uri = landing_uri or f"app:{space_app_type(space_desc, app_type)}:"
+            resolved_type = space_app_type(space_desc, app_type)
+            if not landing_uri and not no_app_check:
+                # Only for the default landing URI: an explicit --landing-uri is
+                # the caller aiming somewhere of their own choosing, which may
+                # legitimately not be an app.
+                _require_live_app(cli, domain_id, space_name, resolved_type)
+            uri = landing_uri or f"app:{resolved_type}:"
             if uri:
                 require_input_member("CreatePresignedDomainUrl", "LandingUri",
                                      "the URL cannot land on an app")
@@ -911,6 +1020,45 @@ def register_studio(sagemaker) -> None:
             for space_name, a_type, a_name in targets:
                 _wait_for_app(cli, domain_id, space_name, a_type, a_name,
                               {"Deleted", "Failed"}, timeout, gone_is_done=True)
+
+
+# ─── the app a URL lands on ─────────────────────────────────────────────────
+
+def _require_live_app(cli, domain_id: str, space: str, app_type: str) -> None:
+    """Refuse to mint a URL that would land on an app which is not there.
+
+    An error rather than a warning, because of who the URL is *for*.  A
+    presigned URL exists to be handed to someone without an AWS identity, and
+    it stays valid for minutes; if it opens on a stopped app, the failure
+    surfaces in their browser, indistinguishable from an expired link, with
+    nothing they can do about it.  The person running this command is the only
+    one in the exchange who can fix it — by starting the app first — so this is
+    the moment to say so.
+
+    ``Pending`` passes with a note: the app is on its way to ``InService``, and
+    minting the link while it boots is the normal way to have it ready.
+    """
+    try:
+        live = live_apps_in_space(cli, domain_id, space, app_type)
+    except botocore.exceptions.ClientError as exc:
+        # No ListApps permission is not evidence that nothing is running, and
+        # CreatePresignedDomainUrl may well be within reach — say so, go on.
+        print(f"warning: could not check for a running app: {api_message(exc)}",
+              file=sys.stderr)
+        return
+
+    if not live:
+        raise SmError(
+            f"no live {app_type} app in {space}, so this URL would open on "
+            f"nothing. Start one first:\n"
+            f"  awsut sagemaker studio start {space} --wait\n"
+            f"or pass --no-app-check to mint it anyway (Studio's own space page "
+            f"can start the app), or --landing-uri to aim elsewhere")
+
+    if all(a.get("Status") != "InService" for a in live):
+        states = ", ".join(sorted({a.get("Status") or "?" for a in live}))
+        print(f"note: the {app_type} app is {states}, not InService yet — the "
+              f"URL will work once it is", file=sys.stderr)
 
 
 # ─── waiting on an app ──────────────────────────────────────────────────────
