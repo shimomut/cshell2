@@ -19,6 +19,12 @@ The ``sagemaker`` group lives in the ``_awsut_sagemaker`` subpackage (this
 module is already long enough); it is attached from :func:`register` because
 ``CommandRegistry`` roots cannot be re-opened from a second module.
 
+Both halves print to one contract — header line, table, ``error:`` on stderr —
+defined in :mod:`cshell2.recipes._awsut_common`.  The leaves here were ported
+from a shell that printed colon-separated one-liners; they render through those
+helpers now, so ``awsut ec2 list`` and ``awsut sagemaker studio apps`` line up
+column for column.
+
 Profile and region switching live in the ``aws`` recipe as ``Var`` entries
 (``var aws_profile=...``, ``var aws_region=...``).  The SageMaker endpoint
 and SageMaker service name are also exposed as ``Var`` entries — set them
@@ -54,6 +60,18 @@ from ..commands import registry as command_registry, arg
 from ..completion import Completer, Completion, CompletionContext
 from ..completion_cache import aws_env_key, get_or_fetch
 from ..variables import Var, registry as var_registry
+from ._awsut_common import (
+    RED,
+    RESET,
+    YELLOW,
+    SmError,
+    fmt_bytes,
+    fmt_time,
+    guard,
+    print_header,
+    print_table,
+    section,
+)
 
 
 # ─── User-customisable module-level config ──────────────────────────────────
@@ -112,6 +130,15 @@ def _get_region() -> str | None:
         return None
 
 
+def _region_label() -> str:
+    """The region for a header line — or how to set one, when there is none.
+
+    Every listing names the region it read, so "nothing found" can never be
+    confused with "looked in the wrong place".
+    """
+    return _get_region() or "(no region set — var aws_region=…)"
+
+
 def _get_profile() -> str:
     return os.environ.get("AWS_PROFILE", "default")
 
@@ -160,18 +187,6 @@ def _print_json(obj) -> None:
         except Exception:
             pass
     print(text)
-
-
-def _max_len(items, key) -> int:
-    if not isinstance(key, (list, tuple)):
-        key = [key]
-    n = 0
-    for it in items:
-        v = it
-        for k in key:
-            v = v[k]
-        n = max(n, len(v))
-    return n
 
 
 # ─── progress dots used by `cloudformation watch` ───────────────────────────
@@ -230,6 +245,25 @@ class _CostServiceCompleter(Completer):
         return [d["Value"] for d in response.get("DimensionValues", [])]
 
 
+def _describe_instances() -> dict:
+    return _get_boto3_client("ec2").describe_instances()
+
+
+def _ec2_name(instance) -> str:
+    """An instance's Name tag — what the ``ec2`` leaves address it by."""
+    for tag in instance.get("Tags", []) or []:
+        if tag["Key"] == "Name":
+            return tag["Value"]
+    return ""
+
+
+def _ec2_public_dns(instance) -> str:
+    for interface in instance.get("NetworkInterfaces", []):
+        if "Association" in interface:
+            return interface["Association"]["PublicDnsName"]
+    return ""
+
+
 class _Ec2InstanceNameCompleter(Completer):
     def complete(self, ctx: CompletionContext) -> list[Completion]:
         try:
@@ -244,16 +278,15 @@ class _Ec2InstanceNameCompleter(Completer):
 
     @staticmethod
     def _fetch() -> list[str]:
-        ec2 = _get_boto3_client("ec2")
-        response = ec2.describe_instances()
-        names: list[str] = []
-        for reservation in response.get("Reservations", []):
-            for instance in reservation.get("Instances", []):
-                for tag in instance.get("Tags", []) or []:
-                    if tag["Key"] == "Name":
-                        names.append(tag["Value"])
-                        break
-        return names
+        return [name for reservation in _describe_instances().get("Reservations", [])
+                for instance in reservation.get("Instances", [])
+                if (name := _ec2_name(instance))]
+
+
+def _epoch_ms(value):
+    """A CloudWatch Logs millisecond timestamp as a local datetime, or None."""
+    return (datetime.datetime.fromtimestamp(value / 1000).astimezone()
+            if value else None)
 
 
 def _list_log_groups(prefix: str = "") -> list[dict]:
@@ -402,17 +435,21 @@ def _cf_failure_reasons(cf_client, stack_name: str) -> list[str]:
 
 
 def _report_cf_failure(cf_client, stack: dict) -> None:
-    """Print a failed stack's status, failure reason(s) and a clickable
-    console hyperlink."""
+    """A failed stack's reason(s) and a clickable console hyperlink, as a section.
+
+    Same shape as the failure blocks under ``sagemaker hyperpod list``: the
+    listing (or the watch) says *which* stacks failed, and one section per stack
+    says why — so the reasons never interleave with the rows.
+    """
     name = stack["StackName"]
-    print(f"{name}: {stack['StackStatus']}")
+    section(f"{name} · {stack['StackStatus']}")
     reason = stack.get("StackStatusReason")
     if reason:
-        print(f"  {reason}")
+        print(reason)
     for line in _cf_failure_reasons(cf_client, name):
-        print(f"  {line}")
+        print(line)
     url = _cf_console_url(stack.get("StackId", name))
-    print(f"  Console: {_osc8(url, url)}")
+    print(f"Console: {_osc8(url, url)}")
 
 
 class _CfStackNameCompleter(Completer):
@@ -493,10 +530,11 @@ def _register_console(awsut) -> None:
         help="Open Management Console",
         params=[arg("page_name", completer=_ConsolePageCompleter())],
     )
+    @guard
     def _console(page_name):
         if page_name not in console_pages:
-            print(f"Unknown console page: {page_name}")
-            return
+            raise SmError(f"no console page {page_name!r} — known pages: "
+                          f"{', '.join(sorted(console_pages))}")
         url = console_pages[page_name]
 
         region = _get_region() or "us-east-1"
@@ -535,6 +573,7 @@ def _register_recent_cost(awsut) -> None:
                 help="Hide rows/columns with total below this amount"),
         ],
     )
+    @guard
     def _recent_cost(days, filter, min_amount):
         client = _get_boto3_client("ce")
 
@@ -557,15 +596,13 @@ def _register_recent_cost(awsut) -> None:
                 {"Type": "DIMENSION", "Key": "USAGE_TYPE"},
                 {"Type": "DIMENSION", "Key": "REGION"},
             ]
-            row_label = "Usage Type"
-            title = f"Usage Type x Region: {', '.join(filter)} (last {days} days)"
+            row_label = "USAGE TYPE"
         else:
             ce_params["GroupBy"] = [
                 {"Type": "DIMENSION", "Key": "SERVICE"},
                 {"Type": "DIMENSION", "Key": "REGION"},
             ]
-            row_label = "Service"
-            title = f"Service x Region (last {days} days)"
+            row_label = "SERVICE"
 
         response = client.get_cost_and_usage(**ce_params)
 
@@ -595,8 +632,14 @@ def _register_recent_cost(awsut) -> None:
             key=lambda s: row_totals[s], reverse=True,
         )
 
+        print_header(
+            f"{len(rows)} {row_label.lower()}(s) × {len(regions)} region(s)",
+            f"last {days} days",
+            f"service {', '.join(filter)}" if filter else "",
+            "amortized cost",
+        )
         if not regions or not rows:
-            print("\nNo cost data for table.")
+            print(f"nothing above --min {min_amount} in this period")
             return
 
         all_values = sorted(
@@ -607,118 +650,113 @@ def _register_recent_cost(awsut) -> None:
         top_10_pct_idx = max(1, len(all_values) // 10)
         yellow_threshold = all_values[top_10_pct_idx - 1] if all_values else 0
 
-        RED, YELLOW, RESET = "\033[91m", "\033[93m", "\033[0m"
-
         def colorize(val, text):
+            if not sys.stdout.isatty():
+                return text
             if val >= max_val:
                 return f"{RED}{text}{RESET}"
             if val >= yellow_threshold:
                 return f"{YELLOW}{text}{RESET}"
             return text
 
-        row_col_width = max(len(r) for r in rows)
-        col_widths = {region: max(len(region), 10) for region in regions}
-        total_col_width = max(len("TOTAL"), 10)
+        # A cross-tab, not a resource listing: the cells are money, so they are
+        # right-aligned, and the last row is the column totals below a second
+        # rule.  print_table expresses neither, so the frame is drawn here — to
+        # the same shape it draws (labels, '-' rule, two-space gaps).
+        label_w = max([len(row_label), len("TOTAL")] + [len(r) for r in rows])
+        col_w = {region: max(len(region), 10) for region in regions}
+        total_w = max(len("TOTAL"), 10)
+        widths = [label_w] + [col_w[r] for r in regions] + [total_w]
 
-        header = f"  {row_label:<{row_col_width}}"
-        for region in regions:
-            header += f"  {region:>{col_widths[region]}}"
-        header += f"  {'TOTAL':>{total_col_width}}"
-        print(f"\n=== {title} ===")
-        print(header)
-        print("  " + "-" * (len(header) - 2))
+        def rule():
+            print("  ".join("-" * w for w in widths))
 
+        def render(label, cells):
+            print("  ".join([label.ljust(label_w)] + cells))
+
+        render(row_label, [region.rjust(col_w[region]) for region in regions]
+                          + ["TOTAL".rjust(total_w)])
+        rule()
         for row_key in rows:
-            line = f"  {row_key:<{row_col_width}}"
+            cells = []
             for region in regions:
-                w = col_widths[region]
+                w = col_w[region]
                 val = data.get(row_key, {}).get(region, 0.0)
-                if val >= 0.01:
-                    cell = f"{val:{w}.2f}"
-                    line += f"  {colorize(val, cell)}"
-                else:
-                    line += f"  {'':>{w}}"
-            total_cell = f"{row_totals[row_key]:{total_col_width}.2f}"
-            line += f"  {total_cell}"
-            print(line)
-
-        footer = f"  {'TOTAL':<{row_col_width}}"
-        for region in regions:
-            footer += f"  {region_totals[region]:{col_widths[region]}.2f}"
-        footer += f"  {sum(row_totals.values()):{total_col_width}.2f}"
-        print("  " + "-" * (len(header) - 2))
-        print(footer)
+                cells.append(colorize(val, f"{val:{w}.2f}") if val >= 0.01
+                             else " " * w)
+            cells.append(f"{row_totals[row_key]:{total_w}.2f}")
+            render(row_key, cells)
+        rule()
+        render("TOTAL",
+               [f"{region_totals[r]:{col_w[r]}.2f}" for r in regions]
+               + [f"{sum(row_totals.values()):{total_w}.2f}"])
 
 
 def _register_ec2(awsut) -> None:
     ec2 = awsut.command("ec2", help="EC2 commands")
 
     @ec2.command("list", help="List EC2 instances with status")
+    @guard
     def _ec2_list():
-        ec2_client = _get_boto3_client("ec2")
-        response = ec2_client.describe_instances()
+        instances = [i for r in _describe_instances()["Reservations"]
+                     for i in r["Instances"]]
+        rows = [[
+            _ec2_name(i) or "-",
+            i["InstanceId"],
+            i["State"]["Name"],
+            i.get("InstanceType") or "-",
+            _ec2_public_dns(i) or "-",
+        ] for i in instances]
+        rows.sort(key=lambda r: (r[0], r[1]))
+        print_header(f"{len(rows)} instance(s)", f"region {_region_label()}")
+        print_table(["NAME", "INSTANCE ID", "STATE", "TYPE", "PUBLIC DNS"], rows)
 
-        print("Existing instances:")
-        for reservation in response["Reservations"]:
+    def _ec2_action(instance_name, operation, api_method):
+        for reservation in _describe_instances()["Reservations"]:
             for instance in reservation["Instances"]:
-                instance_id = instance["InstanceId"]
-                name = ""
-                for tag in instance.get("Tags", []) or []:
-                    if tag["Key"] == "Name":
-                        name = tag["Value"]
-                        break
-                state = instance["State"]["Name"]
-                public_dns = ""
-                for ni in instance.get("NetworkInterfaces", []):
-                    if "Association" in ni:
-                        public_dns = ni["Association"]["PublicDnsName"]
-                        break
-                print(f"  {name:>20} : {instance_id:<19} : {state:<8} : {public_dns}")
-
-    def _ec2_match(instance, name) -> bool:
-        for tag in instance.get("Tags", []) or []:
-            if tag["Key"] == "Name" and tag["Value"] == name:
-                return True
-        return False
-
-    def _ec2_action(instance_name, action_name, api_method):
-        ec2_client = _get_boto3_client("ec2")
-        response = ec2_client.describe_instances()
-        for reservation in response["Reservations"]:
-            for instance in reservation["Instances"]:
-                if _ec2_match(instance, instance_name):
+                if _ec2_name(instance) == instance_name:
                     api_method(InstanceIds=[instance["InstanceId"]])
-                    print(f"{action_name}: {instance['InstanceId']}")
+                    print(f"{operation} · instance {instance_name} · "
+                          f"region {_region_label()}")
+                    print(f"InstanceId {instance['InstanceId']}")
                     return
-        print(f"Error : EC2 instance [{instance_name}] not found.")
+        raise SmError(f"no EC2 instance named {instance_name!r} in "
+                      f"region {_region_label()}")
 
     @ec2.command(
         "start", help="Start instance by name",
         params=[arg("instance_name", completer=_Ec2InstanceNameCompleter())],
     )
+    @guard
     def _ec2_start(instance_name):
         ec2_client = _get_boto3_client("ec2")
-        _ec2_action(instance_name, "Started", ec2_client.start_instances)
+        _ec2_action(instance_name, "StartInstances", ec2_client.start_instances)
 
     @ec2.command(
         "stop", help="Stop instance by name",
         params=[arg("instance_name", completer=_Ec2InstanceNameCompleter())],
     )
+    @guard
     def _ec2_stop(instance_name):
         ec2_client = _get_boto3_client("ec2")
-        _ec2_action(instance_name, "Stopped", ec2_client.stop_instances)
+        _ec2_action(instance_name, "StopInstances", ec2_client.stop_instances)
 
     @ec2.command(
         "reboot", help="Reboot instance by name",
         params=[arg("instance_name", completer=_Ec2InstanceNameCompleter())],
     )
+    @guard
     def _ec2_reboot(instance_name):
         ec2_client = _get_boto3_client("ec2")
-        _ec2_action(instance_name, "Rebooted", ec2_client.reboot_instances)
+        _ec2_action(instance_name, "RebootInstances", ec2_client.reboot_instances)
 
 
 def _register_logs(awsut) -> None:
     logs = awsut.command("logs", help="CloudWatch Logs commands")
+
+    def _retention(group) -> str:
+        days = group.get("retentionInDays")
+        return f"{days}d" if days else "never"
 
     @logs.command(
         "list", help="List log groups",
@@ -726,6 +764,7 @@ def _register_logs(awsut) -> None:
                     completer=_LogGroupCompleter(),
                     help="Log group name pattern with widecards")],
     )
+    @guard
     def _logs_list(group_name=None):
         logs_client = _get_boto3_client("logs")
         pattern = group_name if group_name is not None else "*"
@@ -736,23 +775,32 @@ def _register_logs(awsut) -> None:
             if pos >= 0:
                 prefix = prefix[:pos]
 
-        last_found = None
-        num_found = 0
+        found = [g for g in _list_log_groups(prefix)
+                 if fnmatch.fnmatch(g["logGroupName"], pattern)]
+        print_header(f"{len(found)} log group(s)", f"matching {pattern}",
+                     f"region {_region_label()}")
+        print_table(
+            ["LOG GROUP", "RETENTION", "STORED"],
+            [[g["logGroupName"], _retention(g), fmt_bytes(g.get("storedBytes"))]
+             for g in found],
+        )
 
-        print("Log groups:")
-        for lg in _list_log_groups(prefix):
-            if fnmatch.fnmatch(lg["logGroupName"], pattern):
-                print(f"  {lg['logGroupName']}")
-                last_found = lg
-                num_found += 1
-
-        if num_found == 1:
-            print()
-            print("Streams:")
-            response = logs_client.describe_log_streams(
-                logGroupName=last_found["logGroupName"])
-            for stream in response.get("logStreams", []):
-                print(f"  {stream['logStreamName']}")
+        # One match means the pattern named a group, so go one level down: its
+        # streams are what `monitor` takes next.
+        if len(found) != 1:
+            return
+        group = found[0]["logGroupName"]
+        streams = logs_client.describe_log_streams(
+            logGroupName=group).get("logStreams", [])
+        print()
+        print_header(f"{len(streams)} stream(s)", f"log group {group}")
+        print_table(
+            ["STREAM", "FIRST EVENT", "LAST EVENT", "SIZE"],
+            [[s["logStreamName"],
+              fmt_time(_epoch_ms(s.get("firstEventTimestamp"))),
+              fmt_time(_epoch_ms(s.get("lastEventTimestamp"))),
+              fmt_bytes(s.get("storedBytes"))] for s in streams],
+        )
 
     @logs.command(
         "monitor", help="Monitor a log stream",
@@ -767,8 +815,8 @@ def _register_logs(awsut) -> None:
                 help="Lookback window in minutes"),
         ],
     )
+    @guard
     def _logs_monitor(group_name, stream_name, freq, lookback):
-        import sys
         logs_client = _get_boto3_client("logs")
         start_time = int((time.time() - lookback * 60) * 1000)
 
@@ -789,8 +837,8 @@ def _register_logs(awsut) -> None:
                 try:
                     response = logs_client.get_log_events(**params)
                 except logs_client.exceptions.ResourceNotFoundException:
-                    print(f"Log group or stream not found [ {group_name}, {stream_name} ]")
-                    return
+                    raise SmError(f"no log stream {stream_name!r} in log group "
+                                  f"{group_name!r}") from None
 
                 for event in response["events"]:
                     if start_time > event["timestamp"]:
@@ -825,6 +873,7 @@ def _register_logs(awsut) -> None:
                 help="End date-time in UTC, in YYYYMMDD_HHMMSS format"),
         ],
     )
+    @guard
     def _logs_export(group_name, s3_path, start_datetime, end_datetime):
         exporter = _LogsExporter(
             logs_client=_get_boto3_client("logs"),
@@ -848,6 +897,7 @@ def _register_cf(awsut) -> None:
                 help="Include nested stacks"),
         ],
     )
+    @guard
     def _cf_list(include_deleted, include_nested):
         cf_client = _get_boto3_client("cloudformation")
         stacks = _list_cf_stacks(
@@ -856,20 +906,22 @@ def _register_cf(awsut) -> None:
             include_successfully_completed=True,
             include_nested=include_nested,
         )
-        if not stacks:
-            print("No stacks.")
-            return
-        name_w   = _max_len(stacks, "StackName")
-        status_w = _max_len(stacks, "StackStatus")
+        print_header(f"{len(stacks)} stack(s)", f"region {_region_label()}")
+        print_table(
+            ["STACK NAME", "STATUS", "NESTED", "UPDATED"],
+            [[s["StackName"], s["StackStatus"],
+              "nested" if "ParentId" in s else "-",
+              fmt_time(s.get("LastUpdatedTime") or s.get("CreationTime"))]
+             for s in stacks],
+        )
+        # A failed stack says why, in a section of its own below the table.
         for stack in stacks:
-            nested = "ParentId" in stack
-            print(
-                f"{stack['StackName']:<{name_w}} : "
-                f"{stack['StackStatus']:<{status_w}} : "
-                f"{'(nested)' if nested else ''}"
-            )
+            if stack["StackStatus"].endswith("_FAILED"):
+                print()
+                _report_cf_failure(cf_client, stack)
 
     @cf.command("watch", help="Watch CloudFormation operations until they finish")
+    @guard
     def _cf_watch():
         cf_client = _get_boto3_client("cloudformation")
         progress = _ProgressDots()
@@ -890,12 +942,14 @@ def _register_cf(awsut) -> None:
         # including the failure reason and a clickable console hyperlink.
         failed = [s for s in stacks if s["StackStatus"].endswith("_FAILED")]
         for stack in failed:
+            print()
             _report_cf_failure(cf_client, stack)
 
     @cf.command(
         "open", help="Open the CloudFormation management console",
         params=[arg("stack_name", completer=_CfStackNameCompleter())],
     )
+    @guard
     def _cf_open(stack_name):
         region = _get_region() or "us-east-1"
         cf_client = _get_boto3_client("cloudformation")
@@ -910,8 +964,7 @@ def _register_cf(awsut) -> None:
             None,
         )
         if not stack_arn:
-            print(f"Stack [{stack_name}] not found.")
-            return
+            raise SmError(f"no stack named {stack_name!r} in region {region}")
 
         encoded = urllib.parse.quote(stack_arn)
         url = (f"https://{region}.console.aws.amazon.com/cloudformation/home"
@@ -960,7 +1013,7 @@ class _LogsExporter:
     def _split_s3_path(s3_path):
         m = re.match(r"s3://([^/]+)/(.*)", s3_path)
         if not m:
-            raise ValueError(f"Invalid s3 path: {s3_path}")
+            raise SmError(f"not an s3 path: {s3_path!r} (want s3://bucket/prefix)")
         return m.group(1), m.group(2).rstrip("/")
 
     def _export_single_log_group(self, local_dirname):
@@ -976,7 +1029,13 @@ class _LogsExporter:
             destinationPrefix=s3_prefix,
         )
         task_id = response["taskId"]
+        print(f"CreateExportTask · log group {self.log_group} · "
+              f"s3://{s3_bucket}/{s3_prefix}")
+        print(f"taskId {task_id}\n")
 
+        # Stamped, and only when it changes — the same convention the `watch`
+        # leaves follow, so a long export reads as a timeline.
+        last = None
         while True:
             completed = False
             response = self.logs_client.describe_export_tasks(taskId=task_id)
@@ -984,7 +1043,10 @@ class _LogsExporter:
                 if task["taskId"] == task_id:
                     code = task["status"]["code"]
                     msg = task["status"].get("message", "")
-                    print("Export task status :", code, msg)
+                    if (code, msg) != last:
+                        stamp = datetime.datetime.now().strftime("%H:%M:%S")
+                        print(f"[{stamp}] {code}" + (f" · {msg}" if msg else ""))
+                        last = (code, msg)
                     if code in ("COMPLETED", "CANCELLED", "FAILED"):
                         completed = True
             if completed:
@@ -1000,7 +1062,7 @@ class _LogsExporter:
             rel = key[len(exported_prefix):].lstrip("/")
             local = os.path.join(local_dirname, rel)
             os.makedirs(os.path.split(local)[0], exist_ok=True)
-            print("Downloading", key)
+            print(f"downloading {key}")
             s3.download_file(Bucket=s3_bucket, Key=key, Filename=local)
 
     def _convert_and_normalize(self, src, dst, gzip):
@@ -1010,7 +1072,7 @@ class _LogsExporter:
                 if not filename.endswith(".gz"):
                     continue
                 src_filepath = os.path.join(place, filename)
-                print("Reading :", src_filepath)
+                print(f"reading {src_filepath}")
                 with gzip.open(src_filepath) as fd:
                     raw = fd.read()
                 for line in raw.splitlines():
@@ -1027,7 +1089,7 @@ class _LogsExporter:
             dst_filepath = os.path.join(
                 dst, place[len(src):].lstrip("/\\") + ".log",
             )
-            print("Writing", dst_filepath)
+            print(f"writing {dst_filepath}")
             line_groups.sort()
             lines: list[bytes] = []
             for grp in line_groups:
@@ -1048,5 +1110,5 @@ class _LogsExporter:
             }))
 
     def _create_zip_file(self, dirname, zip_filename_no_ext, shutil):
-        print("Creating a Zip file", zip_filename_no_ext + ".zip")
+        print(f"creating {zip_filename_no_ext}.zip")
         shutil.make_archive(zip_filename_no_ext, "zip", dirname)

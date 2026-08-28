@@ -47,11 +47,14 @@ from .render import (
     paged,
     parse_doc,
     positionals,
+    print_header,
+    print_labeled,
     print_table,
     refs_in,
     region_label,
     require_operation,
     s3_client,
+    section,
     show_document,
     sm_client,
     split_arn,
@@ -336,7 +339,10 @@ def register_hub(sagemaker) -> None:
     )
 
     @hub.command(
-        "hubs", help="List the hubs visible in this region",
+        "hubs",
+        help="List the hubs visible in this region (OWNER 'aws (public)' is the "
+             "read-only SageMaker public hub; your own content lives in an "
+             "account-owned one)",
         params=[arg("--max", type=int, default=25, dest="limit", metavar="N",
                     help="hubs to list (default 25)")],
     )
@@ -344,9 +350,6 @@ def register_hub(sagemaker) -> None:
     def _hub_hubs(limit):
         cli = sm_client()
         hubs = list_hubs(cli, limit)
-        if not hubs:
-            print(f"no hubs in region {region_label()}")
-            return
         rows = []
         for h in hubs:
             parsed = split_arn(h.get("HubArn") or "")
@@ -358,15 +361,14 @@ def register_hub(sagemaker) -> None:
                 fmt_time(h.get("CreationTime")),
                 h.get("HubArn") or "-",
             ])
-        print(f"{len(rows)} hub(s) · region {region_label()}\n")
+        print_header(f"{len(rows)} hub(s)", f"region {region_label()}")
         print_table(
-            ["HUB NAME", "DISPLAY NAME", "STATUS", "OWNER", "CREATED", "ARN"], rows,
-            note="OWNER 'aws (public)' is the read-only SageMaker public hub; "
-                 "your own content lives in an account-owned one.",
-        )
+            ["HUB NAME", "DISPLAY NAME", "STATUS", "OWNER", "CREATED", "ARN"], rows)
 
     @hub.command(
-        "list", help="List hub content",
+        "list",
+        help="List hub content — one row per item, its newest version only "
+             "(`versions NAME` for an item's history)",
         params=[
             _hub_flag(),
             _type_flag(allow_all=True),
@@ -387,7 +389,7 @@ def register_hub(sagemaker) -> None:
             try:
                 found = contents(cli, resolved_hub, a_type, limit, contains=contains)
             except botocore.exceptions.ClientError as exc:
-                print(f"  ! {a_type}: {api_message(exc)}", file=sys.stderr)
+                print(f"error: {a_type}: {api_message(exc)}", file=sys.stderr)
                 skipped.append(a_type)
                 continue
             for s in found:
@@ -401,27 +403,18 @@ def register_hub(sagemaker) -> None:
                     s.get("HubContentDescription") or "-",
                 ])
 
-        if not rows:
-            print(f"no content matched · hub {resolved_hub} · "
-                  f"types: {', '.join(types)}")
-            if skipped:
-                print(f"not queried (see stderr): {', '.join(skipped)}")
-            return
-
         rows.sort(key=lambda r: (r[0], r[1], version_key(r[2])))
-        print(f"{len(rows)} item(s) · hub {resolved_hub} · region {region_label()} · "
-              f"{len(types)} type(s) queried\n")
         # Verified against an item known to have both 0.0.1 and 0.0.2: only 0.0.2
-        # comes back, so this listing is one row per item and a version count
-        # here would mean nothing.
-        notes = ["ListHubContents returns one row per item — its newest version "
-                 "only.  Use `versions NAME` for an item's history."]
-        if skipped:
-            notes.append(f"not queried (see stderr): {', '.join(skipped)}")
+        # comes back, so this listing is one row per item (as the help says) and a
+        # version count here would mean nothing.
+        print_header(f"{len(rows)} item(s)", f"hub {resolved_hub}",
+                     f"region {region_label()}", f"{len(types)} type(s) queried")
         print_table(
             ["TYPE", "NAME", "VERSION", "STATUS", "DOC SCHEMA", "CREATED",
              "DESCRIPTION"],
-            rows, note="\n".join(notes),
+            rows,
+            note=(f"not queried (see stderr): {', '.join(skipped)}"
+                  if skipped else None),
         )
 
     @hub.command(
@@ -453,8 +446,8 @@ def register_hub(sagemaker) -> None:
             fmt_time(s.get("CreationTime")),
             s.get("HubContentDescription") or "-",
         ] for s in versions]
-        print(f"{len(rows)} version(s) of {resolved_type} {name} · "
-              f"hub {resolved_hub}\n")
+        print_header(f"{len(rows)} version(s) of {resolved_type} {name}",
+                     f"hub {resolved_hub}")
         print_table(["VERSION", "STATUS", "DOC SCHEMA", "CREATED", "DESCRIPTION"],
                     rows)
 
@@ -470,7 +463,9 @@ def register_hub(sagemaker) -> None:
             arg("--raw", action="store_true",
                 help="Show the raw API response as JSON"),
             arg("--raw-doc", action="store_true",
-                help="Print HubContentDocument verbatim instead of reformatted"),
+                help="Print HubContentDocument verbatim — the API returns it as "
+                     "one JSON string, which is reformatted for reading by "
+                     "default"),
         ],
     )
     @guard
@@ -489,41 +484,44 @@ def register_hub(sagemaker) -> None:
             return
 
         # Identifiers first, one per line, unwrapped — these are the copy targets.
-        print(f"HubContentArn   {d.get('HubContentArn')}")
-        print(f"HubArn          {d.get('HubArn')}")
-        print(f"HubName         {d.get('HubName')}")
-        print(f"HubContentType  {d.get('HubContentType')}")
-        print(f"HubContentName  {d.get('HubContentName')}")
-        print()
         suffix = f"  (newest of {len(all_versions)})" if all_versions else ""
-        print(f"Version         {d.get('HubContentVersion')}{suffix}")
-        print(f"Status          {d.get('HubContentStatus')}")
-        print(f"DocSchema       {d.get('DocumentSchemaVersion')}")
-        print(f"Created         {fmt_time(d.get('CreationTime'))}")
-        print(f"Modified        {fmt_time(d.get('LastModifiedTime'))}")
-        for label, key in (("DisplayName", "HubContentDisplayName"),
-                           ("Description", "HubContentDescription"),
-                           ("SupportStatus", "SupportStatus"),
-                           ("PublicHubArn", "SageMakerPublicHubContentArn")):
-            if d.get(key):
-                print(f"{label:<15} {d[key]}")
-        if d.get("HubContentSearchKeywords"):
-            print(f"{'Keywords':<15} {', '.join(d['HubContentSearchKeywords'])}")
+        keywords = d.get("HubContentSearchKeywords")
+        print_labeled([
+            ("HubContentArn", d.get("HubContentArn")),
+            ("HubArn", d.get("HubArn")),
+            ("HubName", d.get("HubName")),
+            ("HubContentType", d.get("HubContentType")),
+            ("HubContentName", d.get("HubContentName")),
+            None,
+            ("Version", f"{d.get('HubContentVersion')}{suffix}"),
+            ("Status", d.get("HubContentStatus")),
+            ("DocSchema", d.get("DocumentSchemaVersion")),
+            ("Created", fmt_time(d.get("CreationTime"))),
+            ("Modified", fmt_time(d.get("LastModifiedTime"))),
+            ("DisplayName", d.get("HubContentDisplayName")),
+            ("Description", d.get("HubContentDescription")),
+            ("SupportStatus", d.get("SupportStatus")),
+            ("PublicHubArn", d.get("SageMakerPublicHubContentArn")),
+            ("Keywords", ", ".join(keywords) if keywords else None),
+        ])
         if d.get("FailureReason"):
-            print(f"\nFailureReason\n  {d['FailureReason']}")
+            print()
+            section("FailureReason")
+            print(d["FailureReason"])
 
         if d.get("HubContentDependencies"):
-            print("\nHubContentDependencies")
-            for line in yaml_lines(d["HubContentDependencies"], 1):
+            print()
+            section("HubContentDependencies")
+            for line in yaml_lines(d["HubContentDependencies"], 0):
                 print(line)
 
         show_document("HubContentDocument", d.get("HubContentDocument"),
                       d.get("DocumentSchemaVersion"), raw=raw_doc)
 
         if d.get("HubContentMarkdown"):
-            print("\nHubContentMarkdown")
-            for line in str(d["HubContentMarkdown"]).splitlines():
-                print(f"  {line}")
+            print()
+            section("HubContentMarkdown")
+            print(str(d["HubContentMarkdown"]).rstrip())
 
     @hub.command(
         "files", help="List what a content item actually holds, in S3",
@@ -535,7 +533,9 @@ def register_hub(sagemaker) -> None:
             arg("--version", metavar="V", completer=_ContentVersionCompleter(),
                 help="default: newest"),
             arg("--urls", action="store_true",
-                help="also try CreateHubContentPresignedUrls (fails for DataSet)"),
+                help="also try CreateHubContentPresignedUrls (fails for DataSet; "
+                     "the URLs it mints carry temporary credentials, so keep "
+                     "them out of committed transcripts)"),
             arg("--max", type=int, default=100, dest="limit", metavar="N",
                 help="objects per location (default 100)"),
         ],
@@ -561,15 +561,15 @@ def register_hub(sagemaker) -> None:
         d = describe_content(cli, resolved_hub, resolved_type, name, version)
         parsed = parse_doc(d.get("HubContentDocument"))
         refs = [(p, v) for p, v in refs_in(parsed or {}) if v.startswith("s3://")]
-        print(f"{resolved_type} {name} v{d.get('HubContentVersion')} · "
-              f"hub {resolved_hub}")
         if not refs:
             # Not every document spells a location as one s3:// string — an
             # older schema version may carry bucket and prefix in separate
             # fields, which no shape-based scan can join without guessing key
             # names.  `describe` shows what is actually there.
-            print("\nno s3:// value in this item's document, so there is nothing "
-                  "to list by shape alone;\nrun `describe` — the location may be "
+            print_header(f"0 location(s) in {resolved_type} {name} "
+                         f"v{d.get('HubContentVersion')}", f"hub {resolved_hub}")
+            print("no s3:// value in this item's document, so there is nothing "
+                  "to list by shape alone — run `describe`, the location may be "
                   "split across fields")
             return
 
@@ -582,9 +582,12 @@ def register_hub(sagemaker) -> None:
             if uri not in [u for _p, u in seen]:
                 seen.append((path, uri))
 
+        print_header(f"{len(seen)} location(s) in {resolved_type} {name} "
+                     f"v{d.get('HubContentVersion')}", f"hub {resolved_hub}")
+
         for path, uri in seen:
             bucket, key = split_s3(uri)
-            print(f"\n{path}\n  {uri}")
+            section(f"{path} · {uri}")
             try:
                 objects = paged(s3.list_objects_v2, "Contents", limit,
                                 token_param="ContinuationToken",
@@ -592,21 +595,20 @@ def register_hub(sagemaker) -> None:
                                 Bucket=bucket, Prefix=key,
                                 MaxKeys=min(limit, 1000))
             except botocore.exceptions.ClientError as exc:
-                print(f"    ! cannot list: {api_message(exc)}")
-                continue
-            if not objects:
-                print("    (nothing at this prefix)")
+                print(f"error: cannot list {uri}: {api_message(exc)}",
+                      file=sys.stderr)
+                print()
                 continue
             rows = [[fmt_bytes(o.get("Size")), fmt_time(o.get("LastModified")),
                      o.get("Key") or "?"] for o in objects]
             total = sum(o.get("Size") or 0 for o in objects)
-            print()
+            print_header(f"{len(objects)} object(s)", fmt_bytes(total) if objects else "",
+                         f"capped at --max {limit}" if len(objects) >= limit else "")
             print_table(["SIZE", "MODIFIED", "KEY"], rows)
-            print(f"    {len(objects)} object(s), {fmt_bytes(total)}"
-                  + (f" — capped at --max {limit}" if len(objects) >= limit else ""))
+            print()
 
         if urls:
-            print("\nCreateHubContentPresignedUrls:")
+            section("CreateHubContentPresignedUrls")
             params = {"HubName": resolved_hub, "HubContentType": resolved_type,
                       "HubContentName": name, "MaxResults": min(limit, 100)}
             if version:
@@ -616,15 +618,15 @@ def register_hub(sagemaker) -> None:
                                   "CreateHubContentPresignedUrls")
                 configs = paged(cli.create_hub_content_presigned_urls,
                                 "AuthorizedUrlConfigs", limit, **params)
+                # Not print_labeled: a presigned URL is hundreds of characters,
+                # so it gets its own line rather than a padded column.
                 for c in configs:
-                    print(f"  {c.get('LocalPath')}")
-                    print(f"    {c.get('Url')}")
-                print("\nThose URLs carry temporary credentials — keep them out "
-                      "of committed transcripts.")
+                    print(c.get("LocalPath") or "?")
+                    print(f"  {c.get('Url')}")
             except botocore.exceptions.ClientError as exc:
-                print(f"  ! {api_message(exc)}")
-                print("  (expected for DataSet content — the operation serves "
-                      "model hosting artifacts)")
+                print(f"error: {api_message(exc)} — expected for DataSet "
+                      "content, the operation serves model hosting artifacts",
+                      file=sys.stderr)
 
     @hub.command(
         "trace", help="Follow ARNs between jobs, datasets and hubs",

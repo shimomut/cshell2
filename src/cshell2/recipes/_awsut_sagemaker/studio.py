@@ -94,6 +94,8 @@ from .render import (
     model_enum,
     paged,
     positionals,
+    print_header,
+    print_labeled,
     print_table,
     region_label,
     require_input_member,
@@ -625,7 +627,10 @@ def register_studio(sagemaker) -> None:
     # ── read-only ──────────────────────────────────────────────────────────
 
     @studio.command(
-        "domains", help="List the Studio domains in this region",
+        "domains",
+        help="List the Studio domains in this region (URL is the console entry "
+             "point, and needs an AWS identity — `url` mints one for a profile "
+             "that has none)",
         params=[arg("--max", type=int, default=50, dest="limit", metavar="N",
                     help="domains to list (default 50)")],
     )
@@ -633,9 +638,6 @@ def register_studio(sagemaker) -> None:
     def _domains(limit):
         cli = sm_client()
         domains = list_domains(cli, limit)
-        if not domains:
-            print(f"no Studio domain in region {region_label()}")
-            return
         rows = [[
             d.get("DomainName") or "?",
             d.get("DomainId") or "?",
@@ -643,13 +645,15 @@ def register_studio(sagemaker) -> None:
             fmt_time(d.get("CreationTime")),
             d.get("Url") or "-",
         ] for d in domains]
-        print(f"{len(rows)} domain(s) · region {region_label()}\n")
-        print_table(["DOMAIN NAME", "DOMAIN ID", "STATUS", "CREATED", "URL"], rows,
-                    note="URL is the console entry point; it needs an AWS identity. "
-                         "For a profile that has none, mint one with `url`.")
+        print_header(f"{len(rows)} domain(s)", f"region {region_label()}")
+        print_table(["DOMAIN NAME", "DOMAIN ID", "STATUS", "CREATED", "URL"], rows)
 
     @studio.command(
-        "spaces", help="List the spaces in a domain (creates nothing)",
+        "spaces",
+        help="List the spaces in a domain (creates nothing). APP '-' means "
+             "nothing is running there, so it bills no compute — its EBS volume "
+             "is charged either way, and STATUS is the space's own, InService "
+             "whether or not an app runs",
         params=[_domain_flag(),
                 arg("--max", type=int, default=100, dest="limit", metavar="N",
                     help="spaces to list (default 100)")],
@@ -659,23 +663,20 @@ def register_studio(sagemaker) -> None:
         cli = sm_client()
         resolved = resolve_domain(cli, domain)
         spaces = list_spaces(cli, resolved["DomainId"], limit)
-        if not spaces:
-            print(f"no spaces in domain {domain_label(resolved)}")
-            return
         # Which space is billing is the first thing anyone wants from this
         # listing, but it needs a second permission (ListApps) that ListSpaces
         # does not — so a refusal costs the column, not the listing.
         running = {}
-        app_note = ("APP '-' means nothing is running in that space, so it is not "
-                    "billing compute. Its EBS volume is charged either way. "
-                    "STATUS is the space's own — it reads InService whether or "
-                    "not an app is running.")
-        try:
-            for space, apps in live_apps_by_space(cli, resolved["DomainId"]).items():
-                running[space] = ",".join(app_label(a) for a in apps)
-        except botocore.exceptions.ClientError as exc:
-            print(f"  ! apps not listed: {api_message(exc)}", file=sys.stderr)
-            app_note = "APP could not be filled in — see stderr."
+        app_note = None
+        if spaces:
+            try:
+                for space, apps in live_apps_by_space(
+                        cli, resolved["DomainId"]).items():
+                    running[space] = ",".join(app_label(a) for a in apps)
+            except botocore.exceptions.ClientError as exc:
+                print(f"error: apps not listed: {api_message(exc)}",
+                      file=sys.stderr)
+                app_note = "APP could not be filled in — see stderr."
         rows = [[
             s.get("SpaceName") or "?",
             sharing_type(s),
@@ -688,8 +689,8 @@ def register_studio(sagemaker) -> None:
             fmt_time(s.get("CreationTime")),
         ] for s in spaces]
         rows.sort(key=lambda r: r[0])
-        print(f"{len(rows)} space(s) · domain {domain_label(resolved)} · "
-              f"region {region_label()}\n")
+        print_header(f"{len(rows)} space(s)", f"domain {domain_label(resolved)}",
+                     f"region {region_label()}")
         print_table(
             ["SPACE", "SHARING", "OWNER", "APP TYPE", "EBS", "STATUS", "APP",
              "CREATED"],
@@ -697,7 +698,10 @@ def register_studio(sagemaker) -> None:
         )
 
     @studio.command(
-        "apps", help="List the apps in a domain and their status (creates nothing)",
+        "apps",
+        help="List the apps in a domain and their status (creates nothing). An "
+             "InService app bills for its instance until `stop` deletes it; AGE "
+             "is time since creation",
         params=[
             _domain_flag(),
             arg("--space", metavar="SPACE", completer=_SpaceCompleter(),
@@ -718,12 +722,6 @@ def register_studio(sagemaker) -> None:
         scope = f"domain {domain_label(resolved)}"
         if space:
             scope += f" · space {space}"
-        if not shown:
-            hidden = len(apps) - len(shown)
-            print(f"no live apps · {scope}"
-                  + (f" ({hidden} dead one(s) hidden — --include-dead shows them)"
-                     if hidden else ""))
-            return
         rows = [[
             a.get("SpaceName") or "-",
             a.get("UserProfileName") or "-",
@@ -735,20 +733,21 @@ def register_studio(sagemaker) -> None:
             fmt_dur(elapsed_of(a.get("CreationTime"), None)),
         ] for a in shown]
         rows.sort(key=lambda r: (r[0], r[2], r[3]))
-        print(f"{len(rows)} app(s) · {scope} · region {region_label()}\n")
-        notes = ["An InService app bills for its instance until `stop` deletes it. "
-                 "AGE is time since creation."]
+        print_header(f"{len(rows)} app(s)", scope, f"region {region_label()}")
+        note = None
         if not include_dead and len(apps) != len(shown):
-            notes.append(f"{len(apps) - len(shown)} Deleted/Deleting/Failed app(s) "
-                         "hidden; --include-dead shows them.")
+            note = (f"{len(apps) - len(shown)} Deleted/Deleting/Failed app(s) "
+                    "hidden; --include-dead shows them.")
         print_table(
             ["SPACE", "USER PROFILE", "APP TYPE", "APP NAME", "STATUS", "INSTANCE",
              "CREATED", "AGE"],
-            rows, note="\n".join(notes),
+            rows, note=note,
         )
 
     @studio.command(
-        "profiles", help="List a domain's user profiles and the role each assumes",
+        "profiles",
+        help="List a domain's user profiles and the role each assumes (what a "
+             "running app ACTUALLY assumed is in its boot log: `logs SPACE`)",
         params=[_domain_flag()],
     )
     @guard
@@ -762,28 +761,31 @@ def register_studio(sagemaker) -> None:
         space as the domain's ``DefaultSpaceSettings`` role, and a profile that
         sets no role of its own inherits ``DefaultUserSettings`` — three
         different roles can be in play in one domain and the console shows none
-        of it.  The two domain-level defaults print above the table rather than
-        as rows in it: they are properties of the domain, and what every row
-        falls back to.
+        of it.  The two domain-level defaults belong in the identifier block
+        rather than as rows in the table: they are properties of the domain, and
+        what every row falls back to.
         """
         cli = sm_client()
         resolved = resolve_domain(cli, domain)
         domain_id = resolved["DomainId"]
         desc = describe_domain(cli, domain_id)
 
-        print(f"domain {domain_label(resolved)} · region {region_label()}")
-        print(f"AuthMode {desc.get('AuthMode') or '?'}")
-        print("domain defaults (what a space falls back to):")
-        for setting, applies in (("DefaultUserSettings", "private space"),
-                                 ("DefaultSpaceSettings", "shared space")):
-            role = (desc.get(setting) or {}).get("ExecutionRole") or "-"
-            print(f"  {setting} · {applies} · {role}")
+        def default_role(setting):
+            return (desc.get(setting) or {}).get("ExecutionRole") or "-"
+
+        print_labeled([
+            ("Domain", domain_label(resolved)),
+            ("Region", region_label()),
+            ("AuthMode", desc.get("AuthMode") or "?"),
+            None,
+            ("DefaultUserSettings", f"{default_role('DefaultUserSettings')} · "
+                                    "what a private space falls back to"),
+            ("DefaultSpaceSettings", f"{default_role('DefaultSpaceSettings')} · "
+                                     "what a shared space falls back to"),
+        ])
         print()
 
         profiles = list_user_profiles(cli, domain_id)
-        if not profiles:
-            print("no user profiles in this domain")
-            return
         rows = [[
             p.get("UserProfileName") or "?",
             p.get("Status") or "?",
@@ -791,10 +793,8 @@ def register_studio(sagemaker) -> None:
             profile_role(cli, domain_id, p.get("UserProfileName") or ""),
         ] for p in profiles]
         rows.sort(key=lambda r: r[0])
-        print(f"{len(rows)} user profile(s)\n")
-        print_table(["USER PROFILE", "STATUS", "CREATED", "EXECUTION ROLE"], rows,
-                    note="What a running app ACTUALLY assumed is in its boot log: "
-                         "`awsut sagemaker studio logs SPACE`.")
+        print_header(f"{len(rows)} user profile(s)")
+        print_table(["USER PROFILE", "STATUS", "CREATED", "EXECUTION ROLE"], rows)
 
     @studio.command(
         "logs", help="A space app's boot log — what its lifecycle config did",
@@ -805,7 +805,8 @@ def register_studio(sagemaker) -> None:
                 completer=_StreamCompleter(),
                 help=f"last path segment of the stream (default {LIFECYCLE_STREAM})"),
             arg("--list", action="store_true", dest="list_streams",
-                help="list this space's streams instead of reading one"),
+                help="list this space's streams instead of reading one (a listed "
+                     "STREAM is what --stream takes)"),
             arg("-f", "--follow", action="store_true",
                 help="keep polling for new events (Ctrl+C to stop)"),
             arg("--lookback", type=int, default=0, metavar="MINUTES",
@@ -830,7 +831,7 @@ def register_studio(sagemaker) -> None:
 
         resolved_type = space_app_type(space_desc, app_type)
         full = f"{prefix}{resolved_type}/{app_name}/{stream}"
-        print(f"{log_group} · {full}\n")
+        print_header(log_group, full)
         _read_stream(log_group, full, follow, lookback, prefix)
 
     # ── starts and stops billing ───────────────────────────────────────────
@@ -879,17 +880,20 @@ def register_studio(sagemaker) -> None:
         if spec:
             params["ResourceSpec"] = spec
 
-        print(f"CreateApp · domain {domain_label(resolved)} · space {space_name}")
-        print(f"  AppType {resolved_type} · AppName {app_name}")
         if spec:
             source = "the space's DefaultResourceSpec" + (
                 ", instance type overridden" if instance_type else "")
-            print(f"  ResourceSpec ({source}):")
-            for key, value in spec.items():
-                print(f"    {key} {value}")
+            spec_line = (" · ".join(f"{k} {v}" for k, v in spec.items())
+                         + f"  ({source})")
         else:
-            print("  ResourceSpec: none sent — the service's own default applies")
-        print("  compute bills from InService until the app is stopped\n")
+            spec_line = "none sent — the service's own default applies"
+        print(f"CreateApp · domain {domain_label(resolved)} · space {space_name}")
+        print_labeled([
+            ("AppType", resolved_type),
+            ("AppName", app_name),
+            ("ResourceSpec", spec_line),
+        ])
+        print()
 
         resp = cli.create_app(**params)
         print(f"AppArn {resp.get('AppArn')}")
@@ -1014,8 +1018,8 @@ def register_studio(sagemaker) -> None:
             except botocore.exceptions.ClientError as exc:
                 # One unstoppable app must not strand the rest — this is the
                 # command that ends the day's charges.
-                print(f"  ! {space_name}/{a_type}/{a_name}: {api_message(exc)}",
-                      file=sys.stderr)
+                print(f"error: {space_name}/{a_type}/{a_name}: "
+                      f"{api_message(exc)}", file=sys.stderr)
         if wait:
             for space_name, a_type, a_name in targets:
                 _wait_for_app(cli, domain_id, space_name, a_type, a_name,
@@ -1155,7 +1159,7 @@ def _wait_for_app(cli, domain_id, space, app_type, app_name, until, timeout,
             status = app_status(cli, domain_id, space, app_type, app_name)
         except botocore.exceptions.ClientError as exc:
             beat.clear()
-            print(f"  ! poll failed: {api_message(exc)}", file=sys.stderr)
+            print(f"error: poll failed: {api_message(exc)}", file=sys.stderr)
             status = seen
         if status is None:
             # An app the service no longer has a record of at all: for a stop
@@ -1213,13 +1217,12 @@ def _list_space_streams(log_group, prefix, space_name) -> None:
         fmt_time(_ms(s.get("lastEventTimestamp"))),
         fmt_bytes(s.get("storedBytes")),
     ] for s in streams.get("logStreams", [])]
-    if not rows:
-        print(f"no log stream for space {space_name} under {log_group}/{prefix} "
-              "— no app has ever started here")
-        return
-    print(f"{len(rows)} stream(s) · {log_group}/{prefix}\n")
+    print_header(f"{len(rows)} stream(s)", f"{log_group}/{prefix}")
     print_table(["STREAM (below the space)", "FIRST EVENT", "LAST EVENT", "SIZE"],
-                rows, note="Pass the STREAM value to --stream.")
+                rows,
+                note=(None if rows else
+                      f"nothing has ever written under {prefix} — no app has "
+                      f"started in space {space_name}"))
 
 
 def _ms(value):
@@ -1249,10 +1252,10 @@ def _read_stream(log_group, stream, follow, lookback, prefix) -> None:
             try:
                 resp = client.get_log_events(**params)
             except client.exceptions.ResourceNotFoundException:
-                print(f"no such log group or stream.\n"
-                      f"  Nothing has written to it: either no app has started "
-                      f"here, or this app runs no lifecycle config.\n"
-                      f"  What does exist: awsut sagemaker studio logs --list")
+                print("no such log group or stream — nothing has written to it: "
+                      "either no app has started here, or this app runs no "
+                      "lifecycle config")
+                print("what does exist: awsut sagemaker studio logs --list")
                 return
             for event in resp["events"]:
                 print(event["message"].replace("\0", "\\0").rstrip("\n"))

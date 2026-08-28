@@ -224,6 +224,42 @@ def register() -> None:
 
 ---
 
+## Output Conventions (recipes that *print*)
+
+Most recipes only add completion — the external tool does the printing. A few
+carry Python handlers instead and print resource listings themselves (`awsut`
+and its `sagemaker` subtree are the built-in examples). Those share one output
+contract, defined and documented in
+[`src/cshell2/recipes/_awsut_common.py`](../src/cshell2/recipes/_awsut_common.py).
+Read that module's docstring before adding a leaf; the shape in brief:
+
+| Element | Helper | Rule |
+|---|---|---|
+| Header line | `print_header(*parts)` | `N thing(s) · <scope> · region <r>`, joined with `·`, then a blank line. Empty parts drop out. It prints **whether or not there are rows** — the header is what says "asked, and there were zero". |
+| Table | `print_table(header, rows, note=, colorize=)` | ALL-CAPS labels, a `-` rule, two spaces between columns, **widths from the data** so an identifier is never truncated and every cell can be pasted into the next command. No rows draws no table (the note still prints). |
+| Note | `note=` on `print_table` | Only facts *about this output*: rows hidden by a filter, rows cut by `--max`, a query that was refused. **Never a legend and never advice** — a sentence that reads the same on every run belongs in the leaf's `help=` (or the owning flag's), where it costs nothing per listing. |
+| Detail view | `print_labeled(pairs)` | Opens with the API's own field names, values unwrapped. `None` in place of a pair is a group separator. |
+| Named block | `section(label)` | `--- label ---`, for the repeated blocks a fan-out emits (per node, per stream) and for anything non-tabular after a detail view's identifier block. |
+| Failure | `guard` + `SmError` | `error: <message>` on stderr, lowercase, resource quoted. `@guard` goes **directly under** `@node.command(...)` with nothing between them. |
+| Timestamp | `fmt_time` / `fmt_dur` / `fmt_bytes` | Local, second precision. A `watch` loop stamps its change lines `[HH:MM:SS]`. |
+
+Three consequences worth stating, because each is easy to get wrong:
+
+- **Don't write a bespoke sentence for the empty case.** `print(f"no spaces in
+  domain {d}")` reads fine on its own and reads *inconsistent* next to
+  `0 instance(s) · region us-west-2`. Let the header report the count and put
+  anything situational in `note=`.
+- **`_awsut_common` builds no AWS clients**, on purpose: it sits above both
+  `awsut.py` and the `_awsut_sagemaker/` subpackage so either can import it
+  without a cycle. `_awsut_sagemaker/render.py` re-exports its names, so a
+  module in that subpackage reads every instrument off `render`.
+- **Name a shared helper module with a leading underscore.** `enable("*")`
+  discovers recipes by globbing `*.py` and calls `register()` on each hit, so a
+  support module without one would break config loading for every `enable("*")`
+  user. `_discover_all_recipes()` skips any stem starting with `_` — that is the
+  whole convention, and it applies to your own `~/.cshell2/recipes/_shared.py`
+  just as much as to `_awsut_common.py`.
+
 ## Checklist for a New Recipe
 
 1. **Create `src/cshell2/recipes/<name>.py`** with a `register()` function (no arguments — import `arg` and `registry` from `..commands`).

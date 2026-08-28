@@ -1,21 +1,26 @@
 """Shared instruments for the ``awsut sagemaker`` tree.
 
-Everything in here is presentation or plumbing that both the ``jobs`` and the
-``hub`` groups need.  It lives in one module so the two cannot drift in how
-they render the same data — the Job and Hub APIs both hand back opaque JSON
-documents and both are read by following ARNs out of them.
+Everything in here is presentation or plumbing that the ``jobs``, ``hub``,
+``studio`` and ``hyperpod`` groups need.  It lives in one module so they cannot
+drift in how they render the same data — several of these APIs hand back opaque
+JSON documents, and all of them are read by following ARNs out of them.
 
-Two ground rules the renderers exist to enforce:
+The output contract itself — table shape, header line, note policy, ``error:``
+lines — is one level up, in :mod:`cshell2.recipes._awsut_common`, because the
+non-SageMaker half of ``awsut`` (``ec2``, ``logs``, ``cloudformation``) prints
+to the same contract.  Those names are re-exported here, so a module in this
+package still reads every instrument it needs off ``render``.
 
-* **Identifiers print in full.**  Column widths come from the data, never from
-  a fixed budget, so a job name or an ARN can always be copied out of the
-  output into another command.
+What this module adds on top is SageMaker-specific:
+
 * **Documents are reformatted, never interpreted.**  ``JobConfigDocument`` and
   ``HubContentDocument`` are modelled by the service as opaque strings.
   Nothing here knows a single key name: structure is followed by *value
   shape* (an ARN says what it points at, an ``s3://`` URI says it is a
   location) and the JSON path a value was read from travels with it as
   provenance.
+* **Clients, pagination and model introspection** for an API surface whose
+  vintage varies with the installed botocore.
 
 Region, profile, endpoint and service-name all come from the enclosing
 ``awsut`` recipe, i.e. from ``var aws_region=`` / ``var aws_profile=`` /
@@ -32,10 +37,25 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
-import botocore.exceptions
 import botocore.session
 
 from .. import awsut
+from .._awsut_common import (  # noqa: F401  (re-exported for this package)
+    RED,
+    RESET,
+    YELLOW,
+    SmError,
+    api_message,
+    error_code,
+    fmt_bytes,
+    fmt_dur,
+    fmt_time,
+    guard,
+    print_header,
+    print_labeled,
+    print_table,
+    section,
+)
 
 # Heartbeat cadence for the watch loops, independent of the poll interval: the
 # dots exist to prove the loop is alive between polls, so they must not slow
@@ -54,34 +74,6 @@ INSTANCE_TYPE_CHOICES = [
 ]
 
 
-class SmError(Exception):
-    """A user-facing failure — printed as ``error: <message>``, no traceback."""
-
-
-def guard(fn):
-    """Turn the expected AWS/usage failures into one-line messages.
-
-    A cshell2 command runs in-process, so an uncaught ``ClientError`` would
-    dump a traceback into the middle of the user's session and a bare
-    ``SystemExit`` could take the shell down with it.  Every leaf handler in
-    this package is wrapped, so a failure reads like a shell error instead.
-    """
-
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except SmError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-        except botocore.exceptions.NoCredentialsError:
-            print("error: no AWS credentials found — refresh them and retry",
-                  file=sys.stderr)
-        except botocore.exceptions.ClientError as exc:
-            print(f"error: {api_message(exc)}", file=sys.stderr)
-
-    return wrapper
-
-
 # ─── AWS plumbing ───────────────────────────────────────────────────────────
 
 def sm_client(region_name: str | None = None):
@@ -98,15 +90,7 @@ def logs_client():
 
 
 def region_label() -> str:
-    return awsut._get_region() or "(no region set — var aws_region=…)"
-
-
-def api_message(exc: botocore.exceptions.ClientError) -> str:
-    return exc.response["Error"].get("Message", str(exc))
-
-
-def error_code(exc: botocore.exceptions.ClientError) -> str:
-    return exc.response["Error"].get("Code", "")
+    return awsut._region_label()
 
 
 NOT_FOUND_CODES = ("ValidationException", "ResourceNotFound",
@@ -210,21 +194,6 @@ def parse_since(text):
     return datetime.now(timezone.utc) - delta
 
 
-def fmt_dur(seconds):
-    if seconds is None:
-        return "-"
-    seconds = int(seconds)
-    if seconds < 60:
-        return f"{seconds}s"
-    if seconds < 3600:
-        return f"{seconds // 60}m{seconds % 60:02d}s"
-    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
-
-
-def fmt_time(dt):
-    return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S") if dt else "-"
-
-
 def age(dt):
     return (datetime.now(timezone.utc) - dt).total_seconds() if dt else None
 
@@ -234,37 +203,6 @@ def elapsed_of(started, ended):
     if started and ended:
         return (ended - started).total_seconds()
     return age(started)
-
-
-def fmt_bytes(size):
-    if size is None:
-        return "-"
-    size = float(size)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            return f"{size:.0f}{unit}" if unit == "B" else f"{size:,.1f}{unit}"
-        size /= 1024
-
-
-# ─── tables ─────────────────────────────────────────────────────────────────
-
-def print_table(header, rows, note=None):
-    """Column widths from the data, so no identifier is ever truncated."""
-    if not rows:
-        return
-    widths = [max([len(h)] + [len(r[i]) for r in rows])
-              for i, h in enumerate(header)]
-
-    def line(cells):
-        # The trailing column needs no padding.
-        return "  ".join(v.ljust(w) for v, w in zip(cells, widths)).rstrip()
-
-    print(line(header))
-    print("  ".join("-" * w for w in widths))
-    for row in rows:
-        print(line(row))
-    if note:
-        print(f"\n{note}")
 
 
 # ─── opaque JSON documents ──────────────────────────────────────────────────
@@ -356,23 +294,33 @@ def _looks_like_json(value):
     return isinstance(value, str) and value.strip()[:1] in ("{", "[")
 
 
-def show_document(label, doc, schema_version, raw=False, indent=1):
+def show_document(label, doc, schema_version, raw=False, indent=0):
     """Print an opaque JSON-string document, reformatted (or verbatim)."""
-    note = ("verbatim, as the API returned it" if raw else
-            "reformatted for reading — the API returns it as one JSON string")
-    print(f"\n{label}  (schema {schema_version or '?'}; {note})")
+    # Which of the two forms this is *does* vary per run (``--raw*`` picks), so
+    # it belongs in the heading.  *Why* a reformat exists — the API models these
+    # as one JSON string — does not, and lives in the flag's help instead.
+    note = "verbatim" if raw else "reformatted"
+    pad = "  " * indent
+    print()
+    if indent:
+        # Nested inside ``trace``'s indented tree, where a section rule starting
+        # at column zero would read as the end of the tree rather than a node
+        # in it — so the label carries the caller's own padding instead.
+        print(f"{label}  (schema {schema_version or '?'}; {note})")
+    else:
+        section(f"{label} · schema {schema_version or '?'} · {note}")
     if not doc:
-        print("  none returned")
+        print(f"{pad}none returned")
         return
     if raw:
         for line in str(doc).splitlines():
-            print(f"  {line}")
+            print(f"{pad}{line}")
         return
     parsed = parse_doc(doc)
     if parsed is None:
-        print("  not parseable JSON — verbatim:")
+        print(f"{pad}not parseable JSON — verbatim:")
         for line in str(doc).splitlines():
-            print(f"  {line}")
+            print(f"{pad}{line}")
         return
     for line in yaml_lines(parsed, indent):
         print(line)

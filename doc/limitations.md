@@ -98,9 +98,10 @@ Raising `SystemExit` is not a workaround: per the entry above, the
 redirect path re-raises it on the main thread and would take the shell
 down.
 
-Consequence for ported tools: `awsut sagemaker`'s commands
-(`_awsut_sagemaker/`) print `error: …` to stderr and return normally
-where the standalone `sm_jobs.py` / `sm_hub.py` scripts exited 1 or 2 —
+Consequence for ported tools: every `awsut` leaf (`awsut.py` and
+`_awsut_sagemaker/`, both wrapped in `_awsut_common.guard`) prints
+`error: …` to stderr and returns normally where the standalone
+`sm_jobs.py` / `sm_hub.py` scripts exited 1 or 2 —
 and where the `make` targets `studio` replaces failed the build.
 The distinction is visible to a human reading the output but not to
 `&&` / `||`. Fixing this properly means threading a return value (or a

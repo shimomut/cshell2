@@ -14,6 +14,7 @@ Nothing here touches AWS.  The four things worth pinning are:
 
 from __future__ import annotations
 
+import csv
 from datetime import datetime, timedelta, timezone
 
 import botocore.exceptions
@@ -23,7 +24,7 @@ from cshell2.commands import CmdParser, _collect_inherited_params
 from cshell2.commands import registry as command_registry
 from cshell2.completion import CompletionContext
 from cshell2.recipes import awsut as awsut_recipe
-from cshell2.recipes._awsut_sagemaker import hub, jobs, render, studio
+from cshell2.recipes._awsut_sagemaker import hub, hyperpod, jobs, render, studio
 from cshell2.tui import _compose_meta, _meta_col_widths
 
 
@@ -155,7 +156,8 @@ def test_print_table_widths_come_from_the_data(capsys):
     assert out[2] == out[2].rstrip()
 
 
-def test_print_table_prints_nothing_for_no_rows(capsys):
+def test_print_table_prints_no_column_labels_for_no_rows(capsys):
+    """The header line above the table already said "zero"."""
     render.print_table(["NAME"], [])
     assert capsys.readouterr().out == ""
 
@@ -163,6 +165,16 @@ def test_print_table_prints_nothing_for_no_rows(capsys):
 def test_print_table_note_is_separated_from_the_rows(capsys):
     render.print_table(["N"], [["1"]], note="caveat")
     assert capsys.readouterr().out.endswith("\ncaveat\n")
+
+
+def test_print_table_still_prints_the_note_with_no_rows(capsys):
+    """An empty listing is exactly when "everything was filtered out" matters.
+
+    Dropping the note with the table would make a filtered-to-nothing listing
+    indistinguishable from a genuinely empty one.
+    """
+    render.print_table(["N"], [], note="3 row(s) hidden")
+    assert capsys.readouterr().out == "3 row(s) hidden\n"
 
 
 # ---------------------------------------------------------------------------
@@ -208,9 +220,10 @@ def test_yaml_lines_uses_a_block_for_multiline_strings():
 
 
 def test_show_document_says_which_form_it_printed(capsys):
+    """Which form is the fact that varies per run; *why* is in the flag's help."""
     render.show_document("Doc", '{"a": 1}', "1.0")
     out = capsys.readouterr().out
-    assert "schema 1.0" in out and "reformatted for reading" in out
+    assert "schema 1.0" in out and "reformatted" in out
     render.show_document("Doc", '{"a": 1}', "1.0", raw=True)
     assert "verbatim" in capsys.readouterr().out
 
@@ -1486,11 +1499,16 @@ def test_profiles_marks_one_that_inherits_rather_than_showing_a_blank(
 
 def test_profiles_says_so_for_a_domain_with_none(
         sagemaker_tree, studio_sm, capsys):
-    """A domain used only for shared spaces legitimately has no profiles."""
+    """A domain used only for shared spaces legitimately has no profiles.
+
+    Said by the header line the listing always prints, not by a sentence only
+    the empty case has — that is what makes "zero" read the same across the
+    whole tree.
+    """
     studio_sm(studio_client(profiles=[], describe_domain={"AuthMode": "IAM"}))
     run_studio(sagemaker_tree, "profiles")
     out = capsys.readouterr().out
-    assert "no user profiles" in out
+    assert "0 user profile(s)" in out
     assert "USER PROFILE" not in out
 
 
@@ -1590,9 +1608,10 @@ def test_the_spaces_table_and_the_completer_read_the_same_source(
     described = space_descriptions()
     assert described["live-space"].endswith("app InService")
     assert described["idle-space"].endswith("no app")
-    # And the table says which STATUS its own column is, so the two cannot be
-    # confused for each other.
-    assert "STATUS is the space's own" in out
+    # Which STATUS the column is stays documented — in the leaf's help, not as a
+    # note under every listing (it reads the same on every run).
+    assert "STATUS is the space's own" in (
+        sagemaker_tree.children["studio"].children["spaces"].help_text)
 
 
 # ---------------------------------------------------------------------------
@@ -1670,7 +1689,11 @@ def test_logs_list_shows_what_streams_the_space_has(
     rows = [ln for ln in out.splitlines() if ln.startswith("JupyterLab/")]
     assert rows == [] or prefix not in rows[0]
     assert rows and rows[0].startswith("JupyterLab/default/LifecycleConfigOnStart")
-    assert "--stream" in out
+    # That a listed row feeds --stream is said once, on the flag that lists them,
+    # not as a note under the listing itself.
+    logs_leaf = sagemaker_tree.children["studio"].children["logs"]
+    list_flag = next(p for p in logs_leaf.params if "--list" in p.names)
+    assert "--stream" in list_flag.kwargs["help"]
 
 
 # ---------------------------------------------------------------------------
@@ -1744,6 +1767,35 @@ def test_the_tree_has_every_group(sagemaker_tree):
 def test_hyperpod_is_a_sagemaker_group_not_a_root_of_its_own():
     """A HyperPod cluster is a SageMaker resource; `hp` pays the depth."""
     assert "hyperpod" not in command_registry.get("awsut").children
+
+
+def test_events_csv_is_csv_and_survives_a_comma(
+        sagemaker_tree, monkeypatch, capsys):
+    """``--format csv`` writes quoted CSV, not the tab-joined text it once did.
+
+    An event Description routinely contains a comma, so hand-joining produced a
+    file whose column count changed from row to row — the one output here meant
+    to be read by another program.
+    """
+    events = [{
+        "EventId": "e1",
+        "EventTime": utc(2026, 1, 2, 3, 4, 5),
+        "EventLevel": "Info",
+        "ResourceType": "Cluster",
+        "Description": 'scaled up, then down; said "ok"',
+    }]
+    monkeypatch.setattr(hyperpod.awsut, "_get_sagemaker_client", lambda **kw: None)
+    monkeypatch.setattr(hyperpod, "_list_hyperpod_cluster_events_all",
+                        lambda sm, name, **kw: events)
+
+    sagemaker_tree.children["hyperpod"].children["events"].invoke(
+        ["c1", "--format", "csv"])
+    rows = capsys.readouterr().out.splitlines()
+    assert rows[0].startswith("TIMESTAMP,LEVEL,TYPE")
+    # The comma-bearing description is one field, quoted, with its own quotes
+    # doubled — i.e. parseable back into exactly six columns.
+    assert rows[1].endswith('"scaled up, then down; said ""ok"""')
+    assert len(next(csv.reader([rows[1]]))) == 6
 
 
 def _flags(node):

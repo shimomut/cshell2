@@ -6,12 +6,13 @@ A HyperPod cluster is a SageMaker resource, so the group hangs off
 once, by an alias (``alias hp='awsut sagemaker hyperpod'``); the wrong path was
 paid every time someone read the tree.
 
-Unlike its neighbours this module does not build on :mod:`render`.  It was
-ported from the legacy cshell with its own table printing, its own client
+Ported from the legacy cshell, this module used to print with instruments of its
+own — colon-separated one-liners where its neighbours printed tables — so the
+same question answered about two SageMaker resources came back in two formats.
+It now renders through :mod:`render` (i.e. :mod:`.._awsut_common`) like the rest
+of the tree.  What is still its own is the machinery underneath: the client
 factories (``awsut._get_sagemaker_client`` / ``awsut._get_boto3_client``) and
-its own pexpect-driven SSM plumbing (:func:`_ssm_run`), and this move changed
-only where it hangs in the command tree — not a line of what it does.
-Converging the two sets of instruments is a separate job.
+the pexpect-driven SSM plumbing (:func:`_ssm_run`).
 
 Region, profile, endpoint and service-name come from the enclosing ``awsut``
 recipe (``var aws_region=`` / ``var aws_profile=`` / ``var
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import csv
 import datetime
 import json
 import os
@@ -43,7 +45,19 @@ from ...completion import (
 from ...completion_cache import aws_env_key, get_or_fetch
 from ...shell import passthrough_input, passthrough_run
 from .. import awsut
-from .render import INSTANCE_TYPE_CHOICES
+from .render import (
+    INSTANCE_TYPE_CHOICES,
+    RED,
+    YELLOW,
+    SmError,
+    fmt_time,
+    guard,
+    print_header,
+    print_labeled,
+    print_table,
+    region_label,
+    section,
+)
 
 
 # ─── HyperPod region tables ─────────────────────────────────────────────────
@@ -183,9 +197,9 @@ def _hyperpod_event_failure_message(sagemaker_client, cluster_name: str,
     metadata = (outer.get("EventDetails", {}) or {}).get("EventMetadata")
     if not metadata:
         metadata = outer.get("EventMetadata", {}) or {}
-    for section in ("Instance", "InstanceGroupScaling", "InstanceGroup",
-                    "Cluster"):
-        message = (metadata.get(section) or {}).get("FailureMessage")
+    for scope in ("Instance", "InstanceGroupScaling", "InstanceGroup",
+                  "Cluster"):
+        message = (metadata.get(scope) or {}).get("FailureMessage")
         if message:
             return message
     return None
@@ -303,7 +317,9 @@ def _print_hyperpod_log(logs_client, log_group, stream):
             try:
                 response = logs_client.get_log_events(**params)
             except logs_client.exceptions.ResourceNotFoundException:
-                print(f"Log group or stream not found [ {log_group}, {stream} ]")
+                # Raced with a retention sweep: it was listed a moment ago.
+                print(f"error: log stream {stream!r} in {log_group} is gone",
+                      file=sys.stderr)
                 return
 
             for event in response["events"]:
@@ -631,6 +647,24 @@ class _HyperpodNodeIdCompleter(Completer):
         return unique
 
 
+def _no_cluster(cluster_name: str) -> SmError:
+    """The one wording for a cluster name that resolves to nothing.
+
+    A name that resolves to nothing is far more often a region mismatch than a
+    typo, so the region it was looked for in is part of the message.
+    """
+    return SmError(f"no HyperPod cluster {cluster_name!r} in "
+                   f"region {region_label()}")
+
+
+def _describe_or_fail(sm, cluster_name: str) -> dict:
+    """A cluster description, or one ``error:`` line — most leaves start here."""
+    try:
+        return sm.describe_cluster(ClusterName=cluster_name)
+    except sm.exceptions.ResourceNotFound:
+        raise _no_cluster(cluster_name) from None
+
+
 def register_hyperpod(sagemaker) -> None:
     """Attach the ``hyperpod`` group to ``awsut sagemaker``."""
     hyperpod = sagemaker.command(
@@ -652,6 +686,7 @@ def register_hyperpod(sagemaker) -> None:
                 help="JSON config file for VPC"),
         ],
     )
+    @guard
     def _create(cluster_name, eks_cluster_name, instances,
                 restricted_instances, vpc):
         params = {
@@ -676,8 +711,9 @@ def register_hyperpod(sagemaker) -> None:
                 params["VpcConfig"] = json.loads(fd.read())
 
         sm = awsut._get_sagemaker_client()
+        print(f"CreateCluster · cluster {cluster_name} · region {region_label()}")
         response = sm.create_cluster(**params)
-        print(f"Creation started : {response['ClusterArn']}")
+        print(f"ClusterArn {response['ClusterArn']}")
 
     @hyperpod.command(
         "update", help="Update a cluster with JSON file",
@@ -692,13 +728,10 @@ def register_hyperpod(sagemaker) -> None:
                 help="JSON config file for restricted instance groups"),
         ],
     )
+    @guard
     def _update(cluster_name, instances, restricted_instances):
         sm = awsut._get_sagemaker_client()
-        try:
-            cluster = sm.describe_cluster(ClusterName=cluster_name)
-        except sm.exceptions.ResourceNotFound:
-            print(f"Cluster [{cluster_name}] not found.")
-            return
+        cluster = _describe_or_fail(sm, cluster_name)
 
         params = {"ClusterName": cluster_name}
         if "NodeRecovery" in cluster:
@@ -711,8 +744,9 @@ def register_hyperpod(sagemaker) -> None:
             with open(os.path.expanduser(restricted_instances)) as fd:
                 params["RestrictedInstanceGroups"] = json.loads(fd.read())
 
+        print(f"UpdateCluster · cluster {cluster_name} · from {instances}")
         response = sm.update_cluster(**params)
-        print(f"Updating cluster started : {response['ClusterArn']}")
+        print(f"ClusterArn {response['ClusterArn']}")
 
     @hyperpod.command(
         "scale", help="Scale up or down an instance group",
@@ -722,13 +756,10 @@ def register_hyperpod(sagemaker) -> None:
             arg("target_instance_count", type=int),
         ],
     )
+    @guard
     def _scale(cluster_name, instance_group_name, target_instance_count):
         sm = awsut._get_sagemaker_client()
-        try:
-            cluster = sm.describe_cluster(ClusterName=cluster_name)
-        except sm.exceptions.ResourceNotFound:
-            print(f"Cluster [{cluster_name}] not found.")
-            return
+        cluster = _describe_or_fail(sm, cluster_name)
 
         params = {"ClusterName": cluster_name}
         if "NodeRecovery" in cluster:
@@ -750,8 +781,10 @@ def register_hyperpod(sagemaker) -> None:
                 ig["InstanceCount"] = target_instance_count
             params["RestrictedInstanceGroups"].append(ig)
 
+        print(f"UpdateCluster · cluster {cluster_name} · instance group "
+              f"{instance_group_name} → {target_instance_count} instance(s)")
         response = sm.update_cluster(**params)
-        print(f"Updating cluster started : {response['ClusterArn']}")
+        print(f"ClusterArn {response['ClusterArn']}")
 
     @hyperpod.command(
         "add-ig",
@@ -775,14 +808,11 @@ def register_hyperpod(sagemaker) -> None:
                      "from the cluster's VpcConfig."),
         ],
     )
+    @guard
     def _create_instance_group(cluster_name, instance_group_name, template,
                                instance_type, instance_count, subnet_id):
         sm = awsut._get_sagemaker_client()
-        try:
-            cluster = sm.describe_cluster(ClusterName=cluster_name)
-        except sm.exceptions.ResourceNotFound:
-            print(f"Cluster [{cluster_name}] not found.")
-            return
+        cluster = _describe_or_fail(sm, cluster_name)
 
         # Locate the template across both regular and restricted IGs.
         template_ig = None
@@ -798,18 +828,16 @@ def register_hyperpod(sagemaker) -> None:
                     is_restricted = True
                     break
         if template_ig is None:
-            print(f"Template instance group [{template}] not found in cluster "
-                  f"[{cluster_name}].")
-            return
+            raise SmError(f"no instance group {template!r} in cluster "
+                          f"{cluster_name!r} to copy as the template")
 
         existing_names = {ig["InstanceGroupName"]
                           for ig in cluster.get("InstanceGroups", [])}
         existing_names |= {ig["InstanceGroupName"]
                            for ig in cluster.get("RestrictedInstanceGroups", [])}
         if instance_group_name in existing_names:
-            print(f"Instance group [{instance_group_name}] already exists in "
-                  f"cluster [{cluster_name}].")
-            return
+            raise SmError(f"instance group {instance_group_name!r} already exists "
+                          f"in cluster {cluster_name!r}")
 
         # Sanitize first (strips read-only fields and renames TargetCount →
         # InstanceCount), THEN apply overrides — otherwise the rename would
@@ -832,10 +860,9 @@ def register_hyperpod(sagemaker) -> None:
                 cluster_vpc = cluster.get("VpcConfig") or {}
                 sgs = cluster_vpc.get("SecurityGroupIds")
             if not sgs:
-                print("Could not infer SecurityGroupIds for the new instance "
-                      "group: neither the template's OverrideVpcConfig nor the "
-                      "cluster's VpcConfig has them.")
-                return
+                raise SmError("cannot infer SecurityGroupIds for the new instance "
+                              "group: neither the template's OverrideVpcConfig nor "
+                              "the cluster's VpcConfig has them")
             new_ig["OverrideVpcConfig"] = {
                 "Subnets": [subnet_id],
                 "SecurityGroupIds": list(sgs),
@@ -862,9 +889,12 @@ def register_hyperpod(sagemaker) -> None:
         if restricted:
             params["RestrictedInstanceGroups"] = restricted
 
+        kind = "restricted instance group" if is_restricted else "instance group"
+        print(f"UpdateCluster · cluster {cluster_name} · new {kind} "
+              f"{instance_group_name} · {new_ig['InstanceType']} × "
+              f"{instance_count} · from template {template}")
         response = sm.update_cluster(**params)
-        print(f"Creating instance group [{instance_group_name}] started : "
-              f"{response['ClusterArn']}")
+        print(f"ClusterArn {response['ClusterArn']}")
 
     @hyperpod.command(
         "remove-ig", help="Delete an instance group from a cluster",
@@ -874,13 +904,10 @@ def register_hyperpod(sagemaker) -> None:
             arg("-y", "--yes", action="store_true", help="Skip confirmation"),
         ],
     )
+    @guard
     def _delete_instance_group(cluster_name, instance_group_name, yes):
         sm = awsut._get_sagemaker_client()
-        try:
-            cluster = sm.describe_cluster(ClusterName=cluster_name)
-        except sm.exceptions.ResourceNotFound:
-            print(f"Cluster [{cluster_name}] not found.")
-            return
+        cluster = _describe_or_fail(sm, cluster_name)
 
         regular_names = [ig["InstanceGroupName"]
                          for ig in cluster.get("InstanceGroups", [])]
@@ -888,16 +915,16 @@ def register_hyperpod(sagemaker) -> None:
                             for ig in cluster.get("RestrictedInstanceGroups", [])]
         if (instance_group_name not in regular_names
                 and instance_group_name not in restricted_names):
-            print(f"Instance group [{instance_group_name}] not found in cluster "
-                  f"[{cluster_name}].")
-            return
+            raise SmError(f"no instance group {instance_group_name!r} in cluster "
+                          f"{cluster_name!r}")
 
         if not yes:
             answer = passthrough_input(
-                f"Are you sure deleting instance group [{instance_group_name}] "
-                f"from cluster [{cluster_name}]? [y/N] : "
+                f"Delete instance group {instance_group_name!r} from cluster "
+                f"{cluster_name!r}? Its instances are terminated. [y/N] : "
             )
-            if answer.lower() not in ("y", "yes"):
+            if answer.strip().lower() not in ("y", "yes"):
+                print("not deleted")
                 return
 
         params = {"ClusterName": cluster_name}
@@ -905,22 +932,41 @@ def register_hyperpod(sagemaker) -> None:
             params["NodeRecovery"] = cluster["NodeRecovery"]
         params["InstanceGroupsToDelete"] = [instance_group_name]
 
+        print(f"UpdateCluster · cluster {cluster_name} · deleting instance group "
+              f"{instance_group_name}")
         response = sm.update_cluster(**params)
-        print(f"Deleting instance group [{instance_group_name}] started : "
-              f"{response['ClusterArn']}")
+        print(f"ClusterArn {response['ClusterArn']}")
 
     def _batch_node_operation(operation_name, api, cluster_name, node_ids):
+        """One node-batch API call, reported per node.
+
+        The batch APIs answer per node — a partial success is the normal case —
+        so the response is read out as a table rather than printed as the raw
+        dict it used to be.
+        """
         sm = awsut._get_sagemaker_client()
-        try:
-            cluster = sm.describe_cluster(ClusterName=cluster_name)
-        except sm.exceptions.ResourceNotFound:
-            print(f"Cluster [{cluster_name}] not found.")
-            return
+        cluster = _describe_or_fail(sm, cluster_name)
         resolved_ids = [
             _resolve_hyperpod_node_id(sm, cluster, cluster_name, n) for n in node_ids
         ]
+        print_header(f"{operation_name} · cluster {cluster_name}",
+                     f"{len(resolved_ids)} node(s)")
         response = api(ClusterName=cluster_name, NodeIds=resolved_ids)
-        print(f"{operation_name} : {response}")
+
+        successful = set(response.get("Successful", []))
+        failed = {f.get("NodeId"): f for f in response.get("Failed", [])}
+        rows = []
+        for node_id in resolved_ids:
+            if node_id in successful:
+                rows.append([node_id, "Accepted", ""])
+            elif node_id in failed:
+                fail = failed[node_id]
+                rows.append([node_id, fail.get("Code") or "Failed",
+                             fail.get("Message") or ""])
+            else:
+                # Neither list mentions it — the model may not report per node.
+                rows.append([node_id, "-", ""])
+        print_table(["NODE ID", "RESULT", "MESSAGE"], rows)
 
     @hyperpod.command(
         "delete-nodes", help="Delete specific nodes",
@@ -929,6 +975,7 @@ def register_hyperpod(sagemaker) -> None:
             arg("node_ids", nargs="+", completer=_HyperpodNodeIdCompleter(with_cwlog=False)),
         ],
     )
+    @guard
     def _delete_nodes(cluster_name, node_ids):
         sm = awsut._get_sagemaker_client()
         _batch_node_operation(
@@ -942,6 +989,7 @@ def register_hyperpod(sagemaker) -> None:
             arg("node_ids", nargs="+", completer=_HyperpodNodeIdCompleter(with_cwlog=False)),
         ],
     )
+    @guard
     def _reboot_nodes(cluster_name, node_ids):
         sm = awsut._get_sagemaker_client()
         _batch_node_operation(
@@ -955,6 +1003,7 @@ def register_hyperpod(sagemaker) -> None:
             arg("node_ids", nargs="+", completer=_HyperpodNodeIdCompleter(with_cwlog=False)),
         ],
     )
+    @guard
     def _replace_nodes(cluster_name, node_ids):
         sm = awsut._get_sagemaker_client()
         _batch_node_operation(
@@ -972,6 +1021,7 @@ def register_hyperpod(sagemaker) -> None:
                 help="Number or percentage of instances to update at once"),
         ],
     )
+    @guard
     def _update_software(cluster_name, instance_group_name, rolling_update_by):
         params = {"ClusterName": cluster_name}
         if instance_group_name:
@@ -996,12 +1046,15 @@ def register_hyperpod(sagemaker) -> None:
                     }
                 }
             else:
-                print(f"Rolling update parameter incorrectly formatted [{rolling_update_by}]")
-                return
+                raise SmError(f"--rolling-update-by wants N or N% "
+                              f"(got {rolling_update_by!r})")
 
         sm = awsut._get_sagemaker_client()
+        scope = instance_group_name or "every instance group"
+        print(f"UpdateClusterSoftware · cluster {cluster_name} · {scope}"
+              + (f" · {rolling_update_by} at a time" if rolling_update_by else ""))
         response = sm.update_cluster_software(**params)
-        print(f"Updating cluster software started : {response['ClusterArn']}")
+        print(f"ClusterArn {response['ClusterArn']}")
 
     @hyperpod.command(
         "delete", help="Delete a cluster",
@@ -1011,19 +1064,23 @@ def register_hyperpod(sagemaker) -> None:
                 help="Skip confirmation"),
         ],
     )
+    @guard
     def _delete(cluster_name, yes):
         if not yes:
-            answer = passthrough_input(f"Are you sure deleting the cluster [{cluster_name}]? [y/N] : ")
-            if answer.lower() not in ("y", "yes"):
+            answer = passthrough_input(
+                f"Delete cluster {cluster_name!r} in region {region_label()}? "
+                "Every node in it is terminated. [y/N] : ")
+            if answer.strip().lower() not in ("y", "yes"):
+                print("not deleted")
                 return
 
         sm = awsut._get_sagemaker_client()
         try:
             response = sm.delete_cluster(ClusterName=cluster_name)
         except sm.exceptions.ResourceNotFound:
-            print(f"Cluster [{cluster_name}] not found.")
-            return
-        print(f"Deletion started : {response['ClusterArn']}")
+            raise _no_cluster(cluster_name) from None
+        print(f"DeleteCluster · cluster {cluster_name} · region {region_label()}")
+        print(f"ClusterArn {response['ClusterArn']}")
 
     @hyperpod.command(
         "list", help="List clusters in human readable format",
@@ -1032,41 +1089,41 @@ def register_hyperpod(sagemaker) -> None:
                 help="List clusters in all regions"),
         ],
     )
+    @guard
     def _list(all_regions):
         def _list_one(region_name=None):
             sm = awsut._get_sagemaker_client(region_name=region_name)
             clusters = _list_hyperpod_clusters_all(sm)
-            if not clusters:
-                return
-            name_w   = awsut._max_len(clusters, "ClusterName")
-            status_w = awsut._max_len(clusters, "ClusterStatus")
+            print_header(f"{len(clusters)} cluster(s)",
+                         f"region {region_name or region_label()}")
+            print_table(
+                ["NAME", "STATUS", "CREATED", "ARN"],
+                [[c["ClusterName"], c["ClusterStatus"],
+                  fmt_time(c.get("CreationTime")), c["ClusterArn"]]
+                 for c in clusters],
+            )
+            # A failure reason is a paragraph, not a cell — it follows the
+            # table, one block per cluster that has one.
             for cluster in clusters:
-                print(
-                    f"{cluster['ClusterName']:<{name_w}} : "
-                    f"{cluster['ClusterStatus']:<{status_w}} : "
-                    f"{cluster['CreationTime'].strftime('%Y/%m/%d %H:%M:%S')} : "
-                    f"{cluster['ClusterArn']}"
-                )
-                if cluster["ClusterStatus"] in ("Failed", "RollingBack"):
-                    try:
-                        details = sm.describe_cluster(ClusterName=cluster["ClusterName"])
-                    except sm.exceptions.ResourceNotFound:
-                        print()
-                        print("FailureMessage not available.")
-                        print()
-                        print("---")
-                        continue
-                    print()
-                    for line in details.get("FailureMessage", "").splitlines():
-                        print(line)
-                    print()
-                    print("---")
+                if cluster["ClusterStatus"] not in ("Failed", "RollingBack"):
+                    continue
+                print()
+                section(f"{cluster['ClusterName']} · {cluster['ClusterStatus']}")
+                try:
+                    details = sm.describe_cluster(
+                        ClusterName=cluster["ClusterName"])
+                except sm.exceptions.ResourceNotFound:
+                    print("no FailureMessage — the cluster is already gone")
+                    continue
+                for line in (details.get("FailureMessage")
+                             or "no FailureMessage returned").splitlines():
+                    print(line)
 
         if all_regions:
-            for region in _hyperpod_regions:
-                print(f"[{region}]")
+            for i, region in enumerate(_hyperpod_regions):
+                if i:
+                    print()
                 _list_one(region_name=region)
-                print()
         else:
             _list_one()
 
@@ -1078,92 +1135,84 @@ def register_hyperpod(sagemaker) -> None:
                 help="Show raw JSON output from boto3 APIs"),
         ],
     )
+    @guard
     def _describe(cluster_name, raw):
         sm = awsut._get_sagemaker_client()
-        try:
-            cluster = sm.describe_cluster(ClusterName=cluster_name)
-        except sm.exceptions.ResourceNotFound:
-            print(f"Cluster [{cluster_name}] not found.")
-            return
+        cluster = _describe_or_fail(sm, cluster_name)
 
         cluster_id = cluster["ClusterArn"].split("/")[-1]
         nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
 
         if raw:
             cluster.pop("ResponseMetadata", None)
-            print("=== Cluster ===")
+            section("Cluster")
             awsut._print_json(cluster)
             print()
-            print("=== Nodes ===")
+            section("Nodes")
             awsut._print_json(nodes)
             return
 
         hostnames = _HyperpodHostnames.instance()
         hostnames.resolve(sm, cluster, nodes)
 
-        print(f"Cluster name : {cluster['ClusterName']}")
-        print(f"Cluster Arn : {cluster['ClusterArn']}")
-        print(f"Cluster status : {cluster['ClusterStatus']}")
-        if cluster.get("FailureMessage"):
-            print(f"Failure message : {cluster['FailureMessage']}")
+        print_labeled([
+            ("ClusterName", cluster["ClusterName"]),
+            ("ClusterArn", cluster["ClusterArn"]),
+            ("ClusterStatus", cluster["ClusterStatus"]),
+            ("FailureMessage", cluster.get("FailureMessage")),
+        ])
+
+        groups = cluster["InstanceGroups"] + cluster["RestrictedInstanceGroups"]
         print()
+        print_header(f"{len(groups)} instance group(s)")
+        print_table(
+            ["NAME", "INSTANCE TYPE", "STATUS", "COUNT"],
+            [[ig["InstanceGroupName"], ig["InstanceType"], ig["Status"],
+              f"{ig['CurrentCount']} → {ig['TargetCount']}"] for ig in groups],
+        )
 
-        max_hostname_len = 0
-        for node in nodes:
-            hn = hostnames.get_hostname(node["InstanceId"])
-            if hn:
-                max_hostname_len = max(max_hostname_len, len(hn))
+        # Nodes ordered by their instance group, so the grouping still reads
+        # down the page — but as one table, so every row carries the group it
+        # belongs to next to the SSM target that reaches it.
+        ordered = [node for ig in groups for node in nodes
+                   if node["InstanceGroupName"] == ig["InstanceGroupName"]]
 
-        # Pre-scan: assign tag numbers in display order so footnotes match.
+        # Pre-scan: a status message is a paragraph, so it becomes a numbered
+        # footnote below and the number rides along in the STATUS cell.
         failures: list[tuple[int, str, str, str]] = []
         node_tag: dict[str, int] = {}
-        for ig in cluster["InstanceGroups"] + cluster["RestrictedInstanceGroups"]:
-            for node in nodes:
-                if node["InstanceGroupName"] != ig["InstanceGroupName"]:
-                    continue
-                msg = node["InstanceStatus"].get("Message")
-                if msg:
-                    tag = len(failures) + 1
-                    node_tag[node["InstanceId"]] = tag
-                    failures.append((tag, ig["InstanceGroupName"],
-                                     node["InstanceId"], msg))
+        for node in ordered:
+            msg = node["InstanceStatus"].get("Message")
+            if msg:
+                tag = len(failures) + 1
+                node_tag[node["InstanceId"]] = tag
+                failures.append((tag, node["InstanceGroupName"],
+                                 node["InstanceId"], msg))
 
         def _status_label(node):
             status = node["InstanceStatus"]["Status"]
-            if status == "Pending":
-                status = "*Pending"
             tag = node_tag.get(node["InstanceId"])
-            if tag is not None:
-                status = f"{status} [{tag}]"
-            return status
+            return f"{status} [{tag}]" if tag is not None else status
 
-        ig_w   = awsut._max_len(nodes, "InstanceGroupName") if nodes else 0
-        stat_w = max((len(_status_label(n)) for n in nodes), default=0)
-
-        for ig in cluster["InstanceGroups"] + cluster["RestrictedInstanceGroups"]:
-            print(f"{ig['InstanceGroupName']:<{ig_w}} : {ig['InstanceType']} : "
-                  f"{ig['Status']}({ig['CurrentCount']}=>{ig['TargetCount']})")
-            for node in nodes:
-                if node["InstanceGroupName"] != ig["InstanceGroupName"]:
-                    continue
-
-                ig_name = node["InstanceGroupName"]
-                node_id = node["InstanceId"]
-                hn = hostnames.get_hostname(node_id) or ""
-                ssm_target = f"sagemaker-cluster:{cluster_id}_{ig_name}-{node_id}"
-
-                print(f"    {node_id} : {hn:<{max_hostname_len}} : "
-                      f"{_status_label(node):<{stat_w}} : "
-                      f"{node['LaunchTime'].strftime('%Y/%m/%d %H:%M:%S')} : "
-                      f"{ssm_target}")
-
-            print()
+        print()
+        print_header(f"{len(ordered)} node(s)")
+        print_table(
+            ["INSTANCE GROUP", "NODE ID", "HOSTNAME", "STATUS", "LAUNCHED",
+             "SSM TARGET"],
+            [[node["InstanceGroupName"], node["InstanceId"],
+              hostnames.get_hostname(node["InstanceId"]) or "-",
+              _status_label(node), fmt_time(node.get("LaunchTime")),
+              f"sagemaker-cluster:{cluster_id}"
+              f"_{node['InstanceGroupName']}-{node['InstanceId']}"]
+             for node in ordered],
+        )
 
         if failures:
-            print("Failures:")
+            print()
+            section("Node status messages")
             for tag, ig_name, node_id, msg in failures:
                 lines = msg.splitlines() or [""]
-                prefix = f"  [{tag}] {ig_name}/{node_id}: "
+                prefix = f"[{tag}] {ig_name}/{node_id}: "
                 indent = " " * len(prefix)
                 print(prefix + lines[0])
                 for line in lines[1:]:
@@ -1181,11 +1230,14 @@ def register_hyperpod(sagemaker) -> None:
                 help="Poll interval in seconds (default 10)"),
         ],
     )
+    @guard
     def _watch(cluster_name, follow=False, interval=10.0):
         sm = awsut._get_sagemaker_client()
 
         def stamp() -> str:
-            return datetime.datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+            # Time of day only, like the other watch loops in the tree: the date
+            # is on every line of a timeline that rarely outlives the hour.
+            return datetime.datetime.now().strftime("%H:%M:%S")
 
         def emit(line: str) -> None:
             print(f"[{stamp()}] {line}", flush=True)
@@ -1216,21 +1268,21 @@ def register_hyperpod(sagemaker) -> None:
         events_supported = True
         first = True
 
-        emit(f"Watching cluster [{cluster_name}] "
-             f"(mode: {'follow' if follow else 'until settled'})")
+        print(f"watching {cluster_name}")
+        print(f"  region {region_label()} · poll {interval}s · "
+              f"{'follow' if follow else 'until settled'}")
+        print("  Ctrl+C to detach\n")
 
         while True:
             try:
                 cluster = sm.describe_cluster(ClusterName=cluster_name)
             except sm.exceptions.ResourceNotFound:
-                emit(f"Cluster [{cluster_name}] not found.")
-                return
+                raise _no_cluster(cluster_name) from None
 
             try:
                 nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
             except sm.exceptions.ResourceNotFound:
-                emit(f"Cluster [{cluster_name}] not found.")
-                return
+                raise _no_cluster(cluster_name) from None
 
             events = []
             if events_supported:
@@ -1252,7 +1304,7 @@ def register_hyperpod(sagemaker) -> None:
             cluster_status = cluster["ClusterStatus"]
             if cluster_status != prev_cluster_status:
                 if not first:
-                    emit(f"Cluster status: {prev_cluster_status} -> "
+                    emit(f"Cluster status: {prev_cluster_status} → "
                          f"{cluster_status}")
                     if cluster.get("FailureMessage"):
                         emit(f"  Failure message: {cluster['FailureMessage']}")
@@ -1273,7 +1325,7 @@ def register_hyperpod(sagemaker) -> None:
                              f"[{state[0]} {state[1]}/{state[2]}]")
                     else:
                         emit(f"InstanceGroup {name}: "
-                             f"{prev[0]}({prev[1]}/{prev[2]}) -> "
+                             f"{prev[0]}({prev[1]}/{prev[2]}) → "
                              f"{state[0]}({state[1]}/{state[2]})")
             if not first:
                 for name in prev_ig.keys() - cur_ig.keys():
@@ -1296,7 +1348,7 @@ def register_hyperpod(sagemaker) -> None:
                     elif prev != status:
                         msg = node["InstanceStatus"].get("Message")
                         line = (f"Node {node['InstanceGroupName']}/{node_id}: "
-                                f"{prev} -> {status}")
+                                f"{prev} → {status}")
                         if msg:
                             line += f"  ({msg})"
                         emit(line)
@@ -1398,15 +1450,12 @@ def register_hyperpod(sagemaker) -> None:
             arg("node_id", completer=_HyperpodNodeIdCompleter(with_cwlog=True)),
         ],
     )
+    @guard
     def _log(cluster_name, node_id):
         sm = awsut._get_sagemaker_client()
         logs = awsut._get_boto3_client("logs")
 
-        try:
-            cluster = sm.describe_cluster(ClusterName=cluster_name)
-        except sm.exceptions.ResourceNotFound:
-            print(f"Cluster [{cluster_name}] not found.")
-            return
+        cluster = _describe_or_fail(sm, cluster_name)
 
         cluster_id = cluster["ClusterArn"].split("/")[-1]
         log_group = f"/aws/sagemaker/Clusters/{cluster_name}/{cluster_id}"
@@ -1414,8 +1463,8 @@ def register_hyperpod(sagemaker) -> None:
         try:
             streams = _list_hyperpod_log_streams_all(logs, log_group)
         except logs.exceptions.ResourceNotFoundException:
-            print(f"Log group [{log_group}] not found.")
-            return
+            raise SmError(f"no log group {log_group!r} — the cluster has not "
+                          f"written any node logs yet") from None
 
         if node_id.startswith("ip-"):
             nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
@@ -1423,20 +1472,16 @@ def register_hyperpod(sagemaker) -> None:
             hostnames.resolve(sm, cluster, nodes)
             node_id = hostnames.get_node_id(node_id) or node_id
 
-        found = False
-        for stream in streams:
-            stream_name = stream["logStreamName"]
-            if node_id == "*" or stream_name.endswith(node_id):
-                header = f"--- {log_group} {stream_name} ---"
-                print("-" * len(header))
-                print(header)
-                print("-" * len(header))
-                _print_hyperpod_log(logs, log_group, stream_name)
-                print()
-                found = True
+        matched = [s["logStreamName"] for s in streams
+                   if node_id == "*" or s["logStreamName"].endswith(node_id)]
+        if not matched:
+            raise SmError(f"no log stream for {node_id!r} in {log_group}")
 
-        if not found:
-            print(f"Log stream for [{node_id}] not found.")
+        for i, stream_name in enumerate(matched):
+            if i:
+                print()
+            section(f"{log_group} {stream_name}")
+            _print_hyperpod_log(logs, log_group, stream_name)
 
     @hyperpod.command(
         "ssm", help="Login to a cluster node with SSM",
@@ -1445,13 +1490,10 @@ def register_hyperpod(sagemaker) -> None:
             arg("node_id", completer=_HyperpodNodeIdCompleter(with_cwlog=False)),
         ],
     )
+    @guard
     def _ssm(cluster_name, node_id):
         sm = awsut._get_sagemaker_client()
-        try:
-            cluster = sm.describe_cluster(ClusterName=cluster_name)
-        except sm.exceptions.ResourceNotFound:
-            print(f"Cluster [{cluster_name}] not found.")
-            return
+        cluster = _describe_or_fail(sm, cluster_name)
 
         nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
         cluster_id = cluster["ClusterArn"].split("/")[-1]
@@ -1463,8 +1505,7 @@ def register_hyperpod(sagemaker) -> None:
                 ig_name = node["InstanceGroupName"]
                 break
         else:
-            print(f"Node ID [{node_id}] not found.")
-            return
+            raise SmError(f"no node {node_id!r} in cluster {cluster_name!r}")
 
         ssm_target = f"sagemaker-cluster:{cluster_id}_{ig_name}-{node_id}"
         passthrough_run(["aws", "ssm", "start-session", "--target", ssm_target])
@@ -1489,20 +1530,16 @@ def register_hyperpod(sagemaker) -> None:
                 help="Restrict to these specific nodes"),
         ],
     )
+    @guard
     def _ssh(cluster_name, public_key_file, user, instance_group_name, node_id):
         try:
             import pexpect  # noqa: F401  (helper imports it; surface the error here)
         except ImportError:
-            print("pexpect is required for `awsut sagemaker hyperpod ssh`. "
-                  "Install it: pip install pexpect")
-            return
+            raise SmError("pexpect is required for `awsut sagemaker hyperpod ssh` "
+                          "— install it with `pip install pexpect`") from None
 
         sm = awsut._get_sagemaker_client()
-        try:
-            cluster = sm.describe_cluster(ClusterName=cluster_name)
-        except sm.exceptions.ResourceNotFound:
-            print(f"Cluster [{cluster_name}] not found.")
-            return
+        cluster = _describe_or_fail(sm, cluster_name)
 
         if user is None:
             is_eks = bool(cluster.get("Orchestrator", {}).get("Eks"))
@@ -1511,8 +1548,8 @@ def register_hyperpod(sagemaker) -> None:
         with open(os.path.expanduser(public_key_file)) as fd:
             public_key = fd.read().strip()
         if len(public_key.splitlines()) > 1:
-            print("Public key contains multiple lines unexpectedly.")
-            return
+            raise SmError(f"{public_key_file} holds more than one line — pass a "
+                          f"single public key")
 
         all_nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
         cluster_id = cluster["ClusterArn"].split("/")[-1]
@@ -1543,8 +1580,7 @@ def register_hyperpod(sagemaker) -> None:
             targets.append(node)
 
         if not targets:
-            print("No nodes matched the given filters.")
-            return
+            raise SmError("no node matched the given filters")
 
         # 1. Install the public key and capture each node's home directory.
         print_lock = threading.Lock()
@@ -1569,12 +1605,13 @@ def register_hyperpod(sagemaker) -> None:
             output, error = _ssm_run(ssm_target, shell_line, capture=True)
             with print_lock:
                 if error:
-                    print(f"  [error on {node_id_local}: {error}]")
+                    print(f"error: {ig_name}/{node_id_local}: {error}",
+                          file=sys.stderr)
                     return
                 home_match = re.search(r"^HOME_DIR=(\S+)$", output or "", re.MULTILINE)
                 if not home_match or "HOME_DIR_NOT_FOUND" in (output or ""):
-                    print(f"  [error on {node_id_local}: could not determine home "
-                          f"directory for user {user}]")
+                    print(f"error: {ig_name}/{node_id_local}: no home directory "
+                          f"for user {user}", file=sys.stderr)
                     return
                 node_homes[node_id_local] = home_match.group(1)
                 print(f"Installed SSH key on {ig_name}/{node_id_local} "
@@ -1586,9 +1623,8 @@ def register_hyperpod(sagemaker) -> None:
                 pass
 
         if not node_homes:
-            print("Key installation failed on every targeted node; not updating "
-                  "~/.ssh/config.")
-            return
+            raise SmError("the key could not be installed on any targeted node "
+                          "(see above); ~/.ssh/config left untouched")
 
         # 2. Build the SSH config block(s) and merge into ~/.ssh/config.
         identity_file = public_key_file
@@ -1669,32 +1705,26 @@ def register_hyperpod(sagemaker) -> None:
                 help="Single line of command to run"),
         ],
     )
+    @guard
     def _run(cluster_name, instance_group_name, instances, all_nodes,
              max_parallel, command):
         # Validate targeting first — cheap and useful even without pexpect.
         if not (all_nodes or instance_group_name or instances):
-            print("Refusing to run without an explicit target. Pass "
-                  "--instance-group-name NAME, --instances NODE [NODE ...], "
-                  "or --all to run on every node in the cluster.")
-            return
+            raise SmError("refusing to run without an explicit target — pass "
+                          "--instance-group-name NAME, --instances NODE [NODE ...], "
+                          "or --all for every node in the cluster")
         if all_nodes and (instance_group_name or instances):
-            print("--all is mutually exclusive with --instance-group-name "
-                  "and --instances.")
-            return
+            raise SmError("--all is mutually exclusive with "
+                          "--instance-group-name and --instances")
 
         try:
             import pexpect  # noqa: F401  (helper imports it; surface the error here)
         except ImportError:
-            print("pexpect is required for `awsut sagemaker hyperpod run`. "
-                  "Install it: pip install pexpect")
-            return
+            raise SmError("pexpect is required for `awsut sagemaker hyperpod run` "
+                          "— install it with `pip install pexpect`") from None
 
         sm = awsut._get_sagemaker_client()
-        try:
-            cluster = sm.describe_cluster(ClusterName=cluster_name)
-        except sm.exceptions.ResourceNotFound:
-            print(f"Cluster [{cluster_name}] not found.")
-            return
+        cluster = _describe_or_fail(sm, cluster_name)
 
         nodes = _list_hyperpod_cluster_nodes_all(sm, cluster_name)
         cluster_id = cluster["ClusterArn"].split("/")[-1]
@@ -1720,8 +1750,7 @@ def register_hyperpod(sagemaker) -> None:
             targets.append(node)
 
         if not targets:
-            print("No nodes matched the given filters.")
-            return
+            raise SmError("no node matched the given filters")
 
         print_lock = threading.Lock()
 
@@ -1732,13 +1761,13 @@ def register_hyperpod(sagemaker) -> None:
             output, error = _ssm_run(ssm_target, command, capture=True)
 
             with print_lock:
-                print(f"--- {ig_name}/{node_id} ---")
+                section(f"{ig_name}/{node_id}")
                 if output:
                     print(output, end="")
                     if not output.endswith("\n"):
                         print()
                 if error:
-                    print(f"[error running on {node_id}: {error}]")
+                    print(f"error: {ig_name}/{node_id}: {error}", file=sys.stderr)
                 print()
 
         workers = max(1, min(max_parallel, len(targets)))
@@ -1759,8 +1788,10 @@ def register_hyperpod(sagemaker) -> None:
                 help="Requested duration in hours"),
         ],
     )
+    @guard
     def _search_capacity(instance_type, instance_count, duration_hours):
-        print(f"Searching capacity in {_search_capacity_regions}")
+        rows = []
+        unsupported = []
         for region in _search_capacity_regions:
             params = {
                 "TargetResources": ["hyperpod-cluster"],
@@ -1773,36 +1804,48 @@ def register_hyperpod(sagemaker) -> None:
                 response = sm.search_training_plan_offerings(**params)
             except sm.exceptions.ClientError as e:
                 if "Invalid instance type" in str(e):
+                    # The type isn't offered in this region at all — a fact
+                    # about the sweep, reported once at the end.
+                    unsupported.append(region)
                     continue
                 raise
 
-            offerings = response["TrainingPlanOfferings"]
-            for tp in offerings:
+            for tp in response["TrainingPlanOfferings"]:
                 for offering in tp["ReservedCapacityOfferings"]:
-                    print(
-                        f"{offering['AvailabilityZone']:<16} : "
-                        f"{offering['DurationHours']:>3}:{offering['DurationMinutes']:<02} : "
-                        f"{offering['StartTime']} : {offering['EndTime']}"
-                    )
-                print("---")
+                    rows.append([
+                        region,
+                        offering["AvailabilityZone"],
+                        f"{offering['DurationHours']}h"
+                        f"{offering['DurationMinutes']:02d}m",
+                        fmt_time(offering.get("StartTime")),
+                        fmt_time(offering.get("EndTime")),
+                    ])
+
+        print_header(f"{len(rows)} offering(s)",
+                     f"{instance_count} × {instance_type}",
+                     f"{duration_hours}h",
+                     f"{len(_search_capacity_regions)} region(s) searched")
+        note = None
+        if unsupported:
+            note = (f"{instance_type} is not offered in "
+                    f"{', '.join(unsupported)}.")
+        print_table(["REGION", "AZ", "DURATION", "START", "END"], rows, note=note)
 
     @hyperpod.command(
         "kubeconfig", help="Update kubeconfig with the EKS cluster",
         params=[arg("cluster_name", completer=_HyperpodClusterNameCompleter())],
     )
+    @guard
     def _kubeconfig(cluster_name):
         sm = awsut._get_sagemaker_client()
-        try:
-            cluster = sm.describe_cluster(ClusterName=cluster_name)
-        except sm.exceptions.ResourceNotFound:
-            print(f"Cluster [{cluster_name}] not found.")
-            return
+        cluster = _describe_or_fail(sm, cluster_name)
 
         try:
             eks_arn = cluster["Orchestrator"]["Eks"]["ClusterArn"]
         except KeyError:
-            print("EKS cluster ARN not found in the HyperPod cluster description.")
-            return
+            raise SmError(f"cluster {cluster_name!r} has no EKS orchestrator — "
+                          f"there is no kubeconfig to update (a Slurm cluster is "
+                          f"reached with `ssm` or `ssh`)") from None
 
         eks_name = eks_arn.split("/")[-1]
         passthrough_run(["aws", "eks", "update-kubeconfig", "--name", eks_name])
@@ -1820,6 +1863,7 @@ def register_hyperpod(sagemaker) -> None:
                 help="Dump detailed JSON description of each event"),
         ],
     )
+    @guard
     def _events(cluster_name, format, limit, details):
         sm = awsut._get_sagemaker_client()
         limit = None if limit in (0, None) else limit
@@ -1827,8 +1871,7 @@ def register_hyperpod(sagemaker) -> None:
             events = _list_hyperpod_cluster_events_all(
                 sm, cluster_name, max_results=limit)
         except sm.exceptions.ResourceNotFound:
-            print(f"Cluster [{cluster_name}] not found.")
-            return
+            raise _no_cluster(cluster_name) from None
 
         def failure_message(event):
             # Error/Warn events carry a FailureMessage only in the detailed
@@ -1847,15 +1890,15 @@ def register_hyperpod(sagemaker) -> None:
                     )
                     print(json.dumps(response, default=str, indent=2))
                 except Exception as e:
-                    print(f"Error fetching details for event {event_id}: {e}")
+                    print(f"error: event {event_id}: {e}", file=sys.stderr)
         elif format in ("table", "csv"):
             # Description and FailureMessage share the last column: the
             # description's length is unpredictable, so padding it to the widest
             # cell would leave a ragged gap before a separate FailureMessage
             # column.  Appending the message keeps every row single-line and the
             # cause right next to its description.
-            headers = ["Timestamp", "Level", "Type",
-                       "Group", "Instance", "Description"]
+            headers = ["TIMESTAMP", "LEVEL", "TYPE",
+                       "GROUP", "INSTANCE", "DESCRIPTION"]
             rows = []
             for event in events:
                 # Collapse newlines so each row stays a single line.
@@ -1864,9 +1907,7 @@ def register_hyperpod(sagemaker) -> None:
                 if message:
                     description = f"{description} — {message}"
                 event_time = event["EventTime"]
-                # Trim to second precision (drop microseconds + tz offset) to
-                # keep the timestamp column narrow.
-                timestamp = (event_time.strftime("%Y-%m-%d %H:%M:%S")
+                timestamp = (fmt_time(event_time)
                              if hasattr(event_time, "strftime")
                              else str(event_time))
                 rows.append([
@@ -1878,45 +1919,23 @@ def register_hyperpod(sagemaker) -> None:
                     description,
                 ])
             if format == "csv":
-                print("\t".join(headers))
-                for row in rows:
-                    print("\t".join(row))
+                # Real CSV, quoted by the stdlib: a Description carries commas
+                # and the FailureMessage appended to it can carry quotes, so
+                # hand-joining would produce a file no reader could parse back.
+                writer = csv.writer(sys.stdout, lineterminator="\n")
+                writer.writerow(headers)
+                writer.writerows(rows)
             else:
-                # Left-justify every column but the last to the widest cell
-                # (header included) so columns line up in the terminal.
-                widths = [
-                    max(len(headers[i]), *(len(r[i]) for r in rows))
-                    if rows else len(headers[i])
-                    for i in range(len(headers))
-                ]
+                def level_color(col, value):
+                    # Only the LEVEL column, and only the two levels worth
+                    # interrupting a scan for.
+                    if col != 1:
+                        return None
+                    return {"Error": RED, "Warn": YELLOW}.get(value)
 
-                # Color the Level column (index 1) by severity. Applied after
-                # padding so the ANSI codes don't throw off ljust alignment;
-                # only when writing to a terminal.
-                RED, YELLOW, RESET = "\033[91m", "\033[93m", "\033[0m"
-                level_color = {"Error": RED, "Warn": YELLOW}
-                use_color = sys.stdout.isatty()
-
-                # A leading marker on each logical row makes the start of a row
-                # obvious even when a long Description wraps onto several
-                # physical lines (continuation lines have no marker).
-                MARKER = "• "
-                INDENT = "  "
-
-                def fmt(cells, marker="", colorize=False):
-                    out = []
-                    for i, cell in enumerate(cells):
-                        text = cell.ljust(widths[i]) if i < len(cells) - 1 else cell
-                        if colorize and i == 1 and use_color:
-                            color = level_color.get(cell)
-                            if color:
-                                text = f"{color}{text}{RESET}"
-                        out.append(text)
-                    return marker + "  ".join(out)
-
-                print(fmt(headers, marker=INDENT))
-                for row in rows:
-                    print(fmt(row, marker=MARKER, colorize=True))
+                print_header(f"{len(rows)} event(s)", f"cluster {cluster_name}",
+                             f"region {region_label()}")
+                print_table(headers, rows, colorize=level_color)
         elif format == "jsonl":
             for event in events:
                 # Enrich Error/Warn summaries with the FailureMessage that only

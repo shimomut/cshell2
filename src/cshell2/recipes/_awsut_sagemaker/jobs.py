@@ -65,10 +65,13 @@ from .render import (
     guard,
     model_enum,
     NOT_FOUND_CODES,
+    print_header,
+    print_labeled,
     print_table,
     parse_since,
     region_label,
     require_operation,
+    section,
     show_document,
     sleep_with_dots,
     sm_client,
@@ -236,7 +239,7 @@ def fetch_jobs(cli, categories, after, *, status=None, contains=None,
                 else:
                     if warn:
                         msg = exc.response["Error"].get("Message", str(exc))
-                        print(f"  ! {cat}: {msg}", file=sys.stderr)
+                        print(f"error: {cat}: {msg}", file=sys.stderr)
                     skipped.append(cat)
                 break
             page = resp.get("JobSummaries", [])
@@ -449,7 +452,9 @@ def register_jobs(sagemaker) -> None:
     )
 
     @jobs.command(
-        "list", help="List jobs across categories",
+        "list",
+        help="List jobs across categories (a '+' on DURATION means the job is "
+             "still running)",
         params=_filter_params(for_watch=False) + [
             arg("--sort", choices=["Name", "CreationTime", "Status"],
                 default="CreationTime", help="service-side sort key"),
@@ -464,13 +469,6 @@ def register_jobs(sagemaker) -> None:
             cli, categories, parse_since(since), status=status, contains=contains,
             limit=limit, sort=sort, asc=asc)
         queried = [c for c in categories if c not in not_offered]
-        if not rows:
-            print(f"no jobs matched · region {region_label()} · "
-                  f"categories: {', '.join(queried) or '(none)'}")
-            for note in _category_notes(skipped, not_offered):
-                print(note)
-            return
-
         rows.sort(key=_creation_key, reverse=not asc)
         dropped = max(0, len(rows) - limit)
         rows = rows[:limit]
@@ -490,10 +488,10 @@ def register_jobs(sagemaker) -> None:
             ])
 
         plural = "y" if len(queried) == 1 else "ies"
-        print(f"{len(rows)} job(s) · region {region_label()} · "
-              f"{len(queried)} categor{plural} queried\n")
+        print_header(f"{len(rows)} job(s)", f"region {region_label()}",
+                     f"{len(queried)} categor{plural} queried")
 
-        notes = ["DURATION '+' = still running.  Times are local."]
+        notes = []
         # Never cap coverage silently — a short list must not read as a
         # complete one.  'at least' because --max also bounded the per-category
         # fetch, so there may be more beyond these.
@@ -506,17 +504,22 @@ def register_jobs(sagemaker) -> None:
         print_table(
             ["", "JOB NAME", "CATEGORY", "STATUS", "SECONDARY", "CREATED", "DURATION"],
             cells,
-            note="\n".join(notes),
+            note="\n".join(notes) or None,
         )
 
     @jobs.command(
-        "describe", help="Describe one job, including its config document",
+        "describe",
+        help="Describe one job, including its config document "
+             "(a '+' on a transition's duration means it is the current one — "
+             "the service leaves EndTime unset, so durations are derived)",
         params=[
             arg("job_name", help="job to describe",
                 completer=_JobNameCompleter()),
             arg("--raw", action="store_true", help="Show the raw API response as JSON"),
             arg("--raw-config", action="store_true",
-                help="Print JobConfigDocument verbatim instead of reformatted"),
+                help="Print JobConfigDocument verbatim — the API returns it as "
+                     "one JSON string, which is reformatted for reading by "
+                     "default"),
         ],
     )
     @guard
@@ -591,40 +594,49 @@ def _render_job(desc, category, raw_config=False):
     status = desc.get("JobStatus", "?")
 
     # Identifiers first, one per line, unwrapped — these are the copy targets.
-    print(f"JobName      {desc.get('JobName')}")
-    print(f"JobArn       {desc.get('JobArn')}")
-    print(f"JobCategory  {category}")
-    if desc.get("RoleArn"):
-        print(f"RoleArn      {desc['RoleArn']}")
-    print()
     secondary = desc.get("SecondaryStatus")
-    print(f"Status       {status}" + (f" / {secondary}" if secondary else ""))
-    print(f"Created      {fmt_time(started)}")
-    print(f"Modified     {fmt_time(desc.get('LastModifiedTime'))}")
-    if ended:
-        print(f"Ended        {fmt_time(ended)}")
-    print(f"Elapsed      {fmt_dur(elapsed)}" + ("" if ended else " (running)"))
+    print_labeled([
+        ("JobName", desc.get("JobName")),
+        ("JobArn", desc.get("JobArn")),
+        ("JobCategory", category),
+        ("RoleArn", desc.get("RoleArn")),
+        None,
+        ("Status", status + (f" / {secondary}" if secondary else "")),
+        ("Created", fmt_time(started)),
+        ("Modified", fmt_time(desc.get("LastModifiedTime"))),
+        ("Ended", fmt_time(ended) if ended else None),
+        ("Elapsed", fmt_dur(elapsed) + ("" if ended else " (running)")),
+    ])
     if desc.get("FailureReason"):
-        print(f"\nFailureReason\n  {desc['FailureReason']}")
+        print()
+        section("FailureReason")
+        print(desc["FailureReason"])
 
     steps = transitions(desc)
     if steps:
-        print("\nSecondaryStatusTransitions  "
-              "(durations derived — service leaves EndTime unset)")
-        for st, start, _end, secs, running, msg in steps:
-            mark = "…" if running else "✓"
-            duration = fmt_dur(secs) + ("+" if running else "")
-            print(f"  {mark} {st:<14} {duration:<9} {fmt_time(start)}")
+        print()
+        section("SecondaryStatusTransitions")
+        # A timeline, not a listing: each step can carry a multi-line message
+        # hanging off it, which no table column expresses.  Widths still come
+        # from the data, so the durations line up however long a status name is.
+        marked = [("…" if running else "✓", st,
+                   fmt_dur(secs) + ("+" if running else ""),
+                   fmt_time(start), msg)
+                  for st, start, _end, secs, running, msg in steps]
+        st_w = max(len(m[1]) for m in marked)
+        dur_w = max(len(m[2]) for m in marked)
+        for mark, st, duration, start, msg in marked:
+            print(f"{mark} {st.ljust(st_w)}  {duration.ljust(dur_w)}  {start}")
             for line in (msg or "").splitlines():
-                print(f"       {line}")
+                print(f"    {line}")
 
     show_document("JobConfigDocument", desc.get("JobConfigDocument"),
                   desc.get("JobConfigSchemaVersion"), raw=raw_config)
 
     if desc.get("Tags"):
-        print("\nTags")
-        for t in desc["Tags"]:
-            print(f"  {t.get('Key')}={t.get('Value')}")
+        print()
+        section("Tags")
+        print_labeled([(t.get("Key") or "?", t.get("Value")) for t in desc["Tags"]])
 
 
 # ─── watch: one job ─────────────────────────────────────────────────────────
@@ -700,7 +712,7 @@ def _watch_one(job_name, category, interval, timeout):
         except botocore.exceptions.ClientError as exc:
             beat.clear()
             msg = exc.response["Error"].get("Message", str(exc))
-            print(f"  ! poll failed: {msg}", file=sys.stderr)
+            print(f"error: poll failed: {msg}", file=sys.stderr)
 
 
 # ─── watch: every matching job ──────────────────────────────────────────────

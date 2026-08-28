@@ -897,10 +897,20 @@ cshell2/
 │       │   ├── __init__.py     # enable(*names) helper
 │       │   ├── aws.py
 │       │   ├── awsut.py
-│       │   ├── _awsut_sagemaker/  # `awsut sagemaker` group (subpackage, so
-│       │   │   │                  # enable("*") doesn't glob it as a recipe)
+│       │   ├── _awsut_common.py   # the output contract for the whole `awsut`
+│       │   │                      # tree: print_header/print_table/
+│       │   │                      # print_labeled/section, guard + SmError,
+│       │   │                      # fmt_time/fmt_dur/fmt_bytes.  Above both
+│       │   │                      # halves and builds no AWS client, so either
+│       │   │                      # imports it without a cycle
+│       │   ├── _awsut_sagemaker/  # `awsut sagemaker` group.  Leading `_`, like
+│       │   │   │                  # every support module here: enable("*")
+│       │   │   │                  # offers only stems without one, since it
+│       │   │   │                  # calls register() on whatever it finds
 │       │   │   ├── __init__.py    # register_sagemaker(awsut) — called by awsut.register()
-│       │   │   ├── render.py      # shared tables / document rendering / ARN shapes
+│       │   │   ├── render.py      # SageMaker-specific: clients, pagination,
+│       │   │   │                  # document rendering, ARN shapes — and
+│       │   │   │                  # re-exports _awsut_common for this package
 │       │   │   ├── jobs.py        # jobs list|describe|watch|stop
 │       │   │   ├── hub.py         # hub hubs|list|versions|describe|files|trace
 │       │   │   ├── studio.py      # studio domains|spaces|apps|profiles|logs|
