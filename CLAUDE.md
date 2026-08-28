@@ -882,7 +882,9 @@ cshell2/
 │       │   │   ├── __init__.py    # register_sagemaker(awsut) — called by awsut.register()
 │       │   │   ├── render.py      # shared tables / document rendering / ARN shapes
 │       │   │   ├── jobs.py        # jobs list|describe|watch|stop
-│       │   │   └── hub.py         # hub hubs|list|versions|describe|files|trace
+│       │   │   ├── hub.py         # hub hubs|list|versions|describe|files|trace
+│       │   │   └── studio.py      # studio domains|spaces|apps|roles|logs|
+│       │   │                      #        launch|url|stop  (Domain/Space/App)
 │       │   ├── df.py
 │       │   ├── du.py
 │       │   ├── find.py

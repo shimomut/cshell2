@@ -1,4 +1,4 @@
-"""``awsut sagemaker`` — SageMaker Job resources and the hub content they use.
+"""``awsut sagemaker`` — Job resources, the hub content they use, and Studio.
 
 A private subpackage rather than a second recipe module, for two reasons:
 
@@ -23,10 +23,12 @@ def register_sagemaker(awsut_root) -> None:
     # ``from .. import awsut``, and ``awsut.register()`` is what calls this.
     from .hub import register_hub
     from .jobs import register_jobs
+    from .studio import register_studio
 
     sagemaker = awsut_root.command(
         "sagemaker",
-        help="SageMaker jobs and the hub content they read/write",
+        help="SageMaker jobs, the hub content they read/write, and Studio",
     )
     register_jobs(sagemaker)
     register_hub(sagemaker)
+    register_studio(sagemaker)

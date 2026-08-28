@@ -100,7 +100,8 @@ down.
 
 Consequence for ported tools: `awsut sagemaker`'s commands
 (`_awsut_sagemaker/`) print `error: …` to stderr and return normally
-where the standalone `sm_jobs.py` / `sm_hub.py` scripts exited 1 or 2.
+where the standalone `sm_jobs.py` / `sm_hub.py` scripts exited 1 or 2 —
+and where the `make` targets `studio` replaces failed the build.
 The distinction is visible to a human reading the output but not to
 `&&` / `||`. Fixing this properly means threading a return value (or a
 sentinel exception the slot understands) from `Command.invoke` through

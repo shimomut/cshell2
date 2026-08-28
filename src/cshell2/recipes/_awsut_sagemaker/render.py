@@ -82,6 +82,10 @@ def s3_client():
     return awsut._get_boto3_client("s3")
 
 
+def logs_client():
+    return awsut._get_boto3_client("logs")
+
+
 def region_label() -> str:
     return awsut._get_region() or "(no region set — var aws_region=…)"
 
@@ -112,6 +116,35 @@ def model_enum(service_name: str, operation: str, member: str) -> tuple[str, ...
         return tuple(getattr(shape, "enum", None) or ())
     except Exception:
         return ()
+
+
+@functools.lru_cache(maxsize=None)
+def input_members(service_name: str, operation: str) -> frozenset[str]:
+    """An operation's input member names, from the loaded botocore model. Offline.
+
+    botocore rejects a parameter its model does not declare *before* the call
+    goes out, with a ``ParamValidationError`` that reads like a caller bug.  A
+    command that sends an optional-but-recent member (``SpaceName`` on
+    CreatePresignedDomainUrl) asks here first, so an old model produces an
+    explanation instead.  Keyed by service name for the same reason
+    :func:`model_enum` is: ``var sagemaker_service_name=`` can swap the model.
+    """
+    try:
+        model = botocore.session.Session().get_service_model(service_name)
+        return frozenset(model.operation_model(operation).input_shape.members)
+    except Exception:
+        return frozenset()
+
+
+def require_input_member(operation: str, member: str, why: str) -> None:
+    """Fail with an explanation when the loaded model's *operation* lacks *member*."""
+    members = input_members(awsut.sagemaker_service_name, operation)
+    if members and member not in members:
+        raise SmError(
+            f"the loaded model for service {awsut.sagemaker_service_name!r} has no "
+            f"{member} input on {operation}, so {why} — upgrade botocore, or point "
+            f"`var sagemaker_service_name=` at a model that has it"
+        )
 
 
 def require_operation(client, method: str, api: str) -> None:
