@@ -8,6 +8,8 @@ import re
 import struct
 import sys
 import threading
+import time
+from typing import Callable
 
 # PTY-backed process multiplexing is POSIX-only.  On Windows these modules do
 # not exist; ProcessSlot is simply never instantiated there (the shell runs
@@ -41,6 +43,71 @@ class OutputBuffer:
         """Return all currently buffered bytes (concatenated) without draining."""
         with self._lock:
             return b"".join(self._buf)
+
+
+class ExitCallbackMixin:
+    """One-shot "this slot finished" callback, shared by every slot type.
+
+    A slot's work ends on a thread the shell isn't watching — ``ProcessSlot``'s
+    reader thread, ``PythonCommandSlot``'s command thread — so anything that
+    should happen at that moment (today: the desktop notification in
+    :mod:`cshell2.notify`) needs a hook there rather than a poll.
+
+    :meth:`arm_exit_callback` closes the race the shell can't otherwise avoid:
+    a slot is armed only *after* the code that owns it decides it went to the
+    background, by which time it may already have finished.  So the end-of-work
+    call records "I ended" even with no callback registered, and arming later
+    delivers immediately.  Exactly one of the two paths ever fires.
+
+    Mixin rather than base class because ``PipelineSlot`` deliberately
+    bypasses its parent's ``__init__``; every slot calls
+    :meth:`_init_exit_callback` from its own constructor instead.
+    """
+
+    def _init_exit_callback(self) -> None:
+        self.on_exit: Callable[[], None] | None = None
+        #: ``time.monotonic()`` at :meth:`start`, so the callback can report
+        #: how long the work took.
+        self.start_time: float | None = None
+        self._on_exit_fired = False
+        self._exit_pending = False
+        self._on_exit_lock = threading.Lock()
+
+    def mark_started(self) -> None:
+        self.start_time = time.monotonic()
+
+    def elapsed(self) -> float:
+        """Seconds since :meth:`mark_started`, or 0.0 if never started."""
+        if self.start_time is None:
+            return 0.0
+        return time.monotonic() - self.start_time
+
+    def arm_exit_callback(self, callback: Callable[[], None]) -> None:
+        """Register *callback*, firing it right away if the slot already ended."""
+        with self._on_exit_lock:
+            self.on_exit = callback
+            fire_now = self._exit_pending and not self._on_exit_fired
+            if fire_now:
+                self._on_exit_fired = True
+        if fire_now:
+            self._invoke_exit_callback(callback)
+
+    def _fire_on_exit(self) -> None:
+        """Signal end-of-work; invoke ``on_exit`` if one is already armed."""
+        with self._on_exit_lock:
+            self._exit_pending = True
+            callback = self.on_exit
+            if callback is None or self._on_exit_fired:
+                return
+            self._on_exit_fired = True
+        self._invoke_exit_callback(callback)
+
+    @staticmethod
+    def _invoke_exit_callback(callback: Callable[[], None]) -> None:
+        try:
+            callback()
+        except Exception:
+            pass  # a slot's teardown must not die on a bad callback
 
 
 # mode_num -> (name, default_action)
@@ -93,10 +160,11 @@ def _opposite(action: bytes) -> bytes:
     return b"l" if action == b"h" else b"h"
 
 
-class ProcessSlot:
+class ProcessSlot(ExitCallbackMixin):
     """Manages a single PTY subprocess with output buffering for context switching."""
 
     def __init__(self):
+        self._init_exit_callback()
         self.pid: int = -1
         self.master_fd: int = -1
         self.argv: list[str] = []
@@ -122,6 +190,7 @@ class ProcessSlot:
 
     def start(self, argv: list[str], env: dict[str, str], cwd: str) -> None:
         self.argv = argv
+        self.mark_started()
         master_fd, slave_fd = pty.openpty()
 
         # Set PTY size before fork so child sees correct dimensions immediately.
@@ -247,6 +316,7 @@ class ProcessSlot:
                 os.close(self.master_fd)
             except OSError:
                 pass
+            self._fire_on_exit()
 
     def _track_terminal_modes(self, data: bytes) -> None:
         """Scan output for DEC private mode set/reset sequences."""

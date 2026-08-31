@@ -54,7 +54,8 @@ from .pipeline import (
     set_pipeline_executor,
     _split_on_operators,
 )
-from .process import OutputBuffer, ProcessSlot
+from . import notify
+from .process import ExitCallbackMixin, OutputBuffer, ProcessSlot
 from .prompt import get_prompt_func, set_prompt
 
 # ---------------------------------------------------------------------------
@@ -473,7 +474,7 @@ def passthrough_input(prompt: str = "") -> str:
     return slot._run_input(prompt)
 
 
-class PythonCommandSlot:
+class PythonCommandSlot(ExitCallbackMixin):
     """Manages a Python @registry.command running in a background thread.
 
     Implements the same runtime interface as ProcessSlot so the shell's
@@ -481,6 +482,7 @@ class PythonCommandSlot:
     """
 
     def __init__(self, cmd, raw_args: list[str]) -> None:
+        self._init_exit_callback()
         self._cmd = cmd
         self._raw_args = raw_args
         self.argv: list[str] = [cmd.name] + raw_args
@@ -525,6 +527,7 @@ class PythonCommandSlot:
 
     def start(self) -> None:
         """Spawn the command thread.  stdout starts buffered (inactive)."""
+        self.mark_started()
         real = getattr(sys.stdout, "_real", sys.stdout)
         self._proxy = _StdoutProxy(real)
         real_err = getattr(sys.stderr, "_real", sys.stderr)
@@ -558,6 +561,7 @@ class PythonCommandSlot:
                 sys.stderr.clear_override()
             self.exit_code = self._compute_exit_code()
             self._finished.set()
+            self._fire_on_exit()
 
     def _compute_exit_code(self) -> int:
         exc = self._exit_exception
@@ -1098,6 +1102,7 @@ class PipelineSlot(PythonCommandSlot):
         # Bypass PythonCommandSlot.__init__ — it expects a Command, which we
         # don't have.  We mirror its attribute set ourselves.  ``argv`` is what
         # the context list / picker shows as the "command line" for the slot.
+        self._init_exit_callback()
         self._cmd = None  # never used; kept so ``_pty_lock``/etc. branches are safe
         self._raw_args: list[str] = []
         self.argv: list[str] = [display_text]
@@ -1145,6 +1150,7 @@ class PipelineSlot(PythonCommandSlot):
         self._in_devnull_fd: int = -1
 
     def start(self) -> None:
+        self.mark_started()
         self._out_read_fd, self._out_write_fd = os.pipe()
         self._in_devnull_fd = os.open(os.devnull, os.O_RDONLY)
         self._out_reader_thread = threading.Thread(
@@ -1250,6 +1256,7 @@ class PipelineSlot(PythonCommandSlot):
             if self.exit_code is None:
                 self.exit_code = self._compute_exit_code()
             self._finished.set()
+            self._fire_on_exit()
 
     def activate(self, raw_mode: bool = False) -> None:
         with self._out_lock:
@@ -1302,6 +1309,9 @@ class Shell:
         self.registry = command_registry
         self.context_manager = ContextManager()
         self.context_manager.create("default")
+        # True while the line currently being executed handed its work to a
+        # background context — see _execute / _notify_when_backgrounded.
+        self._backgrounded = False
         self._register_builtins()
         self.registry.mark_builtins()
         var_registry.mark_builtins()
@@ -2146,6 +2156,9 @@ class Shell:
         from .decorators import enable as enable_decorators
         enable_decorators("watch", "time", "retry", "quiet", "bg")
 
+        # `var notify=off` / `var notify_threshold=30`.
+        notify.register_vars()
+
     def _load_user_config(self) -> None:
         config_path = Path.home() / ".cshell2" / "config.py"
         if not config_path.exists():
@@ -2278,6 +2291,11 @@ class Shell:
             print(f"cshell2: {e}", file=sys.stderr)
             return
         last_exit = 0
+        started = time.monotonic()
+        # Cleared per line; set by whichever path hands the work to a
+        # background context, so the notification comes from the slot's own
+        # exit callback instead of from this (premature) return.
+        self._backgrounded = False
         try:
             for op, pipeline in seq.items:
                 if op == "&&" and last_exit != 0:
@@ -2286,11 +2304,58 @@ class Shell:
                     continue
                 last_exit = self._execute_pipeline(pipeline)
         finally:
+            if not self._backgrounded:
+                notify.command_done(line, time.monotonic() - started, last_exit)
             # User-run commands may have mutated remote state (e.g.
             # ``awsut sagemaker hyperpod scale``); drop cached completer
             # fetches so the next TAB session re-queries.
             from . import completion_cache
             completion_cache.invalidate_all()
+
+    # --- long-command notifications ------------------------------------------
+
+    def _notify_when_backgrounded(self, slot) -> None:
+        """Arrange a desktop notification for *slot* finishing out of sight.
+
+        Called right after the slot is parked on a context (``Ctrl+]`` or
+        ``@bg``).  The callback runs on the slot's own thread, so it must not
+        touch the terminal — :func:`notify.command_done` only spawns a
+        notification helper.
+        """
+        slot.arm_exit_callback(lambda: self._notify_slot_done(slot))
+
+    def _notify_slot_done(self, slot) -> None:
+        """Notify that a backgrounded *slot* finished, if the user isn't watching.
+
+        The owning context is looked up rather than remembered: a slot can be
+        moved between contexts, and "which context holds it *now*" is exactly
+        the question that decides whether the user saw it finish.  A slot with
+        no owner ran in the foreground (``_execute`` already timed it), and a
+        slot owned by the current context finished on screen — neither needs a
+        popup.
+        """
+        owner = next(
+            (
+                name
+                for name, ctx in self.context_manager.contexts.items()
+                if ctx.process_slot is slot
+            ),
+            None,
+        )
+        if owner is None or owner == self.context_manager.current_name:
+            return
+        notify.command_done(
+            " ".join(slot.argv), slot.elapsed(), slot.exit_code or 0, context=owner
+        )
+
+    def _notify_resumed_done(self, slot) -> None:
+        """Notify for a slot that was resumed into the foreground and then ended.
+
+        Its exit callback stayed silent (the slot's context was current by
+        then), and ``_execute`` returned when the slot was backgrounded, so
+        this is the only path that can report the total runtime.
+        """
+        notify.command_done(" ".join(slot.argv), slot.elapsed(), slot.exit_code or 0)
 
     def _tokenize_stage(self, stage: Stage) -> list[str]:
         """Expand variables, tokenize, alias-expand, and glob-expand a stage's text."""
@@ -2386,6 +2451,10 @@ class Shell:
                 name, variables=inherited, history=inherited_history
             )
             target.process_slot = slot
+        # ``@bg`` returns immediately, so the enclosing line's own timing says
+        # nothing about the body; the slot's exit callback is what reports it.
+        self._backgrounded = True
+        self._notify_when_backgrounded(slot)
         return name
 
     def _make_background_slot(self, pipeline: Pipeline, display: str):
@@ -3102,6 +3171,8 @@ class Shell:
                     slot.deactivate()
                     if ctx is not None:
                         ctx.process_slot = slot
+                        self._backgrounded = True
+                        self._notify_when_backgrounded(slot)
                     self._handle_switch()
                     return 0
                 if result == "interrupted":
@@ -3229,6 +3300,8 @@ class Shell:
             if ctx is None:
                 ctx = self.context_manager.current()
             ctx.process_slot = slot
+            self._backgrounded = True
+            self._notify_when_backgrounded(slot)
             slot.deactivate()
             self._handle_switch()
             return 0
@@ -3732,6 +3805,7 @@ class Shell:
                         else:
                             exc = slot._exit_exception
                             ctx.process_slot = None
+                            self._notify_resumed_done(slot)
                             if isinstance(exc, SystemExit):
                                 raise exc
                             if exc is not None and not isinstance(exc, KeyboardInterrupt):
@@ -3750,6 +3824,7 @@ class Shell:
                         else:
                             exit_code = slot.exit_code
                             ctx.process_slot = None
+                            self._notify_resumed_done(slot)
                             if exit_code and exit_code != 0:
                                 print(f"\n[Process exited with code {exit_code}]")
                             continue

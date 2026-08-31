@@ -85,6 +85,79 @@ completer one per typed token. Caching keeps the completer cost off the
 keystroke path but does not remove it. A category that graduates into the
 model stops costing anything, with no code change.
 
+## Desktop notifications can still fire for an interactive command
+
+`notify.SKIP_COMMANDS` suppresses the obvious cases — editors, pagers,
+process monitors, `ssh`, multiplexers, interactive sub-shells — by
+matching the basename of the line's first word. It is a heuristic and it
+misses in both directions:
+
+- **A wrapper hides the interactive program.** `make menuconfig`,
+  `git rebase -i`, `docker run -it ubuntu bash`, `kubectl exec -it`,
+  `aws ssm start-session` all sit at a prompt for as long as the user
+  wants and then "finish", earning a meaningless popup. The first word is
+  the only thing examined, so no amount of tuning the set catches these.
+- **The first word isn't the program.** `env FOO=1 vim` and `nohup vim`
+  are not skipped; `sudo make` *is* skipped only if `sudo` were listed
+  (it isn't, deliberately — `sudo make install` is worth reporting).
+- **A skipped name can be a batch job.** `ssh host 'make release'` is a
+  real long job and is silently skipped because it starts with `ssh`.
+
+Deciding this properly means asking whether the process actually read from
+the terminal — e.g. tracking whether the PTY slot ever received forwarded
+stdin bytes, which `ProcessSlot` is in a position to know. That would
+subsume the skip list for external commands (a `vim` session that took
+keystrokes is self-evidently interactive) but not for Python commands or
+`@bg` bodies. Until then: add to `notify.SKIP_COMMANDS` from
+`~/.cshell2/config.py`, or `var notify=off` for a session spent in
+interactive tools.
+
+## Notification delivery is best-effort and mostly unverifiable from the shell
+
+Every backend in `notify.py` is spawned as a subprocess with its output
+discarded and every exception swallowed, so `command_done()` returning
+`True` means "a notification was dispatched", never "the user saw it".
+Specifically:
+
+- **macOS attributes the notification to the terminal app**, because
+  `osascript` posts on behalf of whatever host is running it. If
+  notifications are denied for Terminal/iTerm2/VS Code in System
+  Settings → Notifications, nothing appears and there is no error to
+  detect. There is no way to ask for permission from a CLI, and no
+  API to query the current grant.
+- **The Windows toast path is untested on real hardware.** It is written
+  against the documented WinRT `ToastText02` template and the PowerShell
+  AppID, but the whole feature was developed and verified on macOS.
+  Failure mode is a silent no-op (an unregistered AppID is dropped by the
+  notification platform without an error).
+- **Linux needs `notify-send` and a running notification daemon.** The
+  binary being on `PATH` is what gets probed; a session with no daemon
+  listening on the D-Bus name accepts the call and drops it.
+- **The bell fallback is easy to miss** — many terminals have the audible
+  bell disabled, in which case a fallback notification is nothing at all.
+
+`set_notifier()` is the escape hatch: a custom backend (Slack, `ntfy.sh`,
+`tmux display-message`) can be verified end-to-end by the user in a way the
+built-in chain can't be.
+
+## A backgrounded command that finishes while you are watching it is reported anyway
+
+`Shell._notify_slot_done` stays silent when the slot's owning context *is*
+the current one, on the grounds that a popup for something on screen is
+noise. But the resume paths in `run()` call `_notify_resumed_done`
+unconditionally for a slot that has already exited, so this sequence still
+produces a notification:
+
+1. `make -j8`, `Ctrl+]` to background it,
+2. work in another context for two minutes,
+3. `Ctrl+]` back to it *before* it finishes and watch the last of the build
+   scroll past.
+
+The reported duration correctly covers the whole run, but part of it was
+spent in front of the user. Distinguishing "resumed and then finished" from
+"finished unobserved" needs the slot to record when it was last activated,
+which is more bookkeeping than the noise warrants today.
+
 ## Python commands cannot report an exit status
 
 A `@registry.command` handler's return value is ignored.

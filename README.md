@@ -17,6 +17,7 @@ A lightweight but powerful terminal shell environment with rich tab completion a
 - **System command fallback** — anything not a registered command runs through the system shell
 - **Cross-platform** — interactive shell, completion, pipelines, redirects, contexts, and history all work on POSIX and Windows; PTY-backed multiplexing of running native processes is POSIX-only
 - **History** — persistent history with up/down navigation, `Ctrl+R` search, and past command lines offered as multi-argument TAB candidates, scoped to the context and directory you're in
+- **Desktop notifications** — an OS notification when a command that took more than 10 seconds finishes, including ones running in a backgrounded context; native backends only, no extra dependencies
 
 ## Installation
 
@@ -328,6 +329,42 @@ answer = passthrough_input("Continue? [y/N] ")
 ```
 
 Outside a Python command thread, both helpers fall back to the obvious thing (`subprocess.run` and `input`), so the same code is safe in either context. Non-interactive subprocesses (`capture_output=True`, pipeline stages with explicit pipes, `pexpect.popen_spawn`, …) don't need wrapping.
+
+### Desktop Notifications
+
+When a command runs for at least 10 seconds, cshell2 posts an OS notification as it finishes — by then you've probably switched to a browser:
+
+```
+✓ cshell2 — 1m 23s          make -j8 release
+✗ cshell2 — exit 2 (20.0s)  make
+✓ cshell2 — 1h 05m          [bg-1] terraform apply
+```
+
+Commands running in a context you backgrounded with `Ctrl+]` (or with `@bg`) notify too, tagged with the context name. Interactive programs — editors, pagers, `top`, `ssh`, `tmux`, sub-shells — are skipped, since sitting in them for an hour isn't work finishing.
+
+Backends are whatever the platform already ships: `osascript` on macOS, `notify-send` on Linux, a PowerShell toast on Windows, and the terminal bell as a fallback. Nothing to install.
+
+Control it at the prompt:
+
+```
+cshell2> var notify=off              # disable for this session
+cshell2> var notify_threshold=30     # only notify for commands ≥ 30s
+```
+
+Or from your config:
+
+```python
+# ~/.cshell2/config.py
+from cshell2 import notify
+
+notify.configure(threshold=30)
+notify.SKIP_COMMANDS.add("psql")
+
+# Or replace the backend entirely — Slack, ntfy.sh, tmux display-message, ...
+notify.set_notifier(lambda title, message: post_to_slack(f"{title}\n{message}"))
+```
+
+See [doc/notifications.md](doc/notifications.md) for the design and the known limits.
 
 ### Prompt Customization
 

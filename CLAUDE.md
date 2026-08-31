@@ -73,6 +73,12 @@ change.
 │  Prompt (prompt.py)                                 │
 │  └── Default + user-overrideable prompt function   │
 ├─────────────────────────────────────────────────────┤
+│  Notifications (notify.py)                          │
+│  ├── OS notification when a slow command finishes  │
+│  ├── Native backends only — osascript / notify-    │
+│  │   send / PowerShell toast / terminal bell       │
+│  └── var notify, var notify_threshold              │
+├─────────────────────────────────────────────────────┤
 │  Recipes (recipes/)                                 │
 │  └── Completion recipes for external commands      │
 ├─────────────────────────────────────────────────────┤
@@ -661,6 +667,65 @@ def get_prompt_func() -> Callable[[ContextManager], str]: ...
 
 Default prompt shows: `[context] path/cwd HH:MM:SS [bg:N]>` with ANSI colors. The `[context]` prefix is omitted when the context name is `"default"`. `[bg:N]` appears when N other contexts have live processes.
 
+### notify.py — Desktop Notifications for Long Commands
+
+Posts an OS notification when a command that ran for at least
+`notify.get_threshold()` seconds (default **10**) finishes — by then the user
+has almost certainly switched to another window, and the shell should say
+"done" rather than be polled.
+
+**Zero dependencies.** Every backend is a program the platform already ships,
+probed once and cached: `osascript` on macOS, `notify-send` on Linux/BSD, a
+PowerShell WinRT toast on Windows, and the terminal bell (`\a`) as a last
+resort. Delivery happens on a daemon thread (`cshell2-notify`) and every
+failure is swallowed — a shell must not die because a notification couldn't
+be posted, and the callback runs on a reader/worker thread so it never touches
+the terminal.
+
+**Two reporting sites, arranged so nothing is reported twice or missed:**
+
+1. `Shell._execute` times the whole foreground line (pipes and `&&` chains
+   included) and reports it with the last stage's exit code — unless
+   `self._backgrounded` was set, which `Ctrl+]` and `@bg` do because they
+   return long before the work finishes.
+2. `Shell._notify_slot_done`, armed on the slot via
+   `_notify_when_backgrounded`, reports a backgrounded slot only when the
+   context that owns it (looked up at exit time) is **not** the current one —
+   the one case where the user is provably looking elsewhere. The message
+   carries the context name: `[bg-1] make -j8`. A resumed slot that finishes
+   on screen goes through `_notify_resumed_done` without the prefix.
+
+`ExitCallbackMixin` (in `process.py`) is the slot-side hook: `mark_started()`
+/ `elapsed()` for the duration and a one-shot `arm_exit_callback()`. Because
+the shell can only arm a slot *after* deciding it went to the background, by
+which time the work may be over, `_fire_on_exit()` records end-of-work even
+with nothing armed and arming later fires immediately — exactly one path
+delivers. It's a mixin rather than a base class because `PipelineSlot`
+deliberately bypasses its parent's `__init__`; every slot type calls
+`_init_exit_callback()` from its own constructor.
+
+`SKIP_COMMANDS` suppresses commands whose long runtime says nothing about work
+finishing (editors, pagers, `top`, `ssh`, `tmux`, interactive sub-shells,
+`exit`), matched on the basename of the line's first word.
+
+**Configuration** — two `Var`s registered by `notify.register_vars()` from
+`Shell._register_builtins`, plus `configure()` for `config.py`:
+
+```
+var notify=off                 # master switch (on/true/yes/1 | off/false/no/0)
+var notify_threshold=30        # seconds; unset restores DEFAULT_THRESHOLD
+```
+
+Both declare no `env_keys`, so they are process-global rather than
+per-context — "tell me when things finish" belongs to the person at the
+keyboard, not to the AWS account they're pointing at.
+`notify.set_notifier(func)` replaces the backend entirely (Slack, `ntfy.sh`,
+`tmux display-message`); the test suite uses it to capture notifications.
+
+See [doc/notifications.md](doc/notifications.md) for the full design, and
+`doc/limitations.md` for the skip-list heuristic's known misses and the
+best-effort nature of delivery.
+
 ### recipes/ — Completion Recipes for External Commands
 
 Opt-in completion recipes for system commands. Enable in `~/.cshell2/config.py`:
@@ -888,9 +953,13 @@ cshell2/
 │       ├── context.py          # Context, ContextManager, ContextState
 │       ├── history.py          # history storage and search
 │       ├── lineedit.py         # DIY raw-mode line editor, History (+ directory side table), TAB completion glue
+│       ├── notify.py           # OS notification when a slow command finishes;
+│       │                       # native backends, skip list, `notify` +
+│       │                       # `notify_threshold` Vars
 │       ├── parsing.py          # line tokenization, quote handling, var expansion
 │       ├── pipeline.py         # quote-aware operator parser: parse_line(), expand_globs(), decorator extraction, Pipeline.run()
-│       ├── process.py          # PTY subprocess slots, output buffering, terminal-mode tracking
+│       ├── process.py          # PTY subprocess slots, output buffering, terminal-mode
+│       │                       # tracking, ExitCallbackMixin (one-shot slot-done hook)
 │       ├── prompt.py           # set_prompt / get_prompt_func / default_prompt
 │       ├── tui.py              # InlinePicker, InlineMultiPicker, InlineArgPrompt
 │       ├── recipes/
@@ -944,6 +1013,7 @@ cshell2/
     ├── test_completion_cache.py
     ├── test_context.py
     ├── test_decorators.py
+    ├── test_notify.py
     ├── test_parsing.py
     ├── test_pipeline.py
     ├── test_process.py
@@ -1032,3 +1102,5 @@ The thread-local routing (`_ThreadLocalStdin` / `_ThreadLocalStdout` / `_ThreadL
 10. **Decorators as a sigil-prefixed grammar, not a built-in command** — `@name [flags] body` is parsed *before* the normal pipeline grammar runs (`pipeline.py::_extract_decorator_prefix`), so the syntax is unambiguous to the parser and can never collide with a POSIX command name. Borrowed from IPython's magics (`%name args`); see [doc/decorators.md](doc/decorators.md). The `{...}` body delimiter is required when the wrapped pipeline contains operators, which makes the decorator's scope visible at a glance and side-steps the `watch -n 5 ls | grep abc` ambiguity that POSIX `watch` is famous for. `Pipeline.run()` lets a decorator body re-enter `Shell._execute_pipeline` so redirects/pipes/Python-stage routing all work the same as at the top level.
 
 11. **TTL cache + command-boundary invalidation for completer fetches** — TAB completion runs the completer on every keystroke while the picker is open (see `lineedit.py::refresh_fn`). Completers that hit AWS APIs (e.g. `aws_completer`, `_HyperpodNodeIdCompleter`) would otherwise issue the same boto3 call four or five times for a single typed token. `completion_cache.py` provides `get_or_fetch(key, fn, ttl=60)` with a process-global store. Keys are tuples that include the active `(AWS_PROFILE, AWS_REGION)` via `aws_env_key()` so the cache doesn't bleed across profiles. `Shell._execute()` calls `completion_cache.invalidate_all()` after each pipeline finishes, so a freshly-mutated resource (e.g. after `awsut sagemaker hyperpod scale`) is re-fetched on the next TAB — TTL handles the within-session repeats, the invalidation hook handles correctness across commands.
+
+12. **Notify from the place that knows the work ended, and only from one of them** — the shell has three ways a command can finish (a foreground line, a slot exiting in a context nobody is looking at, a backgrounded slot resumed and watched to completion), and a naive "notify on completion" hook either misses cases or double-reports them. The rule is that `Shell._execute` owns *foreground* timing and steps aside via `self._backgrounded` the moment a line hands its work to a slot, and the slot-side `ExitCallbackMixin` owns everything after that, deciding at exit time whether a context that isn't current owns it. Backends stay dependency-free (native helper per platform, terminal bell as the floor), fire on a daemon thread so the prompt never waits on a subprocess spawn, and swallow every error — a missed notification is a nuisance, a shell that dies delivering one is a bug. See [doc/notifications.md](doc/notifications.md).

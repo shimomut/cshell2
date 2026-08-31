@@ -243,6 +243,47 @@ class _HttpProxyVar(Var):
 var_registry.register(_HttpProxyVar())
 
 
+# ── Desktop notifications for long-running commands ───────────────────────────
+#
+# When a command runs longer than the threshold, cshell2 posts an OS
+# notification as it finishes — you've probably switched to a browser by then.
+# Backends are whatever the platform already ships (osascript / notify-send /
+# a PowerShell toast), so there's nothing to install.
+#
+# At the prompt:
+#
+#     cshell2> var notify=off              → disable for this session
+#     cshell2> var notify_threshold=30     → only notify for commands ≥ 30s
+#
+# Both variables are process-global: unlike EnvVars above, they are not
+# saved/restored on context switch.
+
+from cshell2 import notify
+
+# Default is 10 seconds; raise it if your day is full of 15-second builds.
+notify.configure(threshold=10)
+
+# Commands whose long runtime means "I sat in it", not "work finished".
+# The defaults already cover editors, pagers, top, ssh, tmux and sub-shells;
+# add your own interactive tools here.
+notify.SKIP_COMMANDS.update({"psql", "mysql", "sqlite3", "ipython"})
+
+# Replace the platform backend entirely — post to Slack, ntfy.sh, tmux, ...
+# Runs on a daemon thread and must not write to the terminal.
+#
+# def my_notifier(title, message):
+#     import urllib.request
+#     urllib.request.urlopen(
+#         urllib.request.Request(
+#             "https://ntfy.sh/my-private-topic",
+#             data=f"{title}\n{message}".encode(),
+#         ),
+#         timeout=5,
+#     )
+#
+# notify.set_notifier(my_notifier)
+
+
 # ── Customize the prompt ──────────────────────────────────────────────────────
 
 from datetime import datetime
