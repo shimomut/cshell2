@@ -756,7 +756,7 @@ def _explain_no_stream(group, prefix, desc, category, named=None) -> None:
 
     A job that has not reached a logging phase yet has no stream, and that is a
     real answer about the job — so it is reported on stdout at exit 0, like
-    ``studio logs`` does for a space whose lifecycle config never fired.
+    ``studio log`` does for a space whose lifecycle config never fired.
     """
     if named:
         print(f"no stream {named!r} under {prefix} in {group}")

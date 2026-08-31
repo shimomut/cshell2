@@ -800,7 +800,7 @@ def register_studio(sagemaker) -> None:
         print_table(["USER PROFILE", "STATUS", "CREATED", "EXECUTION ROLE"], rows)
 
     @studio.command(
-        "logs", help="A space app's boot log — what its lifecycle config did",
+        "log", help="A space app's boot log — what its lifecycle config did",
         params=[
             _space_arg("space whose app log to read"),
             _domain_flag(),
@@ -1228,7 +1228,7 @@ def _read_stream(log_group, stream, follow, lookback) -> None:
         print("no such log group or stream — nothing has written to it: "
               "either no app has started here, or this app runs no "
               "lifecycle config")
-        print("what does exist: awsut sagemaker studio logs --list")
+        print("what does exist: awsut sagemaker studio log --list")
 
     read_log_stream(log_group, stream, follow=follow, lookback=lookback,
                     on_missing=missing)

@@ -183,7 +183,7 @@ def paged(call, key, max_items, *, token_param="NextToken",
 # ─── CloudWatch Logs ────────────────────────────────────────────────────────
 #
 # Shared because two groups read logs the same way and should read them the
-# same way: ``studio logs`` reads a space's boot log, ``jobs log`` a job's run
+# same way: ``studio log`` reads a space's boot log, ``jobs log`` a job's run
 # log.  Only the group/stream naming and the explanation for an absent stream
 # differ, and those are the callers' business — everything below is naming-blind.
 

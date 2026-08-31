@@ -68,7 +68,7 @@ class FakeClient:
 class FakeLogs:
     """A CloudWatch Logs stub, including the ``exceptions`` namespace.
 
-    Shared by the ``studio logs`` and ``jobs log`` tests, because both drive the
+    Shared by the ``studio log`` and ``jobs log`` tests, because both drive the
     same reader in :mod:`render`.
     """
 
@@ -1842,7 +1842,7 @@ def test_logs_builds_the_stream_path_from_the_domain_and_space(
     logs = FakeLogs(events=[{"message": "installing skills\n"}])
     studio_sm(studio_client())
     monkeypatch.setattr(render, "logs_client", lambda: logs)
-    run_studio(sagemaker_tree, "logs")
+    run_studio(sagemaker_tree, "log")
     params = dict(logs.calls[0][1])
     assert params["logGroupName"] == "/aws/sagemaker/studio"
     assert params["logStreamName"] == \
@@ -1855,7 +1855,7 @@ def test_logs_reads_another_stream_of_the_same_app(
     logs = FakeLogs(events=[])
     studio_sm(studio_client())
     monkeypatch.setattr(render, "logs_client", lambda: logs)
-    run_studio(sagemaker_tree, "logs", "--stream", "JupyterLab")
+    run_studio(sagemaker_tree, "log", "--stream", "JupyterLab")
     assert logs.calls[0][1]["logStreamName"].endswith("/default/JupyterLab")
 
 
@@ -1864,7 +1864,7 @@ def test_logs_explains_an_absent_stream_instead_of_failing(
     """A lifecycle config that does not fire for a space is a real answer."""
     studio_sm(studio_client())
     monkeypatch.setattr(render, "logs_client", lambda: FakeLogs(missing=True))
-    run_studio(sagemaker_tree, "logs")
+    run_studio(sagemaker_tree, "log")
     out = capsys.readouterr().out
     assert "no such log group or stream" in out and "--list" in out
 
@@ -1877,7 +1877,7 @@ def test_logs_list_shows_what_streams_the_space_has(
     ])
     studio_sm(studio_client())
     monkeypatch.setattr(render, "logs_client", lambda: logs)
-    run_studio(sagemaker_tree, "logs", "--list")
+    run_studio(sagemaker_tree, "log", "--list")
     out = capsys.readouterr().out
     # Listed relative to the space, because that is what --stream takes.
     rows = [ln for ln in out.splitlines() if ln.startswith("JupyterLab/")]
@@ -1885,7 +1885,7 @@ def test_logs_list_shows_what_streams_the_space_has(
     assert rows and rows[0].startswith("JupyterLab/default/LifecycleConfigOnStart")
     # That a listed row feeds --stream is said once, on the flag that lists them,
     # not as a note under the listing itself.
-    logs_leaf = sagemaker_tree.children["studio"].children["logs"]
+    logs_leaf = sagemaker_tree.children["studio"].children["log"]
     list_flag = next(p for p in logs_leaf.params if "--list" in p.names)
     assert "--stream" in list_flag.kwargs["help"]
 
@@ -1950,7 +1950,7 @@ def test_the_tree_has_every_group(sagemaker_tree):
     assert set(sagemaker_tree.children["hub"].children) == {
         "hubs", "list", "versions", "describe", "files", "trace"}
     assert set(sagemaker_tree.children["studio"].children) == {
-        "domains", "spaces", "apps", "profiles", "logs", "start", "url", "open",
+        "domains", "spaces", "apps", "profiles", "log", "start", "url", "open",
         "stop"}
     assert set(sagemaker_tree.children["hyperpod"].children) == {
         "create", "update", "scale", "add-ig", "remove-ig", "delete-nodes",
@@ -2040,28 +2040,28 @@ def test_hub_flag_is_not_offered_where_there_is_no_hub_to_pick(sagemaker_tree):
 def test_domain_flag_is_not_offered_where_there_is_no_domain_to_pick(sagemaker_tree):
     leaves = sagemaker_tree.children["studio"].children
     assert "--domain" not in _flags(leaves["domains"])
-    for name in ("spaces", "apps", "profiles", "logs", "start", "url", "open",
+    for name in ("spaces", "apps", "profiles", "log", "start", "url", "open",
                  "stop"):
         assert "--domain" in _flags(leaves[name]), name
 
 
 def test_app_and_wait_flags_are_only_where_an_app_is_addressed(sagemaker_tree):
     leaves = sagemaker_tree.children["studio"].children
-    for name in ("logs", "start", "stop"):
+    for name in ("log", "start", "stop"):
         assert "--app-name" in _flags(leaves[name]), name
     for name in ("domains", "spaces", "apps", "profiles", "url", "open"):
         assert "--app-name" not in _flags(leaves[name]), name
     # Waiting only means something for the two leaves that change an app's state.
     assert {"--wait", "--timeout"} <= _flags(leaves["start"])
     assert {"--wait", "--timeout"} <= _flags(leaves["stop"])
-    assert not _flags(leaves["logs"]) & {"--wait", "--timeout"}
+    assert not _flags(leaves["log"]) & {"--wait", "--timeout"}
 
 
 def test_only_the_stopping_leaf_takes_yes(sagemaker_tree):
     """-y is a confirmation bypass; offering it elsewhere would imply a prompt."""
     leaves = sagemaker_tree.children["studio"].children
     assert "-y" in _flags(leaves["stop"])
-    for name in ("domains", "spaces", "apps", "profiles", "logs", "start", "url",
+    for name in ("domains", "spaces", "apps", "profiles", "log", "start", "url",
                  "open"):
         assert "-y" not in _flags(leaves[name]), name
 
@@ -2082,7 +2082,7 @@ def test_studio_leaf_parsers_accept_the_documented_invocations(sagemaker_tree):
     assert ns.no_app_check is False
     assert url.parse_args(["--no-app-check"]).no_app_check is True
 
-    logs = _parser(leaves["logs"])
+    logs = _parser(leaves["log"])
     ns = logs.parse_args(["my-space", "-f"])       # -f, as `hyperpod watch` spells it
     assert (ns.space, ns.follow, ns.stream, ns.log_group) == \
         ("my-space", True, studio.LIFECYCLE_STREAM, studio.STUDIO_LOG_GROUP)

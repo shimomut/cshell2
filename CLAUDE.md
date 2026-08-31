@@ -982,7 +982,7 @@ cshell2/
 │       │   │   │                  # re-exports _awsut_common for this package
 │       │   │   ├── jobs.py        # jobs list|describe|log|watch|stop
 │       │   │   ├── hub.py         # hub hubs|list|versions|describe|files|trace
-│       │   │   ├── studio.py      # studio domains|spaces|apps|profiles|logs|
+│       │   │   ├── studio.py      # studio domains|spaces|apps|profiles|log|
 │       │   │   │                  #        start|url|open|stop
 │       │   │   │                  #        (Domain/Space/App)
 │       │   │   └── hyperpod.py    # hyperpod create|update|scale|add-ig|
