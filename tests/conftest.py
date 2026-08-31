@@ -29,6 +29,23 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
+def _no_user_config(monkeypatch):
+    """Keep ``Shell()`` from exec'ing the developer's own ``~/.cshell2/config.py``.
+
+    A config file is arbitrary Python run at startup: it registers commands and
+    aliases, replaces the prompt, and can assign to any module global (a real
+    one sets ``jobs.EXTRA_JOB_CATEGORIES``).  Loading it made the suite's result
+    depend on whose machine it ran on — every test that builds a ``Shell``
+    silently leaked one developer's settings into every test after it.
+
+    Tests that mean to exercise config loading should call
+    ``Shell._load_user_config`` explicitly against a path they control.
+    """
+    monkeypatch.setattr("cshell2.shell.Shell._load_user_config",
+                        lambda self: None)
+
+
+@pytest.fixture(autouse=True)
 def _clear_completion_cache():
     """The completion cache is process-global; tests that exercise
     cached completers must start from a clean slate."""
