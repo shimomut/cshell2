@@ -90,6 +90,7 @@ from .render import (
     fmt_dur,
     fmt_time,
     guard,
+    log_streams,
     logs_client,
     model_enum,
     paged,
@@ -97,11 +98,13 @@ from .render import (
     print_header,
     print_labeled,
     print_table,
+    read_log_stream,
     region_label,
     require_input_member,
     require_operation,
     sleep_with_dots,
     sm_client,
+    stream_table_rows,
 )
 
 # Studio writes every space's app output to one log group, one stream per
@@ -832,7 +835,7 @@ def register_studio(sagemaker) -> None:
         resolved_type = space_app_type(space_desc, app_type)
         full = f"{prefix}{resolved_type}/{app_name}/{stream}"
         print_header(log_group, full)
-        _read_stream(log_group, full, follow, lookback, prefix)
+        _read_stream(log_group, full, follow, lookback)
 
     # ── starts and stops billing ───────────────────────────────────────────
 
@@ -1206,75 +1209,26 @@ def _failure_reason(cli, domain_id, space, app_type, app_name) -> str:
 # ─── reading the boot log ───────────────────────────────────────────────────
 
 def _list_space_streams(log_group, prefix, space_name) -> None:
-    try:
-        streams = logs_client().describe_log_streams(
-            logGroupName=log_group, logStreamNamePrefix=prefix)
-    except botocore.exceptions.ClientError as exc:
-        raise SmError(f"{log_group}: {api_message(exc)}")
-    rows = [[
-        s["logStreamName"][len(prefix):],
-        fmt_time(_ms(s.get("firstEventTimestamp"))),
-        fmt_time(_ms(s.get("lastEventTimestamp"))),
-        fmt_bytes(s.get("storedBytes")),
-    ] for s in streams.get("logStreams", [])]
+    rows = stream_table_rows(log_streams(log_group, prefix), prefix)
     print_header(f"{len(rows)} stream(s)", f"{log_group}/{prefix}")
-    print_table(["STREAM (below the space)", "FIRST EVENT", "LAST EVENT", "SIZE"],
+    print_table(["STREAM (below the space)", "FIRST EVENT", "LAST EVENT"],
                 rows,
                 note=(None if rows else
                       f"nothing has ever written under {prefix} — no app has "
                       f"started in space {space_name}"))
 
 
-def _ms(value):
-    return datetime.fromtimestamp(value / 1000).astimezone() if value else None
+def _read_stream(log_group, stream, follow, lookback) -> None:
+    """Print a space app's stream, explaining an absent one in Studio's terms.
 
-
-def _read_stream(log_group, stream, follow, lookback, prefix) -> None:
-    """Print a stream's events, optionally tailing it.
-
-    An absent stream is the *expected* answer often enough to deserve an
-    explanation rather than an error: a lifecycle config attached at domain
-    level does not fire for every space, so "nothing here" is a real result.
+    A lifecycle config attached at domain level does not fire for every space,
+    so "nothing here" is a real result rather than a failure.
     """
-    client = logs_client()
-    params = {"logGroupName": log_group, "logStreamName": stream,
-              "startFromHead": True, "limit": 1000}
-    if lookback:
-        params["startTime"] = int((time.time() - lookback * 60) * 1000)
+    def missing():
+        print("no such log group or stream — nothing has written to it: "
+              "either no app has started here, or this app runs no "
+              "lifecycle config")
+        print("what does exist: awsut sagemaker studio logs --list")
 
-    token = None
-    printed = 0
-    try:
-        while True:
-            if token:
-                params["nextToken"] = token
-                params.pop("startTime", None)
-            try:
-                resp = client.get_log_events(**params)
-            except client.exceptions.ResourceNotFoundException:
-                print("no such log group or stream — nothing has written to it: "
-                      "either no app has started here, or this app runs no "
-                      "lifecycle config")
-                print("what does exist: awsut sagemaker studio logs --list")
-                return
-            for event in resp["events"]:
-                print(event["message"].replace("\0", "\\0").rstrip("\n"))
-                printed += 1
-            # Flush per pass so `... | grep ERROR` sees output as it arrives.
-            sys.stdout.flush()
-            if not follow:
-                if not printed:
-                    print("stream exists but has no events"
-                          + (f" in the last {lookback} minute(s)" if lookback else ""))
-                return
-            caught_up = resp["nextForwardToken"] == token
-            token = resp["nextForwardToken"]
-            if caught_up:
-                # Short sleeps with a flush each tick: in a pipeline, Ctrl+C
-                # closes our stdout and the next flush raises promptly rather
-                # than after the whole wait.
-                for _ in range(50):
-                    time.sleep(0.1)
-                    sys.stdout.flush()
-    except (KeyboardInterrupt, BrokenPipeError):
-        pass
+    read_log_stream(log_group, stream, follow=follow, lookback=lookback,
+                    on_missing=missing)

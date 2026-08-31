@@ -37,6 +37,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+import botocore.exceptions
 import botocore.session
 
 from .. import awsut
@@ -177,6 +178,116 @@ def paged(call, key, max_items, *, token_param="NextToken",
         if not token:
             break
     return items[:max_items]
+
+
+# ─── CloudWatch Logs ────────────────────────────────────────────────────────
+#
+# Shared because two groups read logs the same way and should read them the
+# same way: ``studio logs`` reads a space's boot log, ``jobs log`` a job's run
+# log.  Only the group/stream naming and the explanation for an absent stream
+# differ, and those are the callers' business — everything below is naming-blind.
+
+def ms_time(value):
+    """A CloudWatch millisecond epoch as a local-time datetime, or None."""
+    return datetime.fromtimestamp(value / 1000).astimezone() if value else None
+
+
+def log_streams(log_group, prefix="", *, max_items=200):
+    """Streams under *prefix* in *log_group*, most recent activity first.
+
+    Sorted here rather than by the API because ``describe_log_streams`` rejects
+    ``orderBy`` together with ``logStreamNamePrefix`` — a prefixed listing comes
+    back in *name* order, which for a timestamped stream name is only
+    accidentally chronological.
+
+    A log group that does not exist yet comes back as an empty list rather than
+    an error: nothing having ever written to it is a real answer, and only the
+    caller knows what it means (no app has started here; the job has not
+    reached a phase that logs).
+    """
+    client = logs_client()
+    params = {"logGroupName": log_group}
+    if prefix:
+        params["logStreamNamePrefix"] = prefix
+    try:
+        streams = paged(client.describe_log_streams, "logStreams", max_items,
+                        token_param="nextToken", token_key="nextToken", **params)
+    except client.exceptions.ResourceNotFoundException:
+        return []
+    except botocore.exceptions.ClientError as exc:
+        raise SmError(f"{log_group}: {api_message(exc)}")
+    streams.sort(key=lambda s: s.get("lastEventTimestamp") or 0, reverse=True)
+    return streams
+
+
+def stream_table_rows(streams, prefix):
+    """``[[name_below_prefix, first, last]]`` for a stream listing.
+
+    Names are printed relative to *prefix* because that is the part a
+    ``--stream`` flag takes — the rest of the path is derived by the caller.
+
+    No size column: ``describe_log_streams`` has reported ``storedBytes`` as a
+    flat zero for every stream since 2019, so a size here could only ever be a
+    column of ``0B``.
+    """
+    return [[
+        s["logStreamName"][len(prefix):],
+        fmt_time(ms_time(s.get("firstEventTimestamp"))),
+        fmt_time(ms_time(s.get("lastEventTimestamp"))),
+    ] for s in streams]
+
+
+def read_log_stream(log_group, stream, *, follow=False, lookback=0,
+                    on_missing=None):
+    """Print a stream's events, optionally tailing it.
+
+    An absent stream is the *expected* answer often enough to deserve an
+    explanation rather than an error, and what that explanation is depends on
+    the resource — so *on_missing* is the caller's to supply.
+    """
+    client = logs_client()
+    params = {"logGroupName": log_group, "logStreamName": stream,
+              "startFromHead": True, "limit": 1000}
+    if lookback:
+        params["startTime"] = int((time.time() - lookback * 60) * 1000)
+
+    token = None
+    printed = 0
+    try:
+        while True:
+            if token:
+                params["nextToken"] = token
+                params.pop("startTime", None)
+            try:
+                resp = client.get_log_events(**params)
+            except client.exceptions.ResourceNotFoundException:
+                if on_missing:
+                    on_missing()
+                else:
+                    print(f"no such log group or stream: {log_group} {stream}")
+                return
+            for event in resp["events"]:
+                print(event["message"].replace("\0", "\\0").rstrip("\n"))
+                printed += 1
+            # Flush per pass so `... | grep ERROR` sees output as it arrives.
+            sys.stdout.flush()
+            if not follow:
+                if not printed:
+                    print("stream exists but has no events"
+                          + (f" in the last {lookback} minute(s)" if lookback
+                             else ""))
+                return
+            caught_up = resp["nextForwardToken"] == token
+            token = resp["nextForwardToken"]
+            if caught_up:
+                # Short sleeps with a flush each tick: in a pipeline, Ctrl+C
+                # closes our stdout and the next flush raises promptly rather
+                # than after the whole wait.
+                for _ in range(50):
+                    time.sleep(0.1)
+                    sys.stdout.flush()
+    except (KeyboardInterrupt, BrokenPipeError):
+        pass
 
 
 # ─── time / size formatting ─────────────────────────────────────────────────

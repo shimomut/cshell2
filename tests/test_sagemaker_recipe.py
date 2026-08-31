@@ -65,6 +65,39 @@ class FakeClient:
         return call
 
 
+class FakeLogs:
+    """A CloudWatch Logs stub, including the ``exceptions`` namespace.
+
+    Shared by the ``studio logs`` and ``jobs log`` tests, because both drive the
+    same reader in :mod:`render`.
+    """
+
+    class ResourceNotFoundException(Exception):
+        pass
+
+    def __init__(self, events=None, streams=None, missing=False):
+        self.events = events or []
+        self.streams = streams or []
+        self.missing = missing
+        self.calls = []
+        self.exceptions = self
+
+    def get_log_events(self, **params):
+        self.calls.append(("get_log_events", params))
+        if self.missing:
+            raise self.ResourceNotFoundException()
+        return {"events": self.events, "nextForwardToken": "f/1"}
+
+    def describe_log_streams(self, **params):
+        self.calls.append(("describe_log_streams", params))
+        if self.missing:
+            raise self.ResourceNotFoundException()
+        # Name order, as the real API returns for a prefixed query — never
+        # chronological.
+        streams = sorted(self.streams, key=lambda s: s["logStreamName"])
+        return {"logStreams": streams}
+
+
 def ctx(prefix="", args=None, command="awsut"):
     args = args or []
     return CompletionContext(command=command, args=args, arg_index=len(args),
@@ -687,6 +720,192 @@ def test_state_of_bridges_the_two_secondary_status_spellings():
 def test_fmt_state_omits_a_missing_secondary():
     assert jobs.fmt_state(("Completed", "-")) == "Completed"
     assert jobs.fmt_state(("InProgress", "Running")) == "InProgress / Running"
+
+
+# ---------------------------------------------------------------------------
+# jobs — reading the log
+# ---------------------------------------------------------------------------
+
+JOB = "sdg-thing-2026-08-31-18-17-06-446-1"
+
+
+def _job_stream(name=JOB, phase="generation", when="2026-08-31T18-17-06.7Z",
+                last=1_700_000_000_000):
+    return {"logStreamName": f"{name}/{phase}-{when}",
+            "firstEventTimestamp": last - 1000,
+            "lastEventTimestamp": last}
+
+
+def job_described(status="Completed", secondary="Completed", name=JOB):
+    return {"JobName": name, "JobStatus": status, "SecondaryStatus": secondary}
+
+
+@pytest.fixture
+def job_logs(monkeypatch):
+    """Install a FakeLogs plus a DescribeJob that resolves into one category."""
+    def install(logs, *, described=None, category="MyCategory"):
+        desc = described if described is not None else job_described()
+
+        def describe_job(**p):
+            if p["JobCategory"] != category:
+                raise client_error("ValidationException", "no such job")
+            return dict(desc, JobCategory=p["JobCategory"])
+
+        monkeypatch.setattr(jobs, "sm_client",
+                            lambda *a, **k: FakeClient(describe_job=describe_job))
+        monkeypatch.setattr(render, "logs_client", lambda: logs)
+        return logs
+
+    return install
+
+
+def run_jobs(tree, *args):
+    tree.children["jobs"].invoke(list(args))
+
+
+def test_the_log_group_is_derived_from_the_category_slash_included():
+    """The trailing slash is part of the group's real name, not a separator."""
+    assert jobs.job_log_group("DataQualityEvaluation") == \
+        "/aws/sagemaker/Job/DataQualityEvaluation/"
+    assert jobs.job_stream_prefix(JOB) == f"{JOB}/"
+
+
+def test_log_finds_the_stream_under_the_derived_group(
+        sagemaker_tree, job_logs, capsys):
+    """A stream name embeds a phase and a timestamp, so it has to be looked up."""
+    logs = job_logs(FakeLogs(events=[{"message": "generating rows\n"}],
+                             streams=[_job_stream()]))
+    run_jobs(sagemaker_tree, "log", JOB, "--category", "MyCategory")
+
+    described = [p for op, p in logs.calls if op == "describe_log_streams"][0]
+    assert described["logGroupName"] == "/aws/sagemaker/Job/MyCategory/"
+    assert described["logStreamNamePrefix"] == f"{JOB}/"
+    read = [p for op, p in logs.calls if op == "get_log_events"][0]
+    assert read["logStreamName"] == f"{JOB}/generation-2026-08-31T18-17-06.7Z"
+    assert "generating rows" in capsys.readouterr().out
+
+
+def test_log_reads_the_most_recent_stream_and_says_there_were_others(
+        sagemaker_tree, job_logs, capsys):
+    """Newest-first has to be imposed here: a prefixed query comes back by name.
+
+    The names sort the wrong way round on purpose — 'a-old' precedes 'z-new'
+    alphabetically while being the older of the two.
+    """
+    logs = job_logs(FakeLogs(events=[], streams=[
+        _job_stream(phase="a-old", last=1_000),
+        _job_stream(phase="z-new", last=9_000),
+    ]))
+    run_jobs(sagemaker_tree, "log", JOB, "--category", "MyCategory")
+    read = [p for op, p in logs.calls if op == "get_log_events"][0]
+    assert read["logStreamName"].endswith("z-new-2026-08-31T18-17-06.7Z")
+    assert "2 streams" in capsys.readouterr().out
+
+
+def test_log_stream_flag_takes_the_tail_below_the_job(
+        sagemaker_tree, job_logs, capsys):
+    logs = job_logs(FakeLogs(events=[]))
+    run_jobs(sagemaker_tree, "log", JOB, "--category", "MyCategory",
+             "--stream", "generation-whenever")
+    read = [p for op, p in logs.calls if op == "get_log_events"][0]
+    assert read["logStreamName"] == f"{JOB}/generation-whenever"
+    # Naming it skips the lookup entirely.
+    assert not [op for op, _ in logs.calls if op == "describe_log_streams"]
+
+
+def test_log_group_can_be_overridden(sagemaker_tree, job_logs):
+    logs = job_logs(FakeLogs(events=[], streams=[_job_stream()]))
+    run_jobs(sagemaker_tree, "log", JOB, "--category", "MyCategory",
+             "--log-group", "/my/own/group")
+    assert all(p["logGroupName"] == "/my/own/group"
+               for _op, p in logs.calls)
+
+
+@pytest.mark.parametrize("status,secondary,expected", [
+    ("InProgress", "Validating", "reaches a phase that logs"),
+    ("Completed", "Completed", "has since been deleted"),
+])
+def test_log_explains_an_empty_group_by_the_jobs_status(
+        sagemaker_tree, job_logs, capsys, status, secondary, expected):
+    """Too-early and aged-out both list nothing; only the status tells them apart."""
+    job_logs(FakeLogs(streams=[]),
+             described=job_described(status=status, secondary=secondary))
+    run_jobs(sagemaker_tree, "log", JOB, "--category", "MyCategory")
+    out = capsys.readouterr().out
+    assert "no log stream under" in out
+    assert f"{status} / {secondary}" in out
+    assert expected in out
+    # An absent log is a fact about the job, not a failure — so it is reported,
+    # not raised, and the derived group is named in case it is the wrong guess.
+    assert "--log-group" in out
+
+
+def test_log_explains_a_named_stream_that_does_not_exist(
+        sagemaker_tree, job_logs, capsys):
+    job_logs(FakeLogs(missing=True))
+    run_jobs(sagemaker_tree, "log", JOB, "--category", "MyCategory",
+             "--stream", "typo")
+    out = capsys.readouterr().out
+    assert "no stream 'typo'" in out and "--list" in out
+
+
+def test_log_list_shows_the_streams_relative_to_the_job(
+        sagemaker_tree, job_logs, capsys):
+    job_logs(FakeLogs(streams=[_job_stream(phase="generation")]))
+    run_jobs(sagemaker_tree, "log", JOB, "--category", "MyCategory", "--list")
+    out = capsys.readouterr().out
+    rows = [ln for ln in out.splitlines() if ln.startswith("generation-")]
+    assert rows
+    # Listed below the job, because that is what --stream takes.
+    assert JOB not in rows[0]
+    # No size: CloudWatch reports storedBytes as zero for every stream, so the
+    # column could only ever have said 0B.
+    assert "SIZE" not in out and "0B" not in out
+
+
+def test_log_probes_categories_when_none_is_given(sagemaker_tree, job_logs, extras):
+    """`log` needs the category for the group name, so it resolves like `describe`."""
+    logs = job_logs(FakeLogs(events=[], streams=[_job_stream()]),
+                    category="OtherCategory")
+    run_jobs(sagemaker_tree, "log", JOB)
+    described = [p for op, p in logs.calls if op == "describe_log_streams"][0]
+    assert described["logGroupName"] == "/aws/sagemaker/Job/OtherCategory/"
+
+
+def test_the_log_flags_are_only_on_log(sagemaker_tree):
+    leaves = sagemaker_tree.children["jobs"].children
+    log_only = {"--stream", "--list", "--lookback", "--log-group"}
+    assert log_only <= _flags(leaves["log"])
+    for name in ("list", "describe", "watch", "stop"):
+        assert not _flags(leaves[name]) & log_only, name
+    # And the listing filters do not appear on a single job's log.
+    assert not _flags(leaves["log"]) & {"--since", "--status", "--contains"}
+
+
+# ---------------------------------------------------------------------------
+# jobs — the log-stream completer
+# ---------------------------------------------------------------------------
+
+def test_the_stream_completer_needs_a_job_name_first(monkeypatch):
+    called = []
+    monkeypatch.setattr(render, "logs_client", lambda: called.append(1))
+    assert jobs._JobLogStreamCompleter().complete(
+        ctx("", args=["--category", "MyCategory"])) == []
+    assert called == []
+
+
+def test_the_stream_completer_offers_tails_and_asks_no_sagemaker(
+        monkeypatch, extras):
+    """It finds the category by trying each group, not by probing DescribeJob."""
+    monkeypatch.setattr(render, "logs_client",
+                        lambda: FakeLogs(streams=[_job_stream(phase="generation")]))
+    monkeypatch.setattr(jobs, "sm_client",
+                        lambda *a, **k: pytest.fail("completion called DescribeJob"))
+    got = [c.value for c in jobs._JobLogStreamCompleter().complete(
+        ctx("gen", args=[JOB]))]
+    # One row, not one per category tried: every candidate group answers with the
+    # same stream here, and the picker must not show it len(categories) times.
+    assert got == ["generation-2026-08-31T18-17-06.7Z"]
 
 
 # ---------------------------------------------------------------------------
@@ -1618,35 +1837,11 @@ def test_the_spaces_table_and_the_completer_read_the_same_source(
 # studio — the boot log
 # ---------------------------------------------------------------------------
 
-class FakeLogs:
-    """A CloudWatch Logs stub, including the ``exceptions`` namespace."""
-
-    class ResourceNotFoundException(Exception):
-        pass
-
-    def __init__(self, events=None, streams=None, missing=False):
-        self.events = events or []
-        self.streams = streams or []
-        self.missing = missing
-        self.calls = []
-        self.exceptions = self
-
-    def get_log_events(self, **params):
-        self.calls.append(("get_log_events", params))
-        if self.missing:
-            raise self.ResourceNotFoundException()
-        return {"events": self.events, "nextForwardToken": "f/1"}
-
-    def describe_log_streams(self, **params):
-        self.calls.append(("describe_log_streams", params))
-        return {"logStreams": self.streams}
-
-
 def test_logs_builds_the_stream_path_from_the_domain_and_space(
         sagemaker_tree, studio_sm, monkeypatch, capsys):
     logs = FakeLogs(events=[{"message": "installing skills\n"}])
     studio_sm(studio_client())
-    monkeypatch.setattr(studio, "logs_client", lambda: logs)
+    monkeypatch.setattr(render, "logs_client", lambda: logs)
     run_studio(sagemaker_tree, "logs")
     params = dict(logs.calls[0][1])
     assert params["logGroupName"] == "/aws/sagemaker/studio"
@@ -1659,7 +1854,7 @@ def test_logs_reads_another_stream_of_the_same_app(
         sagemaker_tree, studio_sm, monkeypatch):
     logs = FakeLogs(events=[])
     studio_sm(studio_client())
-    monkeypatch.setattr(studio, "logs_client", lambda: logs)
+    monkeypatch.setattr(render, "logs_client", lambda: logs)
     run_studio(sagemaker_tree, "logs", "--stream", "JupyterLab")
     assert logs.calls[0][1]["logStreamName"].endswith("/default/JupyterLab")
 
@@ -1668,7 +1863,7 @@ def test_logs_explains_an_absent_stream_instead_of_failing(
         sagemaker_tree, studio_sm, monkeypatch, capsys):
     """A lifecycle config that does not fire for a space is a real answer."""
     studio_sm(studio_client())
-    monkeypatch.setattr(studio, "logs_client", lambda: FakeLogs(missing=True))
+    monkeypatch.setattr(render, "logs_client", lambda: FakeLogs(missing=True))
     run_studio(sagemaker_tree, "logs")
     out = capsys.readouterr().out
     assert "no such log group or stream" in out and "--list" in out
@@ -1678,11 +1873,10 @@ def test_logs_list_shows_what_streams_the_space_has(
         sagemaker_tree, studio_sm, monkeypatch, capsys):
     prefix = "d-aaa/data-prep-space/"
     logs = FakeLogs(streams=[
-        {"logStreamName": prefix + "JupyterLab/default/LifecycleConfigOnStart",
-         "storedBytes": 2048},
+        {"logStreamName": prefix + "JupyterLab/default/LifecycleConfigOnStart"},
     ])
     studio_sm(studio_client())
-    monkeypatch.setattr(studio, "logs_client", lambda: logs)
+    monkeypatch.setattr(render, "logs_client", lambda: logs)
     run_studio(sagemaker_tree, "logs", "--list")
     out = capsys.readouterr().out
     # Listed relative to the space, because that is what --stream takes.
@@ -1720,6 +1914,7 @@ def test_completers_return_nothing_when_the_api_is_unreachable(monkeypatch, comp
     monkeypatch.setattr(hub, "sm_client", boom)
     monkeypatch.setattr(studio, "sm_client", boom)
     monkeypatch.setattr(studio, "logs_client", boom)
+    monkeypatch.setattr(render, "logs_client", boom)
     assert completer.complete(ctx("x", args=["some-name"])) == []
 
 
@@ -1751,7 +1946,7 @@ def sagemaker_tree():
 def test_the_tree_has_every_group(sagemaker_tree):
     assert set(sagemaker_tree.children) == {"jobs", "hub", "studio", "hyperpod"}
     assert set(sagemaker_tree.children["jobs"].children) == {
-        "list", "describe", "watch", "stop"}
+        "list", "describe", "log", "watch", "stop"}
     assert set(sagemaker_tree.children["hub"].children) == {
         "hubs", "list", "versions", "describe", "files", "trace"}
     assert set(sagemaker_tree.children["studio"].children) == {
@@ -1816,11 +2011,13 @@ def _parser(node):
 def test_every_jobs_leaf_inherits_category(sagemaker_tree):
     group = sagemaker_tree.children["jobs"]
     assert "--category" in _flags(group)
+    # The leaves that take a job name need one supplied to parse at all.
+    needs_name = ("describe", "log", "stop")
     for name, leaf in group.children.items():
-        ns = _parser(leaf).parse_args(["j1"] if name in ("describe", "stop") else [])
+        ns = _parser(leaf).parse_args(["j1"] if name in needs_name else [])
         assert ns.category is None, name
         assert _parser(leaf).parse_args(
-            ["j1", "--category", "MyCategory"] if name in ("describe", "stop")
+            ["j1", "--category", "MyCategory"] if name in needs_name
             else ["--category", "MyCategory"]).category == "MyCategory"
 
 

@@ -2,7 +2,8 @@
 
 Talks to ListJobs / DescribeJob / StopJob through the ``awsut`` boto3 client
 factory, so what you see is the raw service response rather than an SDK
-rendering of it.
+rendering of it.  ``log`` reads the job's own output from CloudWatch, whose
+group name is derived from the category (see :data:`JOB_LOG_GROUP_ROOT`).
 
 Deliberate differences from the SDK's own status panel:
 
@@ -20,6 +21,11 @@ Deliberate differences from the SDK's own status panel:
   matching the ``list`` filters and reports each status change, printing a
   ``.`` heartbeat every 5s while nothing moves — so silence is visibly "still
   polling", not "hung".  ``Ctrl+C`` detaches.
+* ``log`` finds the stream rather than making the user name it: a stream is
+  ``<job>/<phase>-<timestamp>``, so it cannot be spelled from the job name
+  alone.  A job with no stream is explained by its status rather than reported
+  as an error — one too early to have logged and one whose logs aged out are
+  both empty, and only the status tells them apart.
 
 ``JobCategory`` is **required** by both ListJobs and DescribeJob, so a job
 cannot be looked up by name alone.  When ``--category`` is omitted,
@@ -63,18 +69,22 @@ from .render import (
     fmt_dur,
     fmt_time,
     guard,
+    log_streams,
     model_enum,
     NOT_FOUND_CODES,
+    positionals,
     print_header,
     print_labeled,
     print_table,
     parse_since,
+    read_log_stream,
     region_label,
     require_operation,
     section,
     show_document,
     sleep_with_dots,
     sm_client,
+    stream_table_rows,
 )
 
 # Categories to query in addition to the ones the loaded botocore model declares.
@@ -99,6 +109,20 @@ TERMINAL_BAD = {"Failed", "Stopped", "DeleteFailed"}
 TERMINAL = TERMINAL_OK | TERMINAL_BAD | {"Deleting"}
 
 JOB_STATUSES = sorted(TERMINAL | {"InProgress", "Stopping"})
+
+# Where a job's own output lands.  Derived from the category rather than read
+# back from the API because DescribeJob has no log-location member at all — the
+# only place the service states it is prose inside a transition's
+# ``StatusMessage``, which is not something to parse.  The trailing slash is
+# part of the group's real name, not a separator added here.
+JOB_LOG_GROUP_ROOT = "/aws/sagemaker/Job"
+
+# Value-taking flags across the ``jobs`` leaves, so :func:`positionals` can tell
+# a flag's value from a positional in a completion context — in
+# ``log --category X <TAB>``, ``X`` is not the job name being completed.
+VALUE_FLAGS = ("--category", "--status", "--contains", "--since", "--max",
+               "--sort", "-n", "--interval", "--timeout", "--stream",
+               "--lookback", "--log-group")
 
 # Group selectors accepted anywhere a category is: they stand for a set of
 # categories rather than one, and probing narrows over that set.
@@ -140,6 +164,21 @@ def category_not_offered(category: str, exc) -> bool:
     """
     return (error_code(exc) == "ValidationException"
             and category not in declared_categories())
+
+
+def job_log_group(category: str) -> str:
+    """The CloudWatch log group a category's jobs write to."""
+    return f"{JOB_LOG_GROUP_ROOT}/{category}/"
+
+
+def job_stream_prefix(job_name: str) -> str:
+    """The stream-name prefix that holds one job's streams.
+
+    A stream is ``<job name>/<phase>-<timestamp>``, and the phase segment is
+    named per category (``evaluation``, ``generation``), so the name cannot be
+    derived from the job alone — it has to be looked up under this prefix.
+    """
+    return f"{job_name}/"
 
 
 def resolve_categories(selector: str | None) -> list[str]:
@@ -415,6 +454,66 @@ def _creation_key(row):
     return row.get("CreationTime") or datetime.min.replace(tzinfo=timezone.utc)
 
 
+class _JobLogStreamCompleter(Completer):
+    """Streams under an already-typed job name, minus the job-name prefix.
+
+    Offers what ``--stream`` takes, which is the tail below the job — the rest
+    of the path is derived.
+    """
+
+    def complete(self, ctx: CompletionContext) -> list[Completion]:
+        typed = positionals(ctx.args, VALUE_FLAGS)
+        if not typed:
+            return []                      # no job named yet — nothing to scope to
+        job_name = typed[0]
+        selector = flag_value(ctx.args, "--category")
+        try:
+            streams = get_or_fetch(
+                ("awsut.sagemaker_job_streams", aws_env_key(), selector, job_name),
+                lambda: _job_streams_for_completion(job_name, selector),
+            )
+        except Exception:
+            return []
+        prefix = job_stream_prefix(job_name)
+        out = []
+        for s in streams:
+            tail = s["logStreamName"][len(prefix):]
+            if tail.startswith(ctx.prefix):
+                # No description: every row here is a log stream, so saying so
+                # would only be a column of the same word down the list.
+                out.append(Completion(value=tail))
+        return out
+
+
+def _job_streams_for_completion(job_name: str, selector: str | None) -> list[dict]:
+    """A job's streams, without asking SageMaker which category it is.
+
+    Completion cannot afford a DescribeJob probe per candidate category, and
+    does not need one: the log group name embeds the category, so trying each
+    candidate group and keeping whatever answers finds the streams in a single
+    parallel pass.  A group that does not exist answers with an empty list, so a
+    wrong guess costs nothing but the call.
+
+    De-duplicated by stream name: only one category really holds a given job, but
+    the fan-out cannot know which, and the same name surfacing from two groups
+    would put the same candidate in the picker twice.
+    """
+    prefix = job_stream_prefix(job_name)
+
+    def one(category):
+        try:
+            return log_streams(job_log_group(category), prefix)
+        except Exception:
+            return []                      # unauthorized / absent — just skip it
+
+    seen: dict[str, dict] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        for page in pool.map(one, resolve_categories(selector)):
+            for stream in page:
+                seen.setdefault(stream["logStreamName"], stream)
+    return list(seen.values())
+
+
 _SINCE_HINTS = ChoiceCompleter(["30m", "1h", "6h", "24h", "7d"])
 
 
@@ -532,6 +631,61 @@ def register_jobs(sagemaker) -> None:
         _render_job(desc, resolved, raw_config=raw_config)
 
     @jobs.command(
+        "log",
+        help="Read a job's own CloudWatch log stream",
+        params=[
+            arg("job_name", help="job whose log to read",
+                completer=_JobNameCompleter()),
+            arg("--stream", metavar="NAME", default=None,
+                completer=_JobLogStreamCompleter(),
+                help="stream below the job (default: its most recent one; a "
+                     "listed STREAM is what this takes)"),
+            arg("--list", action="store_true", dest="list_streams",
+                help="list the job's streams instead of reading one"),
+            arg("-f", "--follow", action="store_true",
+                help="keep polling for new events (Ctrl+C to stop)"),
+            arg("--lookback", type=int, default=0, metavar="MINUTES",
+                help="only events from the last N minutes (default: all)"),
+            arg("--log-group", metavar="GROUP", default=None,
+                help=f"override the derived {JOB_LOG_GROUP_ROOT}/<category>/ group"),
+        ],
+    )
+    @guard
+    def _jobs_log(job_name, category, stream, list_streams, follow, lookback,
+                  log_group):
+        # DescribeJob first even though only the category is strictly needed for
+        # the group name: it also yields the canonical job name and the status,
+        # which is what explains an empty log when there is one.
+        cli = sm_client()
+        desc, resolved = resolve_job(cli, job_name, category)
+        name = desc.get("JobName") or job_name
+        group = log_group or job_log_group(resolved)
+        prefix = job_stream_prefix(name)
+
+        if list_streams:
+            _list_job_streams(group, prefix, desc, resolved)
+            return
+
+        if stream:
+            full = f"{prefix}{stream}"
+        else:
+            found = log_streams(group, prefix)
+            if not found:
+                _explain_no_stream(group, prefix, desc, resolved)
+                return
+            full = found[0]["logStreamName"]
+            if len(found) > 1:
+                # Newest-first, so [0] is the current phase.  Say so rather than
+                # silently showing one of several.
+                print(f"{len(found)} streams under {prefix} — reading the most "
+                      f"recent; --list shows them all")
+
+        print_header(group, full)
+        read_log_stream(group, full, follow=follow, lookback=lookback,
+                        on_missing=lambda: _explain_no_stream(
+                            group, prefix, desc, resolved, named=stream))
+
+    @jobs.command(
         "watch",
         help="Poll a job and log changes; with no JOB_NAME, watch every matching job",
         params=[
@@ -584,6 +738,56 @@ def register_jobs(sagemaker) -> None:
                 return
         cli.stop_job(JobName=desc.get("JobName"), JobCategory=resolved)
         print(f"StopJob sent for {desc.get('JobName')}")
+
+
+# ─── log reading ────────────────────────────────────────────────────────────
+
+def _list_job_streams(group, prefix, desc, category) -> None:
+    rows = stream_table_rows(log_streams(group, prefix), prefix)
+    print_header(f"{len(rows)} stream(s)", f"{group}{prefix}")
+    print_table(["STREAM (below the job)", "FIRST EVENT", "LAST EVENT"],
+                rows,
+                note=(None if rows else
+                      _no_stream_note(prefix, desc, category)))
+
+
+def _explain_no_stream(group, prefix, desc, category, named=None) -> None:
+    """Say why there is no log, rather than failing.
+
+    A job that has not reached a logging phase yet has no stream, and that is a
+    real answer about the job — so it is reported on stdout at exit 0, like
+    ``studio logs`` does for a space whose lifecycle config never fired.
+    """
+    if named:
+        print(f"no stream {named!r} under {prefix} in {group}")
+        print("what does exist: awsut sagemaker jobs log "
+              f"{desc.get('JobName')} --list")
+        return
+    print(f"no log stream under {prefix} in {group}")
+    print(_no_stream_note(prefix, desc, category))
+
+
+def _no_stream_note(prefix, desc, category) -> str:
+    """The status is the explanation, so lead with it.
+
+    Two very different things produce an empty listing — a job too early to have
+    logged, and a finished job whose logs have aged out — and only its status
+    tells them apart.
+    """
+    state = fmt_state(state_of({
+        "JobStatus": desc.get("JobStatus"),
+        # DescribeJob spells the secondary status differently from ListJobs;
+        # state_of() reads the ListJobs name, so translate.
+        "JobSecondaryStatus": desc.get("SecondaryStatus"),
+    }))
+    if desc.get("JobStatus") in TERMINAL:
+        why = ("the job is finished, so either it never logged or its log group "
+               "has since been deleted")
+    else:
+        why = "a job writes nothing until it reaches a phase that logs"
+    return (f"the job is {state} — {why}\n"
+            f"if this category logs somewhere else, name the group with "
+            f"--log-group (this one was derived from category {category})")
 
 
 # ─── describe rendering ─────────────────────────────────────────────────────

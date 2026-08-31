@@ -980,7 +980,7 @@ cshell2/
 │       │   │   ├── render.py      # SageMaker-specific: clients, pagination,
 │       │   │   │                  # document rendering, ARN shapes — and
 │       │   │   │                  # re-exports _awsut_common for this package
-│       │   │   ├── jobs.py        # jobs list|describe|watch|stop
+│       │   │   ├── jobs.py        # jobs list|describe|log|watch|stop
 │       │   │   ├── hub.py         # hub hubs|list|versions|describe|files|trace
 │       │   │   ├── studio.py      # studio domains|spaces|apps|profiles|logs|
 │       │   │   │                  #        start|url|open|stop
