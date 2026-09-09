@@ -271,6 +271,36 @@ def sharing_type(space: dict) -> str:
     return "-"
 
 
+# The newer ResourceSpec members and the image members they alias, with the
+# ARN resource type each newer member is actually allowed to name.
+_ENVIRONMENT_ALIASES = {
+    "EnvironmentArn": (":environment/", "SageMakerImageArn"),
+    "EnvironmentVersionArn": (":environment-version/",
+                              "SageMakerImageVersionArn"),
+}
+
+
+def _resolve_environment_aliases(spec: dict) -> dict:
+    """Move an image ARN out of the ``Environment*Arn`` member holding it.
+
+    DescribeSpace fills ``EnvironmentArn`` / ``EnvironmentVersionArn`` in as
+    aliases of the image members, echoing the *image* ARNs into them — but
+    CreateApp validates those two against ``environment/…`` and
+    ``environment-version/…`` and rejects an ``image/…`` ARN outright, so the
+    spec cannot be sent back as it arrived.  Each alias holding an image ARN
+    is therefore moved onto the image member that admits it (a no-op when the
+    space already carries that member, which is the common case), and one
+    genuinely naming an environment is left where it is.
+    """
+    for member, (resource, image_member) in _ENVIRONMENT_ALIASES.items():
+        value = spec.get(member)
+        if not value or resource in value:
+            continue
+        spec.pop(member)
+        spec.setdefault(image_member, value)
+    return spec
+
+
 def default_resource_spec(space_desc: dict, app_type: str) -> dict:
     """The space's own DefaultResourceSpec for *app_type*, or ``{}``.
 
@@ -279,12 +309,13 @@ def default_resource_spec(space_desc: dict, app_type: str) -> dict:
     custom image version is a different image.  Reading the spec off the space
     and sending it back is what makes ``start`` equivalent to the launch
     command a CloudFormation stack emits, without knowing anything about the
-    stack.
+    stack.  What comes back is not accepted verbatim, though — see
+    :func:`_resolve_environment_aliases`.
     """
     settings = space_desc.get("SpaceSettings") or {}
     key = APP_SETTINGS_KEYS.get(app_type)
     spec = (settings.get(key) or {}).get("DefaultResourceSpec") if key else None
-    return dict(spec or {})
+    return _resolve_environment_aliases(dict(spec or {}))
 
 
 def ebs_size(space: dict) -> str:

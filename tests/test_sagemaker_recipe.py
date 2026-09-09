@@ -1190,6 +1190,8 @@ DOMAIN_A = {"DomainId": "d-aaa", "DomainName": "data-prep", "Status": "InService
 DOMAIN_B = {"DomainId": "d-bbb", "DomainName": "other-prep", "Status": "InService"}
 
 IMAGE_ARN = "arn:aws:sagemaker:us-west-2:111122223333:image/dataprep-beta"
+IMAGE_VERSION_ARN = ("arn:aws:sagemaker:us-west-2:111122223333:"
+                     "image-version/dataprep-beta/1")
 
 
 def _space(name="data-prep-space", *, sharing="Private", owner="data-prep-user",
@@ -1201,8 +1203,10 @@ def _space(name="data-prep-space", *, sharing="Private", owner="data-prep-user",
         settings["AppType"] = app_type
     key = studio.APP_SETTINGS_KEYS.get(app_type)
     if key and instance:
-        settings[key] = {"DefaultResourceSpec": {"InstanceType": instance,
-                                                 "SageMakerImageArn": image}}
+        spec = {"InstanceType": instance}
+        if image:
+            spec["SageMakerImageArn"] = image
+        settings[key] = {"DefaultResourceSpec": spec}
     return {"DomainId": "d-aaa", "SpaceName": name, "Status": "InService",
             "OwnershipSettings": {"OwnerUserProfileName": owner},
             "SpaceSharingSettings": {"SharingType": sharing},
@@ -1368,6 +1372,50 @@ def test_default_resource_spec_is_read_off_the_space_and_copied():
 
 def test_default_resource_spec_is_empty_for_an_app_type_the_space_has_no_settings_for():
     assert studio.default_resource_spec(_space(), "CodeEditor") == {}
+
+
+def test_default_resource_spec_drops_image_arns_echoed_into_the_environment_aliases():
+    # DescribeSpace reports a custom image in all four members; CreateApp only
+    # accepts environment ARNs in the Environment* two.
+    space = _space()
+    spec = (space["SpaceSettings"]["JupyterLabAppSettings"]
+            ["DefaultResourceSpec"])
+    spec["SageMakerImageVersionArn"] = IMAGE_VERSION_ARN
+    spec["EnvironmentArn"] = IMAGE_ARN
+    spec["EnvironmentVersionArn"] = IMAGE_VERSION_ARN
+    assert studio.default_resource_spec(space, "JupyterLab") == {
+        "InstanceType": "ml.t3.medium",
+        "SageMakerImageArn": IMAGE_ARN,
+        "SageMakerImageVersionArn": IMAGE_VERSION_ARN,
+    }
+
+
+def test_default_resource_spec_moves_an_image_arn_onto_the_member_that_admits_it():
+    # Same aliasing, but with no image member to fall back on — the ARN has to
+    # survive the move or the app would launch on the service's default image.
+    space = _space(image=None)
+    (space["SpaceSettings"]["JupyterLabAppSettings"]["DefaultResourceSpec"]
+     .update({"EnvironmentArn": IMAGE_ARN,
+              "EnvironmentVersionArn": IMAGE_VERSION_ARN}))
+    assert studio.default_resource_spec(space, "JupyterLab") == {
+        "InstanceType": "ml.t3.medium",
+        "SageMakerImageArn": IMAGE_ARN,
+        "SageMakerImageVersionArn": IMAGE_VERSION_ARN,
+    }
+
+
+def test_default_resource_spec_keeps_a_genuine_environment_arn():
+    space = _space(image=None)
+    env = "arn:aws:sagemaker:us-west-2:111122223333:environment/data-prep"
+    env_version = ("arn:aws:sagemaker:us-west-2:111122223333:"
+                   "environment-version/data-prep/1")
+    (space["SpaceSettings"]["JupyterLabAppSettings"]["DefaultResourceSpec"]
+     .update({"EnvironmentArn": env, "EnvironmentVersionArn": env_version}))
+    assert studio.default_resource_spec(space, "JupyterLab") == {
+        "InstanceType": "ml.t3.medium",
+        "EnvironmentArn": env,
+        "EnvironmentVersionArn": env_version,
+    }
 
 
 def test_sharing_type_reads_either_api_shape():
