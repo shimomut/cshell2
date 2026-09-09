@@ -6,3 +6,4 @@ __pycache__/
 .claude/
 *.swp
 .DS_Store
+*.code-workspace
