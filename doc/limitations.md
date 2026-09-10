@@ -85,6 +85,29 @@ completer one per typed token. Caching keeps the completer cost off the
 keystroke path but does not remove it. A category that graduates into the
 model stops costing anything, with no code change.
 
+## `awsut sagemaker studio watch` sees spaces and apps, but not the domain
+
+The watch resolves `--domain` once and then polls two listings —
+ListSpaces and ListApps — so the two resources that actually move during a
+start or a stop are covered, and the cost per tick is O(1) in the size of
+the domain rather than one DescribeApp per app. Three consequences:
+
+- **The domain's own status is not tracked.** A domain going `Updating` or
+  `Deleting` shows up only indirectly, as its spaces and apps changing or
+  as a poll starting to fail. Watching a domain teardown would need a
+  third call per tick (ListDomains) for a status that changes about twice
+  in a domain's life.
+- **`--max` bounds each listing, and the window can slide.** Both calls
+  page to `--max` items of a newest-first listing, so in a domain holding
+  more spaces or apps than the cap, a newly created one pushes the oldest
+  out of the window — and the watch reports that as `no longer listed`
+  when nothing was deleted. Raising `--max` or scoping with `--space`
+  avoids it.
+- **A space's deletion is inferred, not observed.** An app reaches
+  `Deleted` and says so, because ListApps keeps returning it; a space just
+  stops being listed, which is reported as a departure carrying its last
+  known status.
+
 ## Desktop notifications can still fire for an interactive command
 
 `notify.SKIP_COMMANDS` suppresses the obvious cases — editors, pagers,

@@ -42,6 +42,17 @@ at ``start`` instead of minting a link that fails in the recipient's browser.
 and differ only in where it is spent: printed for someone else, or handed to
 this machine's browser.
 
+``watch`` is the read-only view of the two slow operations in the table:
+``start`` and ``stop`` both return long before the app they asked for is
+actually there or actually gone, and their ``--wait`` only follows the *one*
+app that leaf acted on.  ``watch`` follows a whole domain — every space and
+every app in it — so a start triggered from the console, a ``stop --all``, and
+a space that is still ``Pending`` all show up on the same timeline.  Its space
+selector is a ``--space`` flag rather than the positional ``SPACE`` every other
+leaf here takes, because its no-argument default is the whole domain, not "the
+domain's only space": the positional's meaning is fixed across the group, and
+the same word must not resolve one way in one leaf and another way next door.
+
 Naming follows the rest of ``awsut``: a plural noun lists that resource type
 (as ``hub`` does with ``hubs`` / ``versions`` / ``files``, because a group
 holding several resource types has no single thing a bare ``list`` could mean),
@@ -134,6 +145,14 @@ APP_STATUSES = ["Deleted", "Deleting", "Failed", "InService", "Pending"]
 
 # An app in one of these is gone or going: nothing to stop, nothing billing.
 APP_DEAD = {"Deleted", "Deleting", "Failed"}
+
+# The statuses a resource leaves on its own, so ``watch`` has something coming
+# while anything sits in one.  Everything else — InService, Deleted, and the
+# three ``*Failed`` spellings a space can carry — only moves if someone acts,
+# which is what "settled" means when the watch decides whether it is done.
+APP_TRANSIENT = {"Pending", "Deleting"}
+SPACE_TRANSIENT = {"Pending", "Updating", "Deleting"}
+TRANSIENT = {"app": APP_TRANSIENT, "space": SPACE_TRANSIENT}
 
 # Every value-taking flag in this group, so :func:`positionals` can tell a
 # flag's value from a positional when a completer reads back what was typed.
@@ -868,6 +887,47 @@ def register_studio(sagemaker) -> None:
         print_header(log_group, full)
         _read_stream(log_group, full, follow, lookback)
 
+    @studio.command(
+        "watch",
+        help="Log every space and app status change in a domain — the progress "
+             "of a start or a stop (creates nothing; returns once nothing is in "
+             "flight, unless -f)",
+        params=[
+            _domain_flag(),
+            arg("--space", metavar="SPACE", completer=_SpaceCompleter(),
+                help="only this space and its apps (default: the whole domain)"),
+            arg("-f", "--follow", action="store_true",
+                help="keep watching after everything settles, rather than "
+                     "returning"),
+            arg("-n", "--interval", type=float, default=10.0, metavar="SEC",
+                help="poll seconds (default 10)"),
+            arg("--timeout", type=float, default=0.0, metavar="SEC",
+                help="give up after this long; 0 = no limit"),
+            arg("--max", type=int, default=100, dest="limit", metavar="N",
+                help="spaces and apps to track (default 100)"),
+        ],
+    )
+    @guard
+    def _watch(domain, space, follow, interval, timeout, limit):
+        """Poll the domain and print one line per change, as ``jobs watch`` does.
+
+        Returning once everything is settled is the default because that is what
+        the command is for — following an app from ``Pending`` to ``InService``,
+        or from ``Deleting`` to gone — and a watch that had to be interrupted to
+        end could not be put in a script or a ``&&`` chain.  ``-f`` turns it into
+        an open-ended monitor, which is also what makes a *pre-emptive* watch
+        possible: with nothing in flight yet, plain ``watch`` says so and
+        returns rather than sitting on a domain that may never move.
+        """
+        cli = sm_client()
+        resolved = resolve_domain(cli, domain)
+        # Resolve the space before the loop: an unknown name would otherwise
+        # match nothing every tick and read as "this domain is idle", when the
+        # truth is that the name is wrong.  DescribeSpace names the real ones.
+        if space:
+            space = resolve_space(cli, resolved["DomainId"], space)["SpaceName"]
+        _watch_studio(cli, resolved, space, interval, timeout, follow, limit)
+
     # ── starts and stops billing ───────────────────────────────────────────
 
     @studio.command(
@@ -1235,6 +1295,265 @@ def _failure_reason(cli, domain_id, space, app_type, app_name) -> str:
                             app_name).get("FailureReason") or ""
     except botocore.exceptions.ClientError:
         return ""
+
+
+# ─── watching a whole domain ────────────────────────────────────────────────
+
+def _watch_studio(cli, resolved, space, interval, timeout, follow, limit):
+    """Poll a domain's spaces and apps, logging each change until settled.
+
+    Two list calls per tick — ListSpaces and ListApps — rather than DescribeApp
+    per app, so the cost is O(1) in the size of the domain and a resource that
+    appears after the watch starts is picked up like any other change.  Prints
+    on change only, with a heartbeat between polls, so a five-minute launch
+    leaves a readable timeline instead of a repainted frame.
+
+    The two tracks are polled and reported independently: ListSpaces and
+    ListApps are separate permissions, and a tick that could not read one must
+    not read its own silence as "every space was deleted".
+    """
+    domain_id = resolved["DomainId"]
+    beat = Heartbeat()
+    scope = f"domain {domain_label(resolved)}"
+    if space:
+        scope += f" · space {space}"
+    print(f"watching Studio · {scope} · region {region_label()}")
+    print(f"  poll {interval}s · heartbeat {DOT_INTERVAL}s · "
+          f"{'follow' if follow else 'until settled'} · max {limit} spaces/apps")
+    print("  Ctrl+C to detach\n")
+
+    known: dict[tuple[str, str], str] = {}   # (kind, label) -> last status shown
+    quiet: dict[str, str] = {}               # app label -> the history it holds
+    polling = {"space", "app"}
+    first = True
+    deadline = time.monotonic() + timeout if timeout else None
+
+    while True:
+        stamp = datetime.now().strftime("%H:%M:%S")
+        baseline = first
+
+        if "space" in polling:
+            seen, records, keep = _poll_spaces(cli, domain_id, space, limit, beat)
+            if seen is not None:
+                _report_track(
+                    "space", seen, records, known, baseline=baseline,
+                    stamp=stamp, beat=beat, detail=_space_detail,
+                    reason=lambda s: _space_failure_reason(cli, domain_id, s))
+            if not keep:
+                _drop_track("space", known, polling)
+
+        if "app" in polling:
+            seen, records, keep = _poll_apps(
+                cli, domain_id, space, limit, baseline,
+                {label for kind, label in known if kind == "app"}, quiet, beat)
+            if seen is not None:
+                _report_track(
+                    "app", seen, records, known, baseline=baseline,
+                    stamp=stamp, beat=beat, detail=instance_of,
+                    reason=lambda a: _failure_reason(
+                        cli, domain_id, a.get("SpaceName"), a.get("AppType"),
+                        a.get("AppName")))
+            if not keep:
+                _drop_track("app", known, polling)
+
+        if not polling:
+            beat.clear()
+            print(f"[{stamp}] nothing left to poll; stopping")
+            return
+
+        if first:
+            beat.clear()
+            if not known:
+                print(f"[{stamp}] nothing to watch here yet")
+            print()
+            first = False
+
+        moving = _moving(known)
+        if not moving and not follow:
+            beat.clear()
+            if baseline:
+                print(f"[{stamp}] nothing is starting or stopping; "
+                      "-f/--follow waits for something to")
+            else:
+                print(f"[{stamp}] settled — nothing is starting or stopping "
+                      "any more")
+            return
+
+        if deadline and time.monotonic() > deadline:
+            beat.clear()
+            print(f"[{stamp}] timeout after {fmt_dur(timeout)}; still moving: "
+                  + (", ".join(moving) or "nothing"))
+            return
+
+        try:
+            sleep_with_dots(interval, beat)
+        except KeyboardInterrupt:
+            beat.clear()
+            print(f"\ndetached; {len(moving)} resource(s) still moving"
+                  + (": " + ", ".join(moving) if moving else ""))
+            return
+
+
+def _moving(known) -> list[str]:
+    """The tracked resources still on their way somewhere, as ``kind label``."""
+    return sorted(f"{kind} {label}" for (kind, label), status in known.items()
+                  if status in TRANSIENT[kind])
+
+
+def _drop_track(kind, known, polling) -> None:
+    """Stop polling one kind, and forget what it had — a track that can no
+    longer be read must not leave a resource pinned as "still moving" forever,
+    which would keep the watch from ever settling."""
+    polling.discard(kind)
+    for key in [k for k in list(known) if k[0] == kind]:
+        known.pop(key)
+
+
+def _poll_spaces(cli, domain_id, space, limit, beat):
+    """``({label: status}, {label: summary}, keep_polling)`` for the spaces."""
+    try:
+        spaces = list_spaces(cli, domain_id, limit)
+    except botocore.exceptions.ClientError as exc:
+        return None, None, _survives(exc, "spaces not listed", beat)
+    wanted = [s for s in spaces if s.get("SpaceName")
+              and (space is None or s["SpaceName"] == space)]
+    return ({s["SpaceName"]: s.get("Status") or "?" for s in wanted},
+            {s["SpaceName"]: s for s in wanted},
+            True)
+
+
+def _poll_apps(cli, domain_id, space, limit, baseline, tracked, quiet, beat):
+    """``({label: status}, {label: summary}, keep_polling)`` for the apps.
+
+    Labelled ``space/type/name`` — the triple DeleteApp takes, and the only
+    thing that identifies an app, since a space can run more than one.
+
+    *quiet* is this function's memory of the rows it filed away as history (see
+    :func:`_stays_quiet`) and is rewritten each call, so a filed row that later
+    moves is handed back as news and one that drops out of the listing is
+    forgotten without a word.
+    """
+    try:
+        apps = list_apps(cli, domain_id, space, limit)
+    except botocore.exceptions.ClientError as exc:
+        return None, None, _survives(exc, "apps not listed", beat)
+    seen, records, filed = {}, {}, {}
+    for a in apps:
+        label = (f"{a.get('SpaceName') or '-'}/{a.get('AppType') or '?'}"
+                 f"/{a.get('AppName') or '?'}")
+        status = a.get("Status") or "?"
+        if _stays_quiet(label, status, tracked, quiet, baseline):
+            filed[label] = status
+            continue
+        seen[label] = status
+        records[label] = a
+    quiet.clear()
+    quiet.update(filed)
+    return seen, records, True
+
+
+def _stays_quiet(label, status, tracked, quiet, baseline) -> bool:
+    """Is this app row history to be filed away rather than reported?
+
+    ListApps keeps returning an app long after it is gone, so a domain that has
+    launched a hundred apps answers with a hundred rows — and announcing them
+    would bury the one row that is actually moving.  A ``Deleted`` app the watch
+    has never seen alive is never news; a ``Failed`` one is news only if it
+    failed *during* the watch, which at baseline it cannot have.  ``Deleting``
+    is in flight and is exactly what someone who just ran ``stop`` is watching
+    for, so it is never quiet.
+
+    Two things make this a filing rather than a skip.  An app already being
+    followed is never quiet, because one followed into ``Deleting`` has to be
+    allowed to reach ``Deleted`` — that transition is the whole answer to "did
+    the stop finish".  And a row filed at baseline stays filed only while its
+    status does not move: an app name is reused (a space's app is always
+    ``default``), so yesterday's ``Deleted`` row is where a fresh ``Pending``
+    shows up, and re-filing it on status alone would hide the very launch the
+    watch was started for.
+    """
+    if label in tracked:
+        return False
+    if label in quiet:
+        return quiet[label] == status
+    if status == "Deleted":
+        return True
+    return baseline and status == "Failed"
+
+
+def _survives(exc, what: str, beat) -> bool:
+    """Report a failed poll; say whether the track is worth polling again.
+
+    A denial is the same denial every tick and would spam the timeline under
+    every dot, so that track is dropped after saying so once.  Anything else
+    may be throttling or a blip, which is worth another try.
+    """
+    beat.clear()
+    print(f"error: {what}: {api_message(exc)}", file=sys.stderr)
+    if error_code(exc) in ("AccessDeniedException", "UnrecognizedClientException"):
+        print(f"       not polling {what.split()[0]} again", file=sys.stderr)
+        return False
+    return True
+
+
+def _space_detail(space_summary: dict) -> str:
+    """What a space is, for the line announcing it — sharing and app type."""
+    sharing = sharing_type(space_summary)
+    app_type = (space_summary.get("SpaceSettingsSummary") or {}).get("AppType")
+    return " ".join(p for p in ("" if sharing == "-" else sharing,
+                                app_type or "") if p)
+
+
+def _space_failure_reason(cli, domain_id, space_summary) -> str:
+    try:
+        return describe_space(
+            cli, domain_id, space_summary["SpaceName"]).get("FailureReason") or ""
+    except (botocore.exceptions.ClientError, SmError):
+        return ""
+
+
+def _mark(status: str) -> str:
+    """One glyph per state, so the timeline scans without reading the words."""
+    if status == "InService":
+        return "✓"
+    if status.endswith("Failed"):        # Failed / Update_Failed / Delete_Failed
+        return "✗"
+    if status == "Deleted":
+        return "·"                       # gone — which for a stop is success
+    return "…"
+
+
+def _report_track(kind, seen, records, known, *, baseline, stamp, beat,
+                  detail, reason):
+    """Log one kind's appearances, status changes and departures.
+
+    A leading ``·`` marks the baseline pass, ``+`` a resource that showed up
+    later, ``-`` one that stopped being listed, and an indented status change
+    the rest.  Any transition into a failed state pulls the reason with a
+    Describe call — a bare ``Failed`` on the timeline is the one line nobody can
+    act on.
+    """
+    for label, status in sorted(seen.items()):
+        prev = known.get((kind, label))
+        if prev == status:
+            continue
+        known[(kind, label)] = status
+        beat.clear()
+        if prev is None:
+            extra = detail(records[label])
+            print(f"[{stamp}] {'·' if baseline else '+'} {_mark(status)} "
+                  f"{kind} {label}  {status}" + (f"  {extra}" if extra else ""))
+        else:
+            print(f"[{stamp}]   {_mark(status)} {kind} {label}  "
+                  f"{prev} → {status}")
+        if status.endswith("Failed"):
+            for line in (reason(records[label]) or "").splitlines():
+                print(f"           {line}")
+
+    for label in [lbl for k, lbl in list(known) if k == kind and lbl not in seen]:
+        status = known.pop((kind, label))
+        beat.clear()
+        print(f"[{stamp}] - {kind} {label}  no longer listed (was {status})")
 
 
 # ─── reading the boot log ───────────────────────────────────────────────────

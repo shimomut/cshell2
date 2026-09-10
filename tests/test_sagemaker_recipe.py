@@ -1780,6 +1780,213 @@ def test_profiles_says_so_for_a_domain_with_none(
 
 
 # ---------------------------------------------------------------------------
+# studio watch — a timeline of what is starting and stopping
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def instant_polls(monkeypatch):
+    """Make every poll interval zero, so a watch test runs at full speed.
+
+    Returns the installer, so a test of ``-f`` — which by design never returns
+    on its own — can bound the run the way a person does, with Ctrl+C, instead
+    of racing a tiny ``--timeout``.
+    """
+    def install(detach_after=None):
+        polls = {"n": 0}
+
+        def sleep(seconds, beat):
+            polls["n"] += 1
+            if detach_after is not None and polls["n"] >= detach_after:
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(studio, "sleep_with_dots", sleep)
+
+    install()
+    return install
+
+
+def ticking(*frames):
+    """An operation whose successive calls return successive *frames*.
+
+    The last frame repeats, so a watch that polls once more than the test
+    scripted sees no spurious change.
+    """
+    state = {"i": 0}
+
+    def call(**params):
+        frame = frames[min(state["i"], len(frames) - 1)]
+        state["i"] += 1
+        return frame
+
+    return call
+
+
+def app_frames(*statuses, space="data-prep-space"):
+    """One ListApps response per status, for a single app changing state."""
+    return ticking(*({"Apps": [_app(space, status=s)]} for s in statuses))
+
+
+def test_watch_follows_an_app_from_pending_to_inservice(
+        sagemaker_tree, studio_sm, instant_polls, capsys):
+    studio_sm(studio_client(
+        list_apps=app_frames("Pending", "Pending", "InService")))
+    run_studio(sagemaker_tree, "watch")
+    out = capsys.readouterr().out
+    # Baseline states it, the transition line names both ends, and the run ends
+    # on its own once nothing is in flight — no Ctrl+C needed.
+    assert "app data-prep-space/JupyterLab/default  Pending" in out
+    assert "Pending → InService" in out
+    assert "settled" in out
+
+
+def test_watch_follows_a_stop_to_gone(
+        sagemaker_tree, studio_sm, instant_polls, capsys):
+    """``Deleting`` is in flight, so it is baselined and then followed."""
+    studio_sm(studio_client(list_apps=app_frames("Deleting", "Deleted")))
+    run_studio(sagemaker_tree, "watch")
+    out = capsys.readouterr().out
+    assert "Deleting" in out and "Deleting → Deleted" in out
+    assert "settled" in out
+
+
+def test_watch_keeps_history_out_of_the_baseline(
+        sagemaker_tree, studio_sm, instant_polls, capsys):
+    """ListApps returns every app the domain ever ran; a watch is about now.
+
+    A hundred rows of yesterday's apps would bury the one that is moving, and
+    neither a ``Deleted`` nor an already-``Failed`` app can transition again.
+    """
+    history = [_app("old-space", status="Deleted"),
+               _app("burnt-space", status="Failed")]
+    studio_sm(studio_client(list_apps=ticking(
+        {"Apps": history + [_app("live-space", status="Pending")]},
+        {"Apps": history + [_app("live-space", status="InService")]},
+    )))
+    run_studio(sagemaker_tree, "watch")
+    out = capsys.readouterr().out
+    assert "Pending → InService" in out
+    # Not on the second pass either: a row filed as history stays filed while
+    # its status holds, rather than resurfacing as one that just appeared.
+    assert "old-space" not in out and "burnt-space" not in out
+
+
+def test_watch_reports_a_relaunch_into_a_dead_apps_row(
+        sagemaker_tree, studio_sm, instant_polls, capsys):
+    """A space's app is always named ``default``, so a relaunch reuses the row.
+
+    Filing yesterday's ``Deleted`` row away must therefore be conditional on it
+    not moving — otherwise the launch this watch exists to follow is hidden
+    behind the corpse of the last one.  Needs ``-f``: with only a dead app in
+    the domain there is nothing in flight, and a plain watch has an answer for
+    that already.
+    """
+    studio_sm(studio_client(
+        list_apps=app_frames("Deleted", "Pending", "InService")))
+    instant_polls(detach_after=3)
+    run_studio(sagemaker_tree, "watch", "-f")
+    out = capsys.readouterr().out
+    assert "app data-prep-space/JupyterLab/default  Pending" in out
+    assert "Pending → InService" in out
+    assert "detached" in out
+
+
+def test_watch_returns_at_once_when_nothing_is_moving(
+        sagemaker_tree, studio_sm, instant_polls, capsys):
+    """An idle domain gets an answer, not a wait — and is told how to wait."""
+    studio_sm(studio_client(apps=[_app(status="InService")]))
+    run_studio(sagemaker_tree, "watch")
+    out = capsys.readouterr().out
+    assert "nothing is starting or stopping" in out
+    assert "--follow" in out
+
+
+def test_watch_explains_a_failure_instead_of_just_naming_it(
+        sagemaker_tree, studio_sm, instant_polls, capsys):
+    """A bare ``Failed`` is the one line nobody can act on, so pull the reason."""
+    studio_sm(studio_client(
+        list_apps=app_frames("Pending", "Failed"),
+        describe_app={"Status": "Failed",
+                      "FailureReason": "lifecycle config exited 1"},
+    ))
+    run_studio(sagemaker_tree, "watch")
+    out = capsys.readouterr().out
+    assert "Pending → Failed" in out
+    assert "lifecycle config exited 1" in out
+
+
+def test_watch_reports_a_space_that_is_still_pending(
+        sagemaker_tree, studio_sm, instant_polls, capsys):
+    """The space is the container: no app can start until it is InService."""
+    pending = _space_summary("data-prep-space")
+    pending["Status"] = "Pending"
+    ready = dict(pending, Status="InService")
+    studio_sm(studio_client(
+        list_spaces=ticking({"Spaces": [pending]}, {"Spaces": [ready]})))
+    run_studio(sagemaker_tree, "watch")
+    out = capsys.readouterr().out
+    assert "space data-prep-space  Pending" in out
+    assert "Pending → InService" in out
+
+
+def test_watch_scopes_to_one_space_server_side(
+        sagemaker_tree, studio_sm, instant_polls, capsys):
+    cli = studio_sm(studio_client(
+        spaces=[_space_summary("data-prep-space"), _space_summary("other")],
+        apps=[_app("data-prep-space", status="InService")]))
+    run_studio(sagemaker_tree, "watch", "--space", "data-prep-space")
+    out = capsys.readouterr().out
+    assert "other" not in out
+    assert all(p.get("SpaceNameEquals") == "data-prep-space"
+               for p in calls_of(cli, "list_apps"))
+
+
+def test_watch_refuses_an_unknown_space_rather_than_reading_idle(
+        sagemaker_tree, studio_sm, instant_polls, capsys):
+    """A typo would otherwise match nothing every tick and look like an idle
+    domain — the opposite of an answer."""
+    studio_sm(studio_client(spaces=[_space_summary("data-prep-space")]))
+    run_studio(sagemaker_tree, "watch", "--space", "ghost")
+    err = capsys.readouterr().err
+    assert "ghost" in err and "data-prep-space" in err
+
+
+def test_watch_survives_a_track_it_cannot_read(
+        sagemaker_tree, studio_sm, instant_polls, capsys):
+    """ListSpaces is a permission of its own; losing it costs that track only."""
+    denied = client_error("AccessDeniedException", "no ListSpaces", "ListSpaces")
+
+    def refuse(**p):
+        raise denied
+
+    studio_sm(studio_client(list_spaces=refuse,
+                            list_apps=app_frames("Pending", "InService")))
+    run_studio(sagemaker_tree, "watch")
+    captured = capsys.readouterr()
+    assert "spaces not listed" in captured.err
+    assert "Pending → InService" in captured.out
+
+
+def test_watch_says_what_is_still_moving_when_it_gives_up(
+        sagemaker_tree, studio_sm, instant_polls, capsys):
+    studio_sm(studio_client(apps=[_app(status="Pending")]))
+    run_studio(sagemaker_tree, "watch", "--timeout", "0.0001")
+    out = capsys.readouterr().out
+    assert "timeout" in out
+    assert "app data-prep-space/JupyterLab/default" in out
+
+
+def test_watch_keeps_going_past_settled_with_follow(
+        sagemaker_tree, studio_sm, instant_polls, capsys):
+    """``-f`` is what makes watching *before* a start possible."""
+    studio_sm(studio_client(apps=[_app(status="InService")]))
+    instant_polls(detach_after=2)
+    run_studio(sagemaker_tree, "watch", "-f")
+    out = capsys.readouterr().out
+    assert "nothing is starting or stopping" not in out
+    assert "detached; 0 resource(s) still moving" in out
+
+
+# ---------------------------------------------------------------------------
 # studio — "is anything running here?" reads the same everywhere
 # ---------------------------------------------------------------------------
 
@@ -1998,8 +2205,8 @@ def test_the_tree_has_every_group(sagemaker_tree):
     assert set(sagemaker_tree.children["hub"].children) == {
         "hubs", "list", "versions", "describe", "files", "trace"}
     assert set(sagemaker_tree.children["studio"].children) == {
-        "domains", "spaces", "apps", "profiles", "log", "start", "url", "open",
-        "stop"}
+        "domains", "spaces", "apps", "profiles", "log", "watch", "start", "url",
+        "open", "stop"}
     assert set(sagemaker_tree.children["hyperpod"].children) == {
         "create", "update", "scale", "add-ig", "remove-ig", "delete-nodes",
         "reboot-nodes", "replace-nodes", "upgrade-ami", "delete", "list",

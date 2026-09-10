@@ -983,7 +983,7 @@ cshell2/
 │       │   │   ├── jobs.py        # jobs list|describe|log|watch|stop
 │       │   │   ├── hub.py         # hub hubs|list|versions|describe|files|trace
 │       │   │   ├── studio.py      # studio domains|spaces|apps|profiles|log|
-│       │   │   │                  #        start|url|open|stop
+│       │   │   │                  #        watch|start|url|open|stop
 │       │   │   │                  #        (Domain/Space/App)
 │       │   │   └── hyperpod.py    # hyperpod create|update|scale|add-ig|
 │       │   │                      #        remove-ig|delete-nodes|reboot-nodes|
