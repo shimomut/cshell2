@@ -228,7 +228,8 @@ def register() -> None:
 
 Most recipes only add completion — the external tool does the printing. A few
 carry Python handlers instead and print resource listings themselves (`awsut`
-and its `sagemaker` subtree are the built-in examples). Those share one output
+and its `sagemaker` / `bedrock-agentcore` subtrees are the built-in examples).
+Those share one output
 contract, defined and documented in
 [`src/cshell2/recipes/_awsut_common.py`](../src/cshell2/recipes/_awsut_common.py).
 Read that module's docstring before adding a leaf; the shape in brief:
@@ -249,10 +250,15 @@ Three consequences worth stating, because each is easy to get wrong:
   domain {d}")` reads fine on its own and reads *inconsistent* next to
   `0 instance(s) · region us-west-2`. Let the header report the count and put
   anything situational in `note=`.
-- **`_awsut_common` builds no AWS clients**, on purpose: it sits above both
-  `awsut.py` and the `_awsut_sagemaker/` subpackage so either can import it
-  without a cycle. `_awsut_sagemaker/render.py` re-exports its names, so a
-  module in that subpackage reads every instrument off `render`.
+- **`_awsut_common` builds no AWS clients**, on purpose: it sits above
+  `awsut.py` and above every per-service subpackage (`_awsut_sagemaker/`,
+  `_awsut_agentcore/`) so any of them can import it without a cycle. Each
+  subpackage's `render.py` re-exports its names, so a module in that subpackage
+  reads every instrument off `render`. It also holds what is about *AWS shapes*
+  rather than one service — pagination, model introspection, the YAML-ish JSON
+  renderer, the watch heartbeat, the completion-context flag readers — since a
+  second service group would otherwise copy them; what stays in a `render.py` is
+  whatever needs a client or knows that service's vocabulary.
 - **Name a shared helper module with a leading underscore.** `enable("*")`
   discovers recipes by globbing `*.py` and calls `register()` on each hit, so a
   support module without one would break config loading for every `enable("*")`

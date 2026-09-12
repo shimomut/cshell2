@@ -969,9 +969,27 @@ cshell2/
 │       │   ├── _awsut_common.py   # the output contract for the whole `awsut`
 │       │   │                      # tree: print_header/print_table/
 │       │   │                      # print_labeled/section, guard + SmError,
-│       │   │                      # fmt_time/fmt_dur/fmt_bytes.  Above both
-│       │   │                      # halves and builds no AWS client, so either
+│       │   │                      # fmt_time/fmt_dur/fmt_bytes — plus what is
+│       │   │                      # about AWS shapes rather than one service
+│       │   │                      # (paged, model introspection, yaml_lines,
+│       │   │                      # Heartbeat, flag_value/positionals).  Above
+│       │   │                      # awsut.py and every service subpackage, and
+│       │   │                      # builds no AWS client, so any of them
 │       │   │                      # imports it without a cycle
+│       │   ├── _awsut_agentcore/  # `awsut bedrock-agentcore` group
+│       │   │   ├── __init__.py    # register_agentcore(awsut) — called by awsut.register()
+│       │   │   ├── render.py      # AgentCore-specific: a client per *plane*
+│       │   │   │                  # (control_client creates/describes,
+│       │   │   │                  # data_client reaches inside — two boto3
+│       │   │   │                  # services, one Var each), the status
+│       │   │   │                  # vocabulary shared across resource types,
+│       │   │   │                  # render_detail/print_reasons, cache_key
+│       │   │   ├── harness.py     # harness list|describe|versions|endpoints|
+│       │   │   │                  #         watch|delete
+│       │   │   └── memory.py      # memory list|describe|strategies|watch|
+│       │   │                      #        delete (control plane) + actors|
+│       │   │                      #        sessions|events|event|records|
+│       │   │                      #        record|search|jobs (data plane)
 │       │   ├── _awsut_sagemaker/  # `awsut sagemaker` group.  Leading `_`, like
 │       │   │   │                  # every support module here: enable("*")
 │       │   │   │                  # offers only stems without one, since it

@@ -42,6 +42,78 @@ here in enhancements.md until each item lands.
   the terminal rather than land in the file. Likely correct; codify
   with a test once `@time` ships.
 
+## `awsut bedrock-agentcore` — the rest of the service
+
+Two groups are shipped read-only plus `delete`:
+`harness` (`_awsut_agentcore/harness.py`: `list`, `describe`, `versions`,
+`endpoints`, `watch`, `delete`) and `memory`
+(`_awsut_agentcore/memory.py`: `list`, `describe`, `strategies`, `watch`,
+`delete` on the control plane; `actors`, `sessions`, `events`, `event`,
+`records`, `record`, `search`, `jobs` on the data plane). What is
+deliberately not in those cuts, roughly in the order it becomes worth
+having:
+
+- **`harness invoke`.** `InvokeHarness` answers with an **event stream**,
+  not a response dict, so it needs a renderer that prints events as they
+  arrive and flushes per event (the same reason `read_log_stream` flushes
+  per pass — in a pipeline, `| grep` must see output before the stream
+  ends). The plumbing it used to also need is now in place: the data-plane
+  client and `var agentcore_data_endpoint=` landed with the `memory`
+  group. It is the leaf that makes `harness` useful for more than
+  inspection.
+- **`harness create` / `update`, and endpoint lifecycle**
+  (`Create/Update/DeleteHarnessEndpoint`). A harness is defined by the
+  `model` / `systemPrompt` / `tools` / `skills` / `memory` structures
+  that `describe` prints — a file's worth of JSON, not a line of flags.
+  So the shape to design is almost certainly
+  `create --config FILE` (`-` for stdin) with a handful of flags for the
+  scalars (`--execution-role`, `--max-iterations`, …), which makes
+  `describe --raw` the way you get a starting point to edit. Deciding
+  that is the whole design; the calls themselves are one-liners.
+- **`memory create` / `update`.** `CreateMemory` takes the
+  `memoryStrategies` list that `describe` prints and `strategies` tables,
+  plus `eventExpiryDuration` and the KMS/role scalars — the same file's
+  worth of JSON as `harness create`, so the same `--config FILE` design,
+  decided once for both. `UpdateMemory` is harder than it looks: its
+  strategy input is a three-way add/modify/delete diff rather than a
+  replacement list, which is a flag surface worth designing rather than
+  transcribing.
+- **Writing into a memory, and pruning one.** `CreateEvent` (append a
+  turn), `DeleteEvent`, `DeleteMemoryRecord`, the `BatchCreate` /
+  `BatchUpdate` / `BatchDeleteMemoryRecords` trio, and
+  `StartMemoryExtractionJob`. Left out for two different reasons.
+  `CreateEvent` and the batch record calls take a payload, so they belong
+  with the `--config FILE` design above. `DeleteEvent` /
+  `DeleteMemoryRecord` are one-liners, but they destroy *part* of a live
+  conversation, which is a worse failure mode than `memory delete`'s: there
+  is no way to tell from the shell whether an event is one the agent is
+  mid-way through, and no undo. If they land they should take `memory
+  delete`'s `-y` confirmation and print the payload before asking — which
+  `memory event` already knows how to render.
+- **The other AgentCore resource types** — gateways, browsers, code
+  interpreters, runtimes. Each is a sibling group under
+  `bedrock-agentcore`, and the shared plumbing they need (a client per
+  plane, status vocabulary, `cache_key`, `mark_for`, `render_detail`) is
+  already in `_awsut_agentcore/render.py` — `statuses(operation, list_key)`
+  reads a resource's status enum out of whatever list operation it has, so
+  a new group inherits the marks without hard-coding words. Note that
+  **browser and code-interpreter sessions are a different thing from
+  `memory sessions`**: `Start/List/StopBrowserSession` and the
+  code-interpreter equivalents are live compute sessions, not stored
+  conversations, so they belong to their own group's leaves — which is why
+  `memory`'s docstring says up front which sense of "session" it means.
+- **`list` server-side filters.** `ListHarnesses` and `ListMemories` both
+  take only `maxResults` / `nextToken`, so `--status` / `--contains` filter
+  in the shell after the fetch, which interacts with `--max` (the note
+  under the table says so when it does). If the API ever grows filters,
+  they should move server-side and that note should go away.
+- **`memory sessions` with no ACTOR costs one call per actor.**
+  `ListSessions` requires an `actorId`, so the "every actor" default fans
+  out over `ListActors` and reports how many actors it scanned. Fine for a
+  handful, linear in a memory holding thousands. There is no cross-actor
+  session listing to use instead, so the options are concurrency (a thread
+  pool over actors) or requiring ACTOR once the count is large.
+
 ## Architectural follow-ups
 
 The features have shipped (Python pipelines, decorators, `@bg`,

@@ -11,9 +11,12 @@ Available recipes:
     aws       drives the AWS CLI v2 ``aws_completer`` binary; covers every
               service, operation, flag, and live AWS resource discovery
     awsut     AWS utility commands — console URL opening, recent cost report,
-              ec2 / cloudwatch logs / cloudformation, and, under
+              ec2 / cloudwatch logs / cloudformation; under
               `awsut sagemaker ...`, jobs + hub content (with ARN lineage
-              tracing), Studio domains/spaces/apps, and HyperPod clusters
+              tracing), Studio domains/spaces/apps, and HyperPod clusters; and
+              under `awsut bedrock-agentcore ...`, Harness resources with their
+              versions and endpoints, and Memory resources with the actors,
+              sessions, events and extracted records they hold
     chmod     mode operands (common octal + symbolic) and file completion
     chown     USER / USER:GROUP completion (system users + groups), files
     cp        copy flags (BSD/macOS vs GNU/Linux), file completion
@@ -105,8 +108,9 @@ def _discover_all_recipes() -> list[str]:
     ``register()`` function, and support modules a recipe imports
     (``_awsut_common.py``, a user's own ``_helpers.py``) have none, so globbing
     them in would make ``enable("*")`` fail on an ``AttributeError``.  The
-    ``_awsut_sagemaker`` subpackage is skipped for the same reason and already
-    escaped by being a directory rather than a ``.py`` file.
+    ``_awsut_sagemaker`` / ``_awsut_agentcore`` subpackages are skipped for the
+    same reason and already escaped by being directories rather than ``.py``
+    files.
     """
     found: set[str] = set()
 

@@ -14,12 +14,17 @@ Provides the ``awsut`` command tree:
   delete-nodes|reboot-nodes|replace-nodes|upgrade-ami|delete|
   list|describe|watch|log|ssm|ssh|run|search-capacity|
   kubeconfig|events``
+* ``awsut bedrock-agentcore harness list|describe|versions|endpoints|watch|
+  delete``
+* ``awsut bedrock-agentcore memory list|describe|strategies|watch|delete|
+  actors|sessions|events|event|records|record|search|jobs``
 
-The ``sagemaker`` group lives in the ``_awsut_sagemaker`` subpackage (this
-module is already long enough); it is attached from :func:`register` because
-``CommandRegistry`` roots cannot be re-opened from a second module.
+Each service group lives in its own subpackage — ``_awsut_sagemaker``,
+``_awsut_agentcore`` (this module is already long enough) — and is attached
+from :func:`register` because ``CommandRegistry`` roots cannot be re-opened
+from a second module.
 
-Both halves print to one contract — header line, table, ``error:`` on stderr —
+Every group prints to one contract — header line, table, ``error:`` on stderr —
 defined in :mod:`cshell2.recipes._awsut_common`.  The leaves here were ported
 from a shell that printed colon-separated one-liners; they render through those
 helpers now, so ``awsut ec2 list`` and ``awsut sagemaker studio apps`` line up
@@ -30,8 +35,11 @@ Profile and region switching live in the ``aws`` recipe as ``Var`` entries
 and SageMaker service name are also exposed as ``Var`` entries — set them
 at the prompt with ``var sagemaker_endpoint=...`` /
 ``var sagemaker_service_name=...`` (or ``var sagemaker_endpoint=`` to
-unset).  These two are stored in module-level Python variables (not
-``os.environ``), so they don't leak into subprocesses.
+unset), as are the AgentCore endpoints — one per plane, since a memory is
+reached through both: ``var agentcore_control_endpoint=...`` and
+``var agentcore_data_endpoint=...``, registered by that subpackage.  All
+of these are stored in module-level Python variables (not ``os.environ``), so
+they don't leak into subprocesses.
 
 User-customisable defaults (read from ``~/.cshell2/config.py`` if set):
 
@@ -515,10 +523,12 @@ def register() -> None:
     _register_logs(awsut)
     _register_cf(awsut)
 
-    # Lazy: the subpackage does `from .. import awsut`, so it can only be
-    # imported once this module is fully loaded.
+    # Lazy: these subpackages do `from .. import awsut`, so they can only be
+    # imported once this module is fully loaded.  Each registers its own Vars.
+    from ._awsut_agentcore import register_agentcore
     from ._awsut_sagemaker import register_sagemaker
     register_sagemaker(awsut)
+    register_agentcore(awsut)
 
     var_registry.register(_SagemakerEndpointVar())
     var_registry.register(_SagemakerServiceNameVar())

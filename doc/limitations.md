@@ -108,6 +108,31 @@ the domain rather than one DescribeApp per app. Three consequences:
   stops being listed, which is reported as a departure carrying its last
   known status.
 
+## `awsut bedrock-agentcore memory` derives the name from the id, and resolves a name by listing
+
+`ListMemories` returns `id` / `status` / `createdAt` / `updatedAt` /
+`managedByResourceArn` and no name, so `memory list`'s NAME column is
+computed by `memory.name_of()`: strip a trailing `-` plus ten
+alphanumerics. That is exact for today's ids — a memory id is
+`<name>-<10 chars>` and the name pattern
+(`[a-zA-Z][a-zA-Z0-9_]{0,47}`) forbids `-` — but it is a *format*
+assumption, not a documented contract. Two consequences:
+
+- **A future id format silently changes the column.** An id that doesn't
+  end in that shape is printed whole (so nothing is mangled), but a longer
+  suffix would leave part of it in the NAME cell. The `help` text marks
+  the column as derived; `describe` calls GetMemory and prints the real
+  `name`, which is the way to check.
+- **A name selector costs a full listing.** There is no lookup-by-name
+  API, so `resolve_memory_id` pages through up to
+  `memory.RESOLVE_MAX` (500) memories and matches on the derived name.
+  Pasting an id — or an ARN — skips it entirely. In a region with more
+  than 500 memories, a name that exists past the cap reports as
+  not-found; the error names what it did see, which is the hint that the
+  cap was hit.
+
+Neither applies to the data-plane leaves, which only ever take an id.
+
 ## Desktop notifications can still fire for an interactive command
 
 `notify.SKIP_COMMANDS` suppresses the obvious cases — editors, pagers,
@@ -194,8 +219,9 @@ Raising `SystemExit` is not a workaround: per the entry above, the
 redirect path re-raises it on the main thread and would take the shell
 down.
 
-Consequence for ported tools: every `awsut` leaf (`awsut.py` and
-`_awsut_sagemaker/`, both wrapped in `_awsut_common.guard`) prints
+Consequence for ported tools: every `awsut` leaf (`awsut.py`,
+`_awsut_sagemaker/` and `_awsut_agentcore/`, all wrapped in
+`_awsut_common.guard`) prints
 `error: …` to stderr and returns normally where the standalone
 `sm_jobs.py` / `sm_hub.py` scripts exited 1 or 2 —
 and where the `make` targets `studio` replaces failed the build.
