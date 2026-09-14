@@ -408,6 +408,15 @@ input:
    buffer on **every** exit path — accept, dismiss, Esc, or empty-close — so
    the redraw on return can never erase characters the user saw echoed.
 
+The invisible-picker problem is really "nothing left to render", so a caller
+that *can* render something opts out of rule 1 with `empty_placeholder=`. The
+`Ctrl+R` history search does: its query isn't a token in the buffer — it lives
+only inside the picker — so closing on the first non-matching keystroke would
+throw the whole query away, and the next keystroke after a query that matches
+nothing is almost always the Backspace that fixes it. With the placeholder set,
+the picker keeps a visible row reading `(no matches)`, the query survives, and
+Backspace widens the filter again.
+
 The **fallback to `FileCompleter`** only triggers when **no completer** is registered for that position. If a completer is registered but returns empty results, no fallback occurs — commands can explicitly declare "no completions here" by registering a completer that returns `[]`.
 
 ## Per-Argument Binding

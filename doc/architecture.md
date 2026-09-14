@@ -143,7 +143,7 @@ DIY raw-mode line editor. No prompt_toolkit or readline.
 
 Inline-rendered widgets anchored with DECSC/DECRC (no alternate screen). Cancel on SIGWINCH.
 
-- `InlinePicker` — single-select list; supports narrowing by typing, scrollbar, `meta_fn` labels (one string, or cells laid out as columns aligned across rows). `select_first=False` opens with no row highlighted (Enter → None); `closed_empty` reports "narrowed to zero candidates"; `typed` exposes the chars the picker echoed for the caller to commit
+- `InlinePicker` — single-select list; supports narrowing by typing, scrollbar, `meta_fn` labels (one string, or cells laid out as columns aligned across rows). `select_first=False` opens with no row highlighted (Enter → None); `closed_empty` reports "narrowed to zero candidates"; `empty_placeholder` keeps the picker open on zero candidates, rendering that text instead (used by `Ctrl+R`, whose query lives only in the picker); `typed` exposes the chars the picker echoed for the caller to commit
 - `InlineMultiPicker` — multi-select with Space; jump-to by letter; returns checked items (or the highlighted one, or None when neither); `select_first=False` as above
 - `InlineArgPrompt` — single-line text prompt for a flag's argument value
 

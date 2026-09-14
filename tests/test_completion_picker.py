@@ -6,7 +6,9 @@ Three rules are pinned here:
    the list instead of inserting the first candidate.
 2. A picker never stays open with zero candidates (it would render no rows
    while still eating keystrokes), and whatever the user typed while the
-   picker was up is committed to the line buffer on every exit path.
+   picker was up is committed to the line buffer on every exit path — unless
+   an ``empty_placeholder`` is set, which gives the picker something to render
+   so it can stay open and keep the query (Ctrl+R history search).
 3. Metadata handed over as ``Completion.fields`` is laid out in columns that
    align across rows, and a column no row fills takes up no width at all.
 """
@@ -108,6 +110,32 @@ def test_backspacing_to_zero_candidates_closes_picker(capsys):
     assert p.apply_backspace is False     # a buffer char must NOT be deleted
     assert p.typed == "a"
     capsys.readouterr()
+
+
+def test_empty_placeholder_keeps_picker_open_on_zero_candidates(capsys):
+    """Ctrl+R's search must survive a keyword that matches nothing."""
+    items = ["alpha", "beta"]
+    p = InlinePicker(
+        items,
+        select_first=False,
+        refresh_fn=lambda typed: ([i for i in items if typed in i], 0),
+        empty_placeholder="(no matches)",
+    )
+    assert p._handle_char("z") is False   # stays open
+    assert p.closed_empty is False
+    assert p._items == []
+    assert p.typed == "z"
+    # Backspacing back into a matching query recovers the rows.
+    assert p._handle_backspace() is False
+    assert p.closed_empty is False
+    assert p._items == items
+    assert p.typed == ""
+    capsys.readouterr()
+
+
+def test_empty_placeholder_is_rendered_instead_of_rows():
+    p = InlinePicker([], empty_placeholder="(no matches)")
+    assert "(no matches)" in p._format_placeholder()
 
 
 def test_tab_with_nothing_to_extend_leaves_selection_alone(capsys):

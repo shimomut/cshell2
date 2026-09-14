@@ -180,6 +180,9 @@ class InlinePicker(Generic[T]):
     onto the first/last row. When ``refresh_fn`` narrows the list to nothing
     the picker closes itself and sets ``closed_empty`` — an open-but-empty
     picker renders no rows, so it would swallow keystrokes invisibly.
+    ``empty_placeholder`` opts out of that: the picker stays open and renders
+    the placeholder text in place of the rows, so the text typed so far
+    survives and Backspace can widen the filter again (Ctrl+R history search).
     """
 
     def __init__(
@@ -205,6 +208,7 @@ class InlinePicker(Generic[T]):
         preview_height: int = 0,
         key_actions: dict[bytes, str] | None = None,
         select_first: bool = True,
+        empty_placeholder: str = "",
     ):
         self._items = items
         self._display_fn = display_fn
@@ -226,6 +230,7 @@ class InlinePicker(Generic[T]):
         self._preview_fn = preview_fn
         self._preview_height = max(0, preview_height) if preview_fn is not None else 0
         self._key_actions = dict(key_actions or {})
+        self._empty_placeholder = empty_placeholder
         # -1 means "no row highlighted"; it is also the state the selection
         # resets to whenever the list is re-filtered by typing.
         self._no_selection = 0 if select_first else -1
@@ -364,6 +369,8 @@ class InlinePicker(Generic[T]):
         label_col, meta_col, panel_w, meta_widths = self._compute_layout()
         has_scrollbar = len(self._items) > self._height
         sb_cells = self._scrollbar_cells() if has_scrollbar else []
+        if not visible and self._empty_placeholder:
+            out.append(self._format_placeholder())
         for i, item in enumerate(visible):
             out.append(
                 self._format_row(
@@ -406,6 +413,21 @@ class InlinePicker(Generic[T]):
 
         sys.stdout.write("".join(out))
         sys.stdout.flush()
+
+    def _format_placeholder(self) -> str:
+        """Render the ``empty_placeholder`` text as a single dim row.
+
+        Drawn instead of the rows when the filter matched nothing, so the
+        picker keeps a visible footprint (and thus stays credibly open) while
+        the user edits the query.
+        """
+        avail = max(1, self._cols - self._col)
+        text = _wcs_clip(self._empty_placeholder, avail)
+        s = get_color_scheme()
+        bg = _bg(*s.picker_row_bg) + _fg(*s.picker_row_fg)
+        col_move = f"\033[{self._col}C" if self._col > 0 else ""
+        width = max(self._min_width, _wcswidth(text))
+        return f"\r{col_move}{bg}\033[2m{_wcs_ljust(text, min(width, avail))}\033[22m\033[0m"
 
     def _format_preview(self, panel_w: int) -> str:
         """Render the preview pane: ``preview_height`` lines below the list."""
@@ -586,7 +608,7 @@ class InlinePicker(Generic[T]):
         if self._refresh_fn is not None:
             new_items, new_col = self._refresh_fn(self._typed)
             self._items = new_items
-            if not new_items:
+            if not new_items and not self._empty_placeholder:
                 # Nothing matches what's now typed. Keeping the picker open
                 # would leave it rendering zero rows while still eating keys —
                 # invisible but active. Close instead; the caller commits the
@@ -611,7 +633,7 @@ class InlinePicker(Generic[T]):
             if self._refresh_fn is not None:
                 new_items, new_col = self._refresh_fn(self._typed)
                 self._items = new_items
-                if not new_items:
+                if not new_items and not self._empty_placeholder:
                     self.closed_empty = True   # same rule as _handle_char
                     return True
                 if new_col != self._col:

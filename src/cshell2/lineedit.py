@@ -1211,6 +1211,10 @@ class LineEditor:
             refresh_fn=refresh,
             value_fn=None,  # disable tab-complete inside the search picker
             status_label="history search",
+            # A keyword that matches nothing must not tear the search down —
+            # the next keystroke is usually a Backspace fixing a typo, and
+            # closing here would throw the whole query away.
+            empty_placeholder="(no matches)",
         )
         with self._picker_session():
             selected = picker.run()
