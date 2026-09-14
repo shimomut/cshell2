@@ -115,7 +115,35 @@ Entry point. Reads input, parses lines, dispatches commands.
 - Runs external commands in PTY-backed subprocess slots (`process.py`)
 - Executes pipelines (`|`), sequences (`;`, `&&`, `||`), and redirections (`>`, `>>`, `<`, `2>`, `2>&1`)
 
-**Built-in commands:** `cd`, `exit`, `reload`, `var`, `unset`, `help`, `context`
+**Built-in commands:** `cd`, `exit`, `reload`, `var`, `alias`, `unalias`, `source-bash`, `help`, `context`
+(`var NAME=` unsets; there is no separate `unset`.)
+
+**`source-bash` — run a bash script, import what it left behind.** The escape
+hatch for anything bash can express and cshell2 can't (`$(…)`, `for`, heredocs,
+`if`) and for the common case of *pasting* a block of `export KEY=VALUE` lines:
+
+```
+source-bash                 # paste lines, end with a blank line or Ctrl+D
+source-bash setup.sh s3     # source a file with arguments
+source-bash -c 'export A=1'
+```
+
+The body runs in a child `bash` via `passthrough_run` (so a script that prompts
+for `sudo` or an MFA code still owns the terminal), and the child's **final
+environment and cwd are imported back** — the way bash's own `source` leaves
+them in the calling shell. The child writes a NUL-delimited
+`cwd\0KEY=VALUE\0…` dump to a temp file from an **EXIT trap** (not a trailing
+line), so a script ending in `exit 1` or dying under `set -e` still hands its
+environment over; an empty dump means "not imported" rather than "unset
+everything". Assignments are applied through `Shell._set_variable` /
+`_unset_variable`, so an imported variable is indistinguishable from one set
+with `var NAME=VALUE` (Var dispatch + per-context save/restore both apply).
+Bash bookkeeping (`_`, `SHLVL`, `PWD`, `OLDPWD`, `BASH_FUNC_*`, …) is skipped,
+removal is limited to plain-identifier keys, and the summary line prints
+variable **names only** — a sourced script is exactly where an
+`AWS_SESSION_TOKEN` comes from. `--no-cd` keeps the current directory, `-q`
+suppresses the summary. Shell functions, aliases and shell options cannot come
+back (cshell2 has no equivalent) — see `doc/limitations.md`.
 
 **Ctrl+] context switching:** The user can press `Ctrl+]` at the shell prompt (or during a running process) to open a TUI picker listing all contexts. Selecting a context with a live process resumes it immediately. While the picker is open, the focused context's last few lines of buffered output are previewed below the list, and the following action keys mutate the context list in place: `Ctrl+N` creates a new context (inheriting the current context's variables), `Ctrl+D` deletes the focused context (including the current one — the manager picks the next current automatically), `Ctrl+R` renames the focused context. Action keys refuse to delete a context with a live process or to leave fewer than one context. The shell tracks processes across context switches via `ProcessSlot` (see `process.py`).
 
@@ -1068,7 +1096,9 @@ cshell2/
 - Stderr redirect `2>` `2>>` `2>&1` ✅
 - Backslash line continuation `\` ✅ — handled in `shell.py` before execution; continuation lines collected with `"> "` prompt; full joined command stored as one history entry
 - Per-command env prefix `FOO=bar cmd args` ✅ — leading `KEY=VALUE` tokens apply only to that command's environment (`Shell._split_env_prefix`). External children get an explicit `env=`; Python `@registry.command`s get a temporary `os.environ` overlay via `Shell._temp_environ` (see the in-process caveat in that method's docstring). A line that is *only* assignments is still a permanent set; `make FOO=bar` keeps `FOO=bar` as an argument (scan stops at the command name).
-- Command substitution `$(…)` ❌ — not yet implemented
+- Command substitution `$(…)` ❌ — not yet implemented at the cshell2 prompt;
+  `source-bash` runs a body containing it in a real bash and imports the
+  resulting variables, which covers the pasted-snippet case
 
 **Tier 3 — Nice to have:** ❌ none yet
 - Background `&` (maps to auto context creation)

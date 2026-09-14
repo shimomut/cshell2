@@ -239,3 +239,35 @@ sentinel exception the slot understands) from `Command.invoke` through
 `_run_python_command_sync` and `PythonCommandSlot` into
 `_compute_exit_code` — worth doing, but it changes the contract for
 every Python command, not just these.
+
+## `source-bash` imports variables and the cwd — nothing else
+
+The dump the child bash writes is `env -0` plus `$PWD`, so what comes
+back is exactly what the *environment* can carry. Everything else a
+`source`d script can establish stays in the child and is lost when it
+exits:
+
+- **Shell functions and aliases.** Bash exports functions as
+  `BASH_FUNC_name%%` env entries in an encoding only bash understands;
+  they are skipped deliberately (`_BASH_ENV_SKIP_PREFIXES`) rather than
+  imported as nonsense variables. cshell2 has no shell-function concept
+  to import them *into*; `alias` exists but bash aliases are not exported
+  at all, so `source-bash` cannot see them. Net effect: sourcing a
+  `~/.bashrc`-style file gives you its variables and none of its
+  helpers.
+- **Shell options.** `set -o`/`shopt` state, `umask`, `ulimit`, and
+  non-exported (`local`/plain) variables are invisible to `env`.
+- **A script that installs its own EXIT trap** replaces the one that
+  writes the dump, so nothing is imported. This is reported
+  (`environment not imported`) rather than silently applied — the
+  alternative reading of an empty dump is "the script unset every
+  variable", which would wipe the shell's environment.
+
+Two smaller edges: the child's exit status is printed but cannot become
+the shell's, per *Python commands cannot report an exit status* above; and
+a key that bash cannot bind to a variable (`not-an-identifier=1`, put in
+the environment by some other program) is never *removed* on import,
+because its absence from the dump doesn't prove the script unset it.
+
+Windows needs a `bash` on `PATH` (Git Bash's, typically); without one the
+command reports `no 'bash' on PATH` and does nothing.

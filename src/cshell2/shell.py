@@ -10,10 +10,12 @@ import os
 import re
 import select
 import shlex
+import shutil
 import signal
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -1431,6 +1433,63 @@ class PipelineSlot(PythonCommandSlot):
         return _tail_lines_from_bytes(self._out_buffer.peek(), n)
 
 
+# ── source-bash: run a bash script, then import its environment ────────────
+#
+# The whole point of `source-bash` is the *import*: a child bash exits and
+# takes its `export`s with it, so the wrapper below arranges for the child to
+# dump its final environment and cwd where the parent can read them back.
+#
+# The dump is NUL-delimited (a value may contain newlines, but never a NUL)
+# with the cwd as the first record, and it is written from an EXIT trap rather
+# than a trailing line so a script that ends in `exit 1` — or dies under
+# `set -e` — still hands its environment back.
+_BASH_ENV_DUMP_WRAPPER = """\
+__cshell2_dump() {{ {{ printf '%s\\0' "$PWD"; env -0; }} > {dump} 2>/dev/null; }}
+trap __cshell2_dump EXIT
+{body}
+"""
+
+# Bash bookkeeping that says nothing about the script's intent.  `_` holds the
+# last argument of the last command, `SHLVL` counts nesting, `PWD`/`OLDPWD` are
+# handled as the cwd instead, and `BASH_FUNC_*` are exported shell functions in
+# an encoding only bash understands.
+_BASH_ENV_SKIP = frozenset({
+    "_", "PWD", "OLDPWD", "SHLVL", "BASHOPTS", "SHELLOPTS",
+    "BASH_EXECUTION_STRING",
+})
+_BASH_ENV_SKIP_PREFIXES = ("BASH_FUNC_",)
+
+# Only plain identifiers are considered for *removal*.  A key bash cannot bind
+# to a variable (`foo-bar=1`, put in the environment by some other program) may
+# be missing from the dump without the script having unset anything.
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _bash_env_ignored(key: str) -> bool:
+    """True when *key* must not be imported back from a bash environment dump."""
+    return key in _BASH_ENV_SKIP or key.startswith(_BASH_ENV_SKIP_PREFIXES)
+
+
+def _parse_bash_env_dump(data: str) -> tuple[str | None, dict[str, str]]:
+    """Split a NUL-delimited ``cwd\\0KEY=VALUE\\0…`` dump into (cwd, env).
+
+    Returns ``(None, {})`` for an empty dump — which is how the caller learns
+    the child never reached its EXIT trap (killed, or the script installed a
+    trap of its own).
+    """
+    records = data.split("\0")
+    if records and records[-1] == "":
+        records.pop()
+    if not records:
+        return None, {}
+    env: dict[str, str] = {}
+    for record in records[1:]:
+        key, sep, value = record.partition("=")
+        if sep and key:
+            env[key] = value
+    return records[0], env
+
+
 class Shell:
     def __init__(self):
         # Enable VT output / disable newline translation (Windows) before any
@@ -2088,6 +2147,78 @@ class Shell:
                     print(f"var: invalid argument '{assignment}' (expected NAME=VALUE or NAME= to unset)")
 
         @self.registry.command(
+            name="source-bash",
+            help=(
+                "Run a bash script and import its environment into this shell.\n\n"
+                "  source-bash                 paste lines, end with a blank line or Ctrl+D\n"
+                "  source-bash FILE [ARG…]     source FILE with the given arguments\n"
+                "  source-bash -c 'TEXT'       run TEXT\n\n"
+                "The script runs in a real bash — so `export`, `$(…)`, loops,\n"
+                "heredocs and conditionals all behave as they do in bash — and its\n"
+                "final environment and working directory are imported back here,\n"
+                "the way bash's own `source` leaves them in the calling shell.\n\n"
+                "Shell functions, aliases and shell options cannot be imported\n"
+                "(cshell2 has no equivalent); only variables and the cwd come back."
+            ),
+            params=[
+                arg("script", nargs="*", metavar="FILE|ARG", completer=FileCompleter()),
+                arg("-c", "--command", metavar="TEXT",
+                    help="run TEXT instead of a file"),
+                arg("--no-cd", action="store_true",
+                    help="keep the current directory, whatever the script left"),
+                arg("-q", "--quiet", action="store_true",
+                    help="don't print the summary of imported variables"),
+            ],
+        )
+        def source_bash_cmd(script, command, no_cd, quiet):
+            if command is not None and script:
+                print("source-bash: -c takes the whole script; don't pass a FILE too")
+                return
+            if command is not None:
+                body = command
+            elif script:
+                path = os.path.expanduser(script[0])
+                if not os.path.isfile(path):
+                    print(f"source-bash: {script[0]}: no such file")
+                    return
+                body = " ".join(shlex.quote(a) for a in ["source", path, *script[1:]])
+            else:
+                body = passthrough_input_block(
+                    "Paste bash lines; end with a blank line or Ctrl+D:\n"
+                )
+                if not body.strip():
+                    print("source-bash: nothing to run")
+                    return
+
+            code, cwd, env = self._run_bash_script(body)
+            if cwd is None:
+                # No dump: the script replaced our EXIT trap, or bash died
+                # before running it.  Importing an empty environment here
+                # would unset everything the shell has.
+                print("source-bash: environment not imported (script did not exit normally)")
+                if code != 0:
+                    print(f"source-bash: exit status {code}")
+                return
+
+            changed, removed, new_cwd = self._apply_bash_env(
+                cwd, env, import_cwd=not no_cd
+            )
+            if code != 0:
+                print(f"source-bash: exit status {code}")
+            if quiet:
+                return
+            # Names only, never values — a sourced script is exactly where an
+            # AWS_SESSION_TOKEN comes from, and this line lands in the scrollback.
+            parts = []
+            if changed:
+                parts.append(f"set: {', '.join(changed)}")
+            if removed:
+                parts.append(f"unset: {', '.join(removed)}")
+            if new_cwd:
+                parts.append(f"cwd: {new_cwd}")
+            print(f"source-bash: {'; '.join(parts)}" if parts else "source-bash: no changes")
+
+        @self.registry.command(
             name="alias",
             help=(
                 "Define or list command aliases.\n\n"
@@ -2414,6 +2545,81 @@ class Shell:
                     ctx.variables[env_key] = os.environ.get(env_key, value)
         else:
             self.context_manager.set_variable(key, value)
+
+    def _run_bash_script(self, body: str) -> tuple[int, str | None, dict[str, str]]:
+        """Run *body* in a child bash and read back its final cwd + environment.
+
+        Returns ``(exit_code, cwd, env)``.  ``cwd`` is None (and ``env`` empty)
+        when the child never reached the dump — the caller reports that rather
+        than importing an empty environment over the live one.
+
+        The child runs through :func:`passthrough_run` so a script that prompts
+        (``sudo``, an MFA code, ``read -p``) still owns the terminal, and the
+        dump goes to a temp *file* rather than an extra fd so nothing has to be
+        multiplexed alongside the script's own stdout.
+        """
+        bash = shutil.which("bash")
+        if bash is None:
+            print("source-bash: no 'bash' on PATH")
+            return 127, None, {}
+
+        fd, dump_path = tempfile.mkstemp(prefix="cshell2-env-")
+        os.close(fd)
+        try:
+            script = _BASH_ENV_DUMP_WRAPPER.format(
+                dump=shlex.quote(dump_path), body=body
+            )
+            code = passthrough_run([bash, "-c", script])
+            try:
+                data = Path(dump_path).read_text(errors="replace")
+            except OSError:
+                data = ""
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(dump_path)
+
+        cwd, env = _parse_bash_env_dump(data)
+        return code, cwd, env
+
+    def _apply_bash_env(
+        self, cwd: str | None, env: dict[str, str], *, import_cwd: bool = True
+    ) -> tuple[list[str], list[str], str | None]:
+        """Import a bash dump into this shell: set, unset, and chdir.
+
+        Assignments go through :meth:`_set_variable` / :meth:`_unset_variable`
+        so a Var-backed name and the current context's save/restore table see
+        the change — an imported variable is indistinguishable from one set
+        with ``var NAME=VALUE``.
+
+        Returns ``(set_names, unset_names, new_cwd)`` for the caller's summary;
+        ``new_cwd`` is None when the directory did not change.
+        """
+        changed: list[str] = []
+        for key, value in env.items():
+            if _bash_env_ignored(key):
+                continue
+            if os.environ.get(key) != value:
+                self._set_variable(key, value)
+                changed.append(key)
+
+        removed: list[str] = []
+        for key in list(os.environ):
+            if key in env or _bash_env_ignored(key) or not _ENV_NAME_RE.match(key):
+                continue
+            self._unset_variable(key)
+            removed.append(key)
+
+        new_cwd = None
+        if import_cwd and cwd and os.path.realpath(cwd) != os.path.realpath(os.getcwd()):
+            try:
+                os.chdir(cwd)
+            except OSError as e:
+                print(f"source-bash: cannot enter {cwd}: {e}")
+            else:
+                os.environ["PWD"] = os.getcwd()
+                new_cwd = os.getcwd()
+
+        return sorted(changed), sorted(removed), new_cwd
 
     def _execute(self, line: str) -> None:
         try:
