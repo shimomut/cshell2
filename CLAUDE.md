@@ -650,6 +650,10 @@ Outside a Python command thread (e.g. inside a synchronous handler that doesn't 
 
 **Reading a line of input from the user.** `input()` from a Python command body has the same race as `subprocess.run` — the main thread is also reading stdin in raw mode, so most keystrokes are lost and Enter arrives as `\r` with no echo. Use `cshell2.passthrough_input(prompt)` instead: the slot signals the main loop to restore cooked terminal mode and stop reading stdin for the duration of the call, then takes it back. Built-in commands like `exit`'s "Exit anyway? [y/N]" confirmation use this. Outside a Python command thread, `passthrough_input` falls through to plain `input()`.
 
+**Reading a pasted block.** `cshell2.passthrough_input_block(prompt)` reads lines until a blank line or Ctrl+D and returns them joined by `\n`. `awsut credentials set` uses it to take `export AWS_ACCESS_KEY_ID=…` lines pasted from a console.
+
+It does *not* go through cooked mode, and that is the whole point. Two things rule that out: looping over `passthrough_input` loses the tail of a paste (between calls the main loop takes stdin back into raw mode, so bytes still in the tty buffer are read as keystrokes), and the kernel's canonical line buffer is capped at `MAX_CANON` — 1024 bytes on macOS, where an over-long line is **discarded whole**, which a pasted `AWS_SESSION_TOKEN` line exceeds on its own. So `_run_input_block` reads off the raw key stream the forwarding loop already feeds (`slot.poll_key`) and does the echo, CRLF folding, backspace, and blank-line detection itself. `passthrough_input` keeps the cooked-mode path: short answers never approach `MAX_CANON`, and the kernel's line editing is free there.
+
 **When you don't need it.** Three cases that look like subprocesses but don't race for stdin:
 
 1. **Non-interactive subprocesses** (`subprocess.run(..., capture_output=True)`, `$()` substitution, completer queries that shell out to `git`/`docker`/`aws`). The child doesn't read fd 0, so there's no race. Plain `subprocess.run` is fine.

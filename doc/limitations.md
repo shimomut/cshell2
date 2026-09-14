@@ -52,11 +52,19 @@ I/O won't notice — Python doesn't support cancelling a thread. If a
 command wants to be interruptible without I/O, it needs to check for
 some flag or use `signal.set_wakeup_fd`-style coordination itself.
 
-**`passthrough_run` / `passthrough_input` are not usable in piped Python
-commands** — stdin/stdout are wired to pipes, not the terminal, so
+**`passthrough_run` / `passthrough_input` / `passthrough_input_block` are not
+usable in piped Python commands** — stdin/stdout are wired to pipes, not the terminal, so
 those helpers can't do their job. They raise `RuntimeError` if called
 from inside a pipeline thread. Use plain `subprocess.run` (with the
 `stdout=sys.stdout` workaround above) for non-interactive children.
+
+**`passthrough_input` can't read a line at or above `MAX_CANON`** (1024
+bytes on macOS). It reads in the terminal's cooked mode, and the line
+discipline discards an over-long line entirely rather than truncating it
+— the caller sees nothing, not a partial line. Fine for the y/N answers
+it exists for; use `passthrough_input_block`, which reads off the raw key
+stream, for anything a user might *paste* (a session token, a policy
+document, a URL with a long query). Line editing there is backspace only.
 
 **`SystemExit` raised in a redirected single-stage Python command still
 exits the shell.** `exit > log` exits the shell because the redirect

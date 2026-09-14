@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import ctypes
 import io
@@ -474,6 +475,55 @@ def passthrough_input(prompt: str = "") -> str:
     return slot._run_input(prompt)
 
 
+def _stdin_is_tty() -> bool:
+    """True when real stdin is a terminal — i.e. a key stream exists to read."""
+    try:
+        return os.isatty(sys.stdin.fileno())
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def passthrough_input_block(prompt: str = "") -> str:
+    """Read a *block* of lines from real stdin, ending at a blank line or EOF.
+
+    The multi-line sibling of :func:`passthrough_input`, for commands whose
+    input is pasted rather than typed (a set of ``export KEY=…`` lines, a
+    policy document, …).  Two things rule out looping over
+    ``passthrough_input``: between two calls the main forwarding loop takes
+    stdin back into raw mode, so the tail of a paste still in the tty buffer
+    is read as keystrokes instead of input — and the cooked mode each call
+    asks for caps a line at ``MAX_CANON``, which a pasted session token
+    exceeds.  This reads the block off the raw key stream instead; see
+    :meth:`PythonCommandSlot._run_input_block`.
+
+    Returns the lines joined by ``\\n``, without the terminating blank line
+    (so an immediate blank line or Ctrl+D yields ``""``).  Outside a Python
+    command thread — or with stdin not a terminal — falls back to reading
+    :data:`sys.stdin` line by line.
+    """
+    if getattr(_in_pipeline, "flag", False):
+        raise RuntimeError(
+            "passthrough_input_block cannot be used inside a piped Python command "
+            "(stdin/stdout are wired to pipes, not the terminal)"
+        )
+    slot = getattr(_current_slot, "slot", None)
+    if slot is not None and _stdin_is_tty():
+        return slot._run_input_block(prompt)
+    if prompt:
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+    lines: list[str] = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        if not line.strip():
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+
 class PythonCommandSlot(ExitCallbackMixin):
     """Manages a Python @registry.command running in a background thread.
 
@@ -875,6 +925,12 @@ class PythonCommandSlot(ExitCallbackMixin):
         editing (backspace, delete-word, etc.) and ``select`` reports the
         fd readable only once the user hits Enter.  That gives us full line
         editing without reimplementing it.
+
+        The kernel's line buffer is also the limit of this method: a line at
+        or above ``MAX_CANON`` (1024 bytes on macOS) is discarded by the line
+        discipline, not truncated.  Prompts answered by a word or two never
+        approach it; :meth:`_run_input_block`, which has to take a pasted
+        credential block, reads raw for exactly that reason.
         """
         import select as _select
         # Drain pending output so the prompt isn't preceded by buffered text.
@@ -922,6 +978,81 @@ class PythonCommandSlot(ExitCallbackMixin):
             self._proxy.activate(raw_mode=True)
             if self._err_proxy:
                 self._err_proxy.activate(raw_mode=True)
+
+    def _run_input_block(self, prompt: str = "") -> str:
+        """Read lines until a blank line or Ctrl+D, off the raw key stream.
+
+        Not a loop around :meth:`_run_input`, and not a cooked-mode read at
+        all, because the terminal's canonical line buffer is too small for
+        what this is for: at ``MAX_CANON`` (1024 bytes on macOS) the line
+        discipline throws the *whole* over-long line away rather than
+        truncating it, and one pasted ``export AWS_SESSION_TOKEN=…`` line
+        clears that on its own.  So the block is read in the raw mode the
+        forwarding loop already holds — no line discipline in the way — and
+        the echo and line assembly the kernel would have done happen here.
+
+        Bytes arrive through :meth:`poll_key`, which is fed by the main
+        loop's stdin reader, so a paste that lands before the first poll is
+        already buffered rather than lost.  Line editing is deliberately
+        minimal (backspace only): this reads pasted text, not typed text.
+        """
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        lines: list[str] = []
+        current: list[str] = []
+        in_escape = False
+        after_cr = False
+
+        def echo(text: str) -> None:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+
+        if prompt:
+            echo(prompt)
+
+        while True:
+            # A bounded wait, so an injected KeyboardInterrupt (slot.kill()
+            # on Ctrl+C) lands between calls instead of blocking in C.
+            data = self.poll_key(0.2)
+            if not data:
+                continue
+            for ch in decoder.decode(data):
+                if in_escape:
+                    # Swallow the rest of an escape sequence — arrow keys and
+                    # the terminal's bracketed-paste markers alike.
+                    if ch.isalpha() or ch == "~":
+                        in_escape = False
+                    continue
+                if ch == "\x1b":
+                    in_escape = True
+                    continue
+                if ch == "\x03":
+                    raise KeyboardInterrupt
+                if ch == "\x04":                     # Ctrl+D — end the block
+                    if current:
+                        lines.append("".join(current))
+                    return "\n".join(lines)
+                if ch in ("\r", "\n"):
+                    # CRLF in pasted text is one line ending, not two.
+                    if ch == "\n" and after_cr:
+                        continue
+                    after_cr = ch == "\r"
+                    echo("\n")
+                    line = "".join(current)
+                    current = []
+                    if not line.strip():
+                        return "\n".join(lines)
+                    lines.append(line)
+                    continue
+                after_cr = False
+                if ch in ("\x7f", "\x08"):
+                    if current:
+                        current.pop()
+                        echo("\b \b")
+                    continue
+                if ch < " " and ch != "\t":
+                    continue                          # other C0 controls
+                current.append(ch)
+                echo(ch)
 
 
 _DEFAULT_CONFIG_PATH = Path(__file__).parent / "_config.py"

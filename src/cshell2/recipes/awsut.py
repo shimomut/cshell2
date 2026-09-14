@@ -3,6 +3,8 @@
 Provides the ``awsut`` command tree:
 
 * ``awsut console <page>``           — open a Management Console URL
+* ``awsut credentials set``          — write pasted ``export AWS_…`` lines into
+  a ``~/.aws/credentials`` profile
 * ``awsut recent-cost``              — show recent AWS cost
 * ``awsut ec2 list|start|stop|reboot``
 * ``awsut logs list|monitor|export``
@@ -65,8 +67,9 @@ from typing import Callable
 import boto3
 
 from ..commands import registry as command_registry, arg
-from ..completion import Completer, Completion, CompletionContext
+from ..completion import Completer, Completion, CompletionContext, FileCompleter
 from ..completion_cache import aws_env_key, get_or_fetch
+from ..shell import passthrough_input_block
 from ..variables import Var, registry as var_registry
 from ._awsut_common import (
     RED,
@@ -77,9 +80,11 @@ from ._awsut_common import (
     fmt_time,
     guard,
     print_header,
+    print_labeled,
     print_table,
     section,
 )
+from .aws import AwsProfileCompleter
 
 
 # ─── User-customisable module-level config ──────────────────────────────────
@@ -195,6 +200,174 @@ def _print_json(obj) -> None:
         except Exception:
             pass
     print(text)
+
+
+# ─── ~/.aws/credentials writing (used by `awsut credentials set`) ───────────
+#
+# The console's "get credentials" panel — and isengardcli, and `aws sso`, and
+# every internal wrapper around them — hands out the same three shell lines.
+# These helpers turn a pasted block of them into a credentials-file profile.
+
+CREDENTIALS_PATH = "~/.aws/credentials"
+
+# Env var name → credentials-file key.  Both spellings of a value map to the
+# one key the file uses, so a paste that carries either (or both) lands right.
+_CREDENTIAL_KEYS: dict[str, str] = {
+    "AWS_ACCESS_KEY_ID":     "aws_access_key_id",
+    "AWS_SECRET_ACCESS_KEY": "aws_secret_access_key",
+    "AWS_SESSION_TOKEN":     "aws_session_token",
+    "AWS_SECURITY_TOKEN":    "aws_session_token",
+    "AWS_REGION":            "region",
+    "AWS_DEFAULT_REGION":    "region",
+}
+
+# Recognised but deliberately *not* written: no SDK reads an expiry key out of
+# the credentials file, so it would be dead weight there.  Reported instead.
+_EXPIRATION_KEYS = ("AWS_SESSION_EXPIRATION", "AWS_CREDENTIAL_EXPIRATION")
+
+_ASSIGNMENT_RE = re.compile(
+    r"""^\s*
+        (?:export\s+|set\s+|setenv\s+|\$env:)?    # sh / csh / PowerShell prefix
+        (?P<name>[A-Za-z_][A-Za-z0-9_]*)
+        \s*=\s*
+        (?P<value>.*?)
+        \s*;?\s*$                                  # optional trailing semicolon
+    """,
+    re.VERBOSE,
+)
+
+
+def _unquote(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    return value
+
+
+def parse_credential_exports(text: str) -> tuple[dict[str, str], dict[str, str], list[str]]:
+    """Split a pasted credentials block into what to write and what to say.
+
+    Returns ``(values, extras, unknown)``: *values* keyed by credentials-file
+    key (ready to write), *extras* the recognised-but-not-written names (the
+    expiry), and *unknown* every other assignment found, so the command can
+    say what it ignored rather than silently dropping it.
+
+    Accepts the shapes the same three lines arrive in — ``export K="v"``,
+    ``set K=v``, ``$env:K="v"``, bare ``K=v``, and the credentials file's own
+    ``aws_access_key_id = v`` — and ignores blank and ``#`` comment lines.
+    """
+    values: dict[str, str] = {}
+    extras: dict[str, str] = {}
+    unknown: list[str] = []
+    lower_keys = {v: v for v in _CREDENTIAL_KEYS.values()}
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("["):
+            continue
+        m = _ASSIGNMENT_RE.match(stripped)
+        if not m:
+            continue
+        name = m.group("name")
+        value = _unquote(m.group("value"))
+        if not value:
+            continue
+        if name.upper() in _CREDENTIAL_KEYS:
+            values[_CREDENTIAL_KEYS[name.upper()]] = value
+        elif name.lower() in lower_keys:
+            values[lower_keys[name.lower()]] = value
+        elif name.upper() in _EXPIRATION_KEYS:
+            extras[name.upper()] = value
+        else:
+            unknown.append(name)
+    return values, extras, unknown
+
+
+def write_credentials_profile(path: str, profile: str,
+                              values: dict[str, str]) -> bool:
+    """Write *values* into ``[profile]`` of *path*.  Returns True if created.
+
+    An edit in place, not a rewrite: only the keys being set are touched, so
+    every other profile, every unrelated key inside this one, and the file's
+    comments and blank lines survive.  ``configparser`` would drop the
+    comments — a credentials file is hand-maintained, so it keeps them.
+
+    The new file is written beside the old one and renamed over it at mode
+    0600, so a crash mid-write can't leave a half-file of secrets behind and
+    the result is never world-readable.
+    """
+    path = os.path.expanduser(path)
+    try:
+        with open(path) as fd:
+            lines = fd.read().splitlines()
+    except FileNotFoundError:
+        lines = []
+        created = True
+    else:
+        created = False
+
+    header_re = re.compile(r"^\s*\[(?P<name>[^\]]+)\]\s*$")
+    start = None
+    for i, line in enumerate(lines):
+        m = header_re.match(line)
+        if m and m.group("name").strip() == profile:
+            start = i
+            break
+
+    if start is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(f"[{profile}]")
+        lines.extend(f"{k} = {v}" for k, v in values.items())
+    else:
+        end = len(lines)
+        for i in range(start + 1, len(lines)):
+            if header_re.match(lines[i]):
+                end = i
+                break
+        remaining = dict(values)
+        body: list[str] = []
+        for line in lines[start + 1:end]:
+            m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+            key = m.group(1).lower() if m else None
+            if key in values:
+                # First occurrence carries the new value; later duplicates of
+                # the same key would shadow it, so they go.
+                if key in remaining:
+                    body.append(f"{key} = {remaining.pop(key)}")
+                continue
+            body.append(line)
+        insert_at = len(body)
+        while insert_at > 0 and not body[insert_at - 1].strip():
+            insert_at -= 1
+        for k, v in remaining.items():
+            body.insert(insert_at, f"{k} = {v}")
+            insert_at += 1
+        lines[start + 1:end] = body
+
+    text = "\n".join(lines) + "\n"
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    tmp = os.path.join(directory, f".{os.path.basename(path)}.cshell2.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as out:
+            out.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.chmod(path, 0o600)
+    return created
+
+
+def _mask(value: str) -> str:
+    """Show enough of a secret to recognise it, not enough to use it."""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}{'*' * 8}{value[-4:]}"
 
 
 # ─── progress dots used by `cloudformation watch` ───────────────────────────
@@ -518,6 +691,7 @@ def register() -> None:
     awsut = command_registry.command("awsut", help="AWS utility commands")
 
     _register_console(awsut)
+    _register_credentials(awsut)
     _register_recent_cost(awsut)
     _register_ec2(awsut)
     _register_logs(awsut)
@@ -566,6 +740,62 @@ def _register_console(awsut) -> None:
 
         print(f"Opening {url}")
         webbrowser.open(url)
+
+
+def _register_credentials(awsut) -> None:
+    credentials = awsut.command("credentials", help="Local credentials file")
+
+    @credentials.command(
+        "set",
+        help="Update ~/.aws/credentials from a pasted block of export lines",
+        params=[
+            arg("profile", nargs="?", metavar="PROFILE",
+                completer=AwsProfileCompleter(),
+                help="Profile to write (default: $AWS_PROFILE, else 'default')"),
+            arg("--file", default=CREDENTIALS_PATH, metavar="PATH",
+                dest="file", completer=FileCompleter(),
+                help=f"Credentials file to update (default: {CREDENTIALS_PATH})"),
+            arg("-n", "--dry-run", action="store_true",
+                help="Show what would be written, don't touch the file"),
+        ],
+    )
+    @guard
+    def _credentials_set(profile=None, file=CREDENTIALS_PATH, dry_run=False):
+        profile = profile or _get_profile()
+        print(f"Paste the credentials for profile [{profile}], "
+              f"then press Enter on an empty line (Ctrl+C to cancel):")
+        try:
+            text = passthrough_input_block()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            raise SmError("cancelled — nothing written")
+
+        values, extras, unknown = parse_credential_exports(text)
+        if not values:
+            raise SmError("no AWS credential assignments found in the pasted text")
+        missing = [k for k in ("aws_access_key_id", "aws_secret_access_key")
+                   if k not in values]
+        if missing:
+            raise SmError(f"incomplete credentials — missing {', '.join(missing)}")
+
+        print_labeled(
+            [("profile", profile), ("file", file)]
+            + [(k, v if k == "region" else _mask(v)) for k, v in values.items()]
+            + [(k.lower(), v) for k, v in extras.items()]
+        )
+        if unknown:
+            print(f"ignored: {', '.join(sorted(set(unknown)))}")
+
+        if dry_run:
+            print("\ndry run — file unchanged")
+            return
+
+        created = write_credentials_profile(file, profile, values)
+        verb = "created" if created else "updated"
+        print(f"\n{verb} [{profile}] in {file}")
+        if profile != _get_profile():
+            print(f"(current profile is {_get_profile()!r} — "
+                  f"switch with `var aws_profile={profile}`)")
 
 
 def _register_recent_cost(awsut) -> None:
